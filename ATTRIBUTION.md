@@ -31,10 +31,11 @@ keep the SPDX headers and copyright notices of their origin.
 
 ### LemLib — https://github.com/LemLib/LemLib
 - License: **MIT**
-- Used for: small, self-contained control utilities ported to source form —
-  `ExitCondition` and `ExpoDriveCurve`.
-- Only available locally as a prebuilt `LemLib.a` plus headers, so these pieces
-  are ported rather than linked. Ported files carry a LemLib MIT notice.
+- Used for: `ExitCondition` (debounced settle check) ported to source form.
+- `ExpoDriveCurve` was deliberately **not** ported — FBLib's `DriveCurve` already
+  covers it and is wired into `ChassisConfig`.
+- Only available locally as a prebuilt `LemLib.a` plus headers, so this piece is
+  ported rather than linked. Ported files carry a LemLib MIT notice.
 
 ## Toolchain dependencies (unmodified, not vendored into AaronLib)
 
