@@ -7,3 +7,4 @@
 #include "AaronLib/Util/pid.hpp"
 #include "AaronLib/Util/exitcondition.hpp"
 #include "AaronLib/Util/FastTrig.hpp"
+#include "AaronLib/Util/ScaledIMU.hpp"
