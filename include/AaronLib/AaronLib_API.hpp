@@ -16,3 +16,11 @@
 #include "AaronLib/Tracking/Odom_Tracking.hpp"
 #include "AaronLib/Tracking/RCL_Tracking.hpp"
 #include "AaronLib/Tracking/MCL_Tracking.hpp"
+
+#include "AaronLib/Movement_Control/MoveToPoint.hpp"
+#include "AaronLib/Movement_Control/TurnToPoint.hpp"
+#include "AaronLib/Movement_Control/Arc.hpp"
+#include "AaronLib/Movement_Control/Boomerang.hpp"
+#include "AaronLib/Movement_Control/RAMSETE.hpp"
+#include "AaronLib/Movement_Control/Velocity_Profiles.hpp"
+#include "AaronLib/Movement_Control/Feedforward.hpp"
