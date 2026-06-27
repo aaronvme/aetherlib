@@ -60,6 +60,11 @@ struct ChassisConfig {
     // Index corresponds to distanceSensors index. Leave zero for unused sensors.
     std::array<Pose, MAX_DISTANCE_SENSORS> sensorMounts{};
 
+    // How long a motion's settle condition must hold continuously before the
+    // motion exits. 0 exits on the first sample inside tolerance, which can
+    // trigger while still carrying velocity through the target.
+    uint32_t settleTimeMs{0};
+
     // Tracking
     bool useMclTracking{false};
     bool useRclTracking{false};

@@ -326,6 +326,10 @@ void Chassis::executeCurrentMotion() {
     // Dry-run runs offline (no wall-clock waits); time advances in simulated 10 ms steps
     uint32_t dryRunSteps = 0;
 
+    // Settle debounce state (see ChassisConfig::settleTimeMs)
+    bool settleStarted = false;
+    uint32_t settleStartElapsed = 0;
+
     while (mMotionRunning && !mMotionCancelled) {
         // Odometry freshness is provided by the background odometry task — do
         // NOT call mOdom.update() here (it would race and consume deltas).
@@ -334,6 +338,7 @@ void Chassis::executeCurrentMotion() {
         float lateralOut = 0.0f, angularOut = 0.0f;
         float customLeft = 0.0f, customRight = 0.0f;
         bool settled = false;
+        bool exitNow = false;          // timeout / degenerate input: never debounced
         bool useCustomOutput = false;  // Swing / RAMSETE set their own motor outputs
         float latLimit = 127.0f;       // max lateral output (±)
         float angLimit = 127.0f;       // max angular output (±)
@@ -539,7 +544,7 @@ void Chassis::executeCurrentMotion() {
 
             const auto& path = req.ramsetePath;
             if (path.size() < 2) {
-                settled = true;
+                exitNow = true;
                 break;
             }
 
@@ -715,10 +720,22 @@ void Chassis::executeCurrentMotion() {
         uint32_t elapsed = mDryRun ? (dryRunSteps * 10u)
                                    : (pros::millis() - req.startTime);
         if (req.timeout > 0 && elapsed > req.timeout) {
-            settled = true;
+            exitNow = true;
         }
 
-        if (settled) break;
+        if (exitNow) break;
+
+        // Require the settle condition to hold for settleTimeMs. At the default
+        // of 0 this exits on the first sample, matching the original behaviour.
+        if (settled) {
+            if (!settleStarted) {
+                settleStarted = true;
+                settleStartElapsed = elapsed;
+            }
+            if (elapsed - settleStartElapsed >= mConfig.settleTimeMs) break;
+        } else {
+            settleStarted = false;
+        }
 
         if (mDryRun) {
             if (++dryRunSteps > 6000u) break;   // cap: 60 s of simulated time
