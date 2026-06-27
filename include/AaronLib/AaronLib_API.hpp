@@ -24,3 +24,5 @@
 #include "AaronLib/Movement_Control/RAMSETE.hpp"
 #include "AaronLib/Movement_Control/Velocity_Profiles.hpp"
 #include "AaronLib/Movement_Control/Feedforward.hpp"
+
+#include "AaronLib/Chassis.hpp"
