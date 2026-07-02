@@ -26,3 +26,4 @@
 #include "AaronLib/Movement_Control/Feedforward.hpp"
 
 #include "AaronLib/Chassis.hpp"
+#include "AaronLib/Util/Sensor_Calibrator.hpp"
