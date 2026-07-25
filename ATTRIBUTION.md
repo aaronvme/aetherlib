@@ -41,5 +41,7 @@ keep the SPDX headers and copyright notices of their origin.
 
 - **PROS kernel** 4.2.2 — MPL-2.0, Copyright (c) Purdue University ACM SIGBots.
 - **LVGL** (`liblvgl` 9.2.0) — MIT.
-- **Eigen** — MPL-2.0. Vendored under `include/Eigen/` when the LTV follower is
-  added; upstream headers are unmodified.
+- **Eigen** — MPL-2.0. Vendored unmodified under `include/Eigen/` (374 files),
+  copied from the 1516X source tree for the LTV follower. Per-file MPL-2.0
+  notices are intact; note that 1516X's copy does not include Eigen's
+  `COPYING.*` files, so those are absent here too.
