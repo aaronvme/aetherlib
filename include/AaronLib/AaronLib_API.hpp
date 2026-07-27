@@ -29,3 +29,5 @@
 #include "AaronLib/Util/Sensor_Calibrator.hpp"
 #include "AaronLib/Movement_Control/VelocityController.hpp"
 #include "AaronLib/Movement_Control/LTV.hpp"
+
+#include "AaronLib/Auton_Selector/AutonSelector.hpp"
