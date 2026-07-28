@@ -300,14 +300,14 @@ void LTVPathFollower::followPathImpl(const std::string& path_name, const ltvConf
         DrivetrainVoltages output_voltages =
             controller.update(v_cmd, w_cmd, left_actual_mps, right_actual_mps);
 
-        output_voltages.rightVoltage = clamp(output_voltages.rightVoltage, -12.0, 12.0);
-        output_voltages.leftVoltage = clamp(output_voltages.leftVoltage, -12.0, 12.0);
+        output_voltages.right = clamp(output_voltages.right, -12.0, 12.0);
+        output_voltages.left = clamp(output_voltages.left, -12.0, 12.0);
 
         if (mDrivetrain.rightMotors != nullptr) {
-            mDrivetrain.rightMotors->move_voltage(output_voltages.rightVoltage * 1000.0);
+            mDrivetrain.rightMotors->move_voltage(output_voltages.rightMillivolts());
         }
         if (mDrivetrain.leftMotors != nullptr) {
-            mDrivetrain.leftMotors->move_voltage(output_voltages.leftVoltage * 1000.0);
+            mDrivetrain.leftMotors->move_voltage(output_voltages.leftMillivolts());
         }
 
         if (l_config.log) {

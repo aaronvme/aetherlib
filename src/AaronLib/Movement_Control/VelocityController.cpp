@@ -78,7 +78,7 @@ DrivetrainVoltages VoltageController::update(double targetLinearVelocity,
 
     prevLeftError = leftError;
     prevRightError = rightError;
-    return {leftVoltage, rightVoltage};
+    return {static_cast<float>(leftVoltage), static_cast<float>(rightVoltage)};
 }
 
 }  // namespace AARONLIB

@@ -1,6 +1,8 @@
 // Ported from FBLib - https://github.com/jiazegao/FBLib
 #pragma once
 
+#include "AaronLib/Drivetrain.hpp"
+
 namespace AARONLIB {
 
 // ============================================================================
@@ -62,26 +64,7 @@ struct FeedforwardGains {
     float integralClamp{0.0f};
 };
 
-// ============================================================================
-// DrivetrainVoltages — controller output
-// ============================================================================
-
-struct DrivetrainVoltages {
-    float left{0.0f};    // volts, [-maxVoltage, +maxVoltage]
-    float right{0.0f};   // volts
-
-    /// Millivolts, for pros::Motor::move_voltage().
-    float leftMillivolts() const { return left * 1000.0f; }
-    float rightMillivolts() const { return right * 1000.0f; }
-
-    /// The -127..127 range used by Drivetrain::setVoltage().
-    float leftPower(float maxVoltage = 12.0f) const {
-        return (left / maxVoltage) * 127.0f;
-    }
-    float rightPower(float maxVoltage = 12.0f) const {
-        return (right / maxVoltage) * 127.0f;
-    }
-};
+// DrivetrainVoltages lives in Drivetrain.hpp — shared with VoltageController.
 
 // ============================================================================
 // FeedforwardController

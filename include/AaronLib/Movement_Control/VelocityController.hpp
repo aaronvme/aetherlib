@@ -8,12 +8,9 @@
 
 #pragma once
 
-namespace AARONLIB {
+#include "AaronLib/Drivetrain.hpp"
 
-struct DrivetrainVoltages {
-    double leftVoltage;
-    double rightVoltage;
-};
+namespace AARONLIB {
 
 // Feedforward (kV/kA/kS) plus per-side PI on velocity error.
 class VoltageController {

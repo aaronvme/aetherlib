@@ -40,6 +40,25 @@ private:
     mutable float mExtGearRatio{0.0f};   // 0 = unresolved
 };
 
+// Controller output for both drive sides. Shared by every controller that
+// produces drivetrain voltages (Feedforward, VoltageController).
+struct DrivetrainVoltages {
+    float left{0.0f};    // volts
+    float right{0.0f};   // volts
+
+    /// Millivolts, for pros::Motor::move_voltage().
+    float leftMillivolts() const { return left * 1000.0f; }
+    float rightMillivolts() const { return right * 1000.0f; }
+
+    /// The -127..127 range used by Drivetrain::setVoltage().
+    float leftPower(float maxVoltage = 12.0f) const {
+        return (left / maxVoltage) * 127.0f;
+    }
+    float rightPower(float maxVoltage = 12.0f) const {
+        return (right / maxVoltage) * 127.0f;
+    }
+};
+
 // Joystick input curve for driver control.
 struct DriveCurve {
     float deadband{15.0f};
