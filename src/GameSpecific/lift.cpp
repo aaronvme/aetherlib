@@ -3,6 +3,7 @@
 
 #include "GameSpecific/lift.hpp"
 #include "GameSpecific/robot_config.hpp"
+#include "AaronLib/Util/exitcondition.hpp"
 #include "AaronLib/Util/pid.hpp"
 #include "pros/rtos.hpp"
 
@@ -29,27 +30,32 @@ static void liftLoop(double targetDegrees, double maxSpeed, double timeoutMs,
             static_cast<float>(kD), static_cast<float>(INTEGRAL_LIMIT), false);
     pid.reset();
 
-    uint32_t startTime    = pros::millis();
-    uint32_t settledSince = 0;
-    bool     isSettled    = false;
+    ExitCondition settle(static_cast<float>(SETTLE_ERROR),
+                         static_cast<int>(SETTLE_TIME));
 
-    while (gen == gLiftGen) { 
+    uint32_t startTime = pros::millis();
+
+    while (gen == gLiftGen) {
         uint32_t now = pros::millis();
         if (now - startTime >= timeoutMs) break;
 
-        double error = targetDegrees - armMotor.get_position();
+        // A disconnected motor reports PROS_ERR_F (== INFINITY). Feeding that
+        // to the PID makes power infinite, and casting infinity to int is UB.
+        double position = armMotor.get_position();
+        if (!std::isfinite(position)) {
+            armMotor.move(0);
+            pros::delay(20);
+            continue;
+        }
+
+        double error = targetDegrees - position;
         double power = pid.update(static_cast<float>(error));
 
         if (power >  maxSpeed) power =  maxSpeed;
         if (power < -maxSpeed) power = -maxSpeed;
         armMotor.move(static_cast<int>(power));
 
-        if (std::fabs(error) <= SETTLE_ERROR) {
-            if (!isSettled) { settledSince = now; isSettled = true; }
-            else if (now - settledSince >= SETTLE_TIME) break;
-        } else {
-            isSettled = false;
-        }
+        if (settle.update(static_cast<float>(error))) break;
 
         pros::delay(20);
     }
