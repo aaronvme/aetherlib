@@ -20,7 +20,7 @@
 
 #include "AaronLib/Chassis.hpp"
 #include "AaronLib/Drivetrain.hpp"
-#include "AaronLib/Movement_Control/VelocityController.hpp"
+#include "AaronLib/Movement_Control/Feedforward.hpp"
 #include "pros/rtos.hpp"
 
 namespace AARONLIB {
@@ -62,7 +62,7 @@ public:
     };
 
     LTVPathFollower(Chassis& chassis, Drivetrain& drivetrain,
-                    const VelocityControllerConfig& config);
+                    const FeedforwardGains& gains);
 
     void followPath(const std::string& path_name, const ltvConfig& l_config);
 
@@ -84,7 +84,7 @@ private:
 
     Chassis& mChassis;
     Drivetrain& mDrivetrain;
-    VoltageController controller;
+    FeedforwardController controller;
     std::function<bool()> mAbort;
 
     pros::Task* task = nullptr;

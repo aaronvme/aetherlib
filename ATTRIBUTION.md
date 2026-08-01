@@ -12,8 +12,10 @@ keep the SPDX headers and copyright notices of their origin.
 ### Pushback_X — Team 1516X, California High Robotics
 - Upstream: `Pushback_X` (VRC team 1516X)
 - License: **GPL-3.0-or-later**, `Copyright 2026 California High Robotics, Team 1516X`
-- Used for: LTV/LQR path follower, velocity/voltage controller, and related
-  path-following support code.
+- Used for: the LTV/LQR path follower and related path-following support code.
+  Their `VoltageController` was also ported initially but has since been
+  removed: FBLib's `FeedforwardController` is a corrected reimplementation of
+  the same controller, so keeping both meant shipping two of one thing.
 - Original per-file `Copyright` and `SPDX-License-Identifier` headers are retained
   unmodified on every file derived from this source.
 

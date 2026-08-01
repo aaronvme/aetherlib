@@ -41,12 +41,10 @@ double LTVPathFollower::clamp(double value, double min, double max) {
 }
 
 LTVPathFollower::LTVPathFollower(Chassis& chassis, Drivetrain& drivetrain,
-                                 const VelocityControllerConfig& config)
+                                 const FeedforwardGains& gains)
     : mChassis(chassis),
       mDrivetrain(drivetrain),
-      controller(config.kV, config.KA_straight, config.KA_turn, config.KS_straight,
-                 config.KS_turn, config.KP_straight, config.KI_straight, 5000.0,
-                 drivetrain.trackWidth * INCH_TO_METER) {}
+      controller(gains, drivetrain.trackWidth * INCH_TO_METER) {}
 
 void LTVPathFollower::setAbortCondition(std::function<bool()> abort) {
     mAbort = std::move(abort);
@@ -186,6 +184,10 @@ void LTVPathFollower::followPathImpl(const std::string& path_name, const ltvConf
     Pose start_pose = mChassis.getPose();
     const float rpm_to_mps_factor = rpmToMps();
 
+    // Clear integrators and acceleration history so a second path does not
+    // inherit the previous run's state.
+    controller.reset();
+
     Eigen::MatrixXf cached_K(2, 3);
     cached_K.setZero();
 
@@ -297,11 +299,11 @@ void LTVPathFollower::followPathImpl(const std::string& path_name, const ltvConf
             right_actual_mps = mDrivetrain.rightMotors->get_actual_velocity() * rpm_to_mps_factor;
         }
 
+        // Real elapsed dt, and the controller desaturates both sides against a
+        // common scale internally, so no external per-side clamp is needed.
         DrivetrainVoltages output_voltages =
-            controller.update(v_cmd, w_cmd, left_actual_mps, right_actual_mps);
-
-        output_voltages.right = clamp(output_voltages.right, -12.0, 12.0);
-        output_voltages.left = clamp(output_voltages.left, -12.0, 12.0);
+            controller.update(v_cmd, w_cmd, left_actual_mps, right_actual_mps,
+                              static_cast<float>(measured_dt));
 
         if (mDrivetrain.rightMotors != nullptr) {
             mDrivetrain.rightMotors->move_voltage(output_voltages.rightMillivolts());

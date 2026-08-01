@@ -40,8 +40,7 @@ private:
     mutable float mExtGearRatio{0.0f};   // 0 = unresolved
 };
 
-// Controller output for both drive sides. Shared by every controller that
-// produces drivetrain voltages (Feedforward, VoltageController).
+// Controller output for both drive sides.
 struct DrivetrainVoltages {
     float left{0.0f};    // volts
     float right{0.0f};   // volts

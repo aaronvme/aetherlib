@@ -64,7 +64,7 @@ struct FeedforwardGains {
     float integralClamp{0.0f};
 };
 
-// DrivetrainVoltages lives in Drivetrain.hpp — shared with VoltageController.
+// DrivetrainVoltages lives in Drivetrain.hpp.
 
 // ============================================================================
 // FeedforwardController
