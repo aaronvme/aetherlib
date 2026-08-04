@@ -3,11 +3,11 @@
 
 #include "GameSpecific/lift.hpp"
 #include "GameSpecific/robot_config.hpp"
-#include "AaronLib/Util/exitcondition.hpp"
-#include "AaronLib/Util/pid.hpp"
+#include "riku/Util/exitcondition.hpp"
+#include "riku/Util/pid.hpp"
 #include "pros/rtos.hpp"
 
-using namespace AARONLIB;
+using namespace riku;
 
 // ── arm gains ────────────────────────────────────────────────
 // tune values =============================================================================

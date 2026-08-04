@@ -1,16 +1,16 @@
 # Attribution
 
-AaronLib is assembled from three existing VEX V5 codebases. This file records
+riku is assembled from three existing VEX V5 codebases. This file records
 where each part came from and under what terms.
 
-AaronLib as a whole is distributed under **GPL-3.0-or-later** (see `LICENSE`),
-because it incorporates GPL-3.0-or-later code from Pushback_X. Individual files
+riku as a whole is distributed under **GPL-3.0-or-later** (see `LICENSE`),
+because it incorporates GPL-3.0-or-later code from 1516X. Individual files
 keep the SPDX headers and copyright notices of their origin.
 
 ## Sources
 
-### Pushback_X — Team 1516X, California High Robotics
-- Upstream: `Pushback_X` (VRC team 1516X)
+### 1516X — California High Robotics
+- Upstream: the 1516X competition codebase
 - License: **GPL-3.0-or-later**, `Copyright 2026 California High Robotics, Team 1516X`
 - Used for: the LTV/LQR path follower and related path-following support code.
   Their `VoltageController` was also ported initially but has since been
@@ -26,9 +26,9 @@ keep the SPDX headers and copyright notices of their origin.
   per-file copyright headers.
 - **Rights unconfirmed.** Absent a declared license, this code is
   all-rights-reserved by default. Confirm authorship/permission with the FBLib
-  authors before publishing or distributing AaronLib.
+  authors before publishing or distributing riku.
 - Files ported from FBLib are noted as such in their header comment. The FBLib
-  namespace `FBLIB` is translated to `AARONLIB` and paths `FBLib/` to `AaronLib/`;
+  namespace `FBLIB` is translated to `riku` and paths `FBLib/` to `riku/`;
   the code is otherwise line-for-line comparable to upstream.
 
 ### LemLib — https://github.com/LemLib/LemLib
@@ -39,7 +39,7 @@ keep the SPDX headers and copyright notices of their origin.
 - Only available locally as a prebuilt `LemLib.a` plus headers, so this piece is
   ported rather than linked. Ported files carry a LemLib MIT notice.
 
-## Toolchain dependencies (unmodified, not vendored into AaronLib)
+## Toolchain dependencies (unmodified, not vendored into riku)
 
 - **PROS kernel** 4.2.2 — MPL-2.0, Copyright (c) Purdue University ACM SIGBots.
 - **LVGL** (`liblvgl` 9.2.0) — MIT.

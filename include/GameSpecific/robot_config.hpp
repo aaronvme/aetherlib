@@ -3,11 +3,11 @@
 #include <array>
 
 #include "main.h"
-#include "AaronLib/AaronLib_API.hpp"
-#include "AaronLib/Tracking/RCL_Tracking.hpp"
+#include "riku/api.hpp"
+#include "riku/Tracking/RCL_Tracking.hpp"
 
 
-namespace AARONLIB {
+namespace riku {
 
 extern pros::Controller master;
 
@@ -45,5 +45,5 @@ void registerFieldObstacles();
 
 void registerAutonDisableLine(float lifetimeMs = 16000.0f);
 
-}  // namespace AARONLIB
+}  // namespace riku
 

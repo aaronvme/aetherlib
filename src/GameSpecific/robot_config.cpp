@@ -1,6 +1,6 @@
 #include "GameSpecific/robot_config.hpp"
 
-namespace AARONLIB {
+namespace riku {
 
 pros::Controller master(pros::E_CONTROLLER_MASTER);
 
@@ -145,4 +145,4 @@ AutonSelector selector;
 
 
 
-}  // namespace AARONLIB
+}  // namespace riku

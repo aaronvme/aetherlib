@@ -4,7 +4,7 @@
 #include "pros/misc.hpp"
 #include "pros/rtos.hpp"
 
-namespace AARONLIB {
+namespace riku {
 
 // ============================================================================
 // Pose telemetry — controller screen
@@ -64,4 +64,4 @@ void driverControl() {
     }
 }
 
-}  // namespace AARONLIB
+}  // namespace riku

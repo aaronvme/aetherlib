@@ -2,11 +2,11 @@
 
 #include "robot_config.hpp"
 
-namespace AARONLIB {
+namespace riku {
 
 void autonExample();
 void autonSkills();
 void autonRedLeft();
 void autonBlueLeft();
 
-}  // namespace AARONLIB
+}  // namespace riku

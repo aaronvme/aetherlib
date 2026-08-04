@@ -1,7 +1,7 @@
 {
     "py/object": "pros.conductor.project.Project",
     "py/state": {
-        "project_name": "AaronLib",
+        "project_name": "riku",
         "target": "v5",
         "templates": {
             "kernel": {
