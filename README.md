@@ -12,14 +12,14 @@ codebase and [LemLib](https://github.com/LemLib/LemLib) into one library.
 
 ```
 include/riku/
-  Util/               math, Pose, PID, fast trig, IMU scaling, jam detection, warnings
-  Tracking/           odometry, MCL, RCL localization
-  Movement_Control/   point-to-point, turns, arcs, boomerang, RAMSETE, profiles,
+  util/               math, Pose, PID, fast trig, IMU scaling, jam detection, warnings
+  tracking/           odometry, MCL, RCL localization
+  movement_control/   point-to-point, turns, arcs, boomerang, RAMSETE, profiles,
                       feedforward, LTV path following
-  Auton_Selector/     LVGL 9 touch selector
-  Drivetrain.hpp      drive base + drive curves + voltage output type
-  Chassis.hpp         top-level drivetrain + motion API
-include/GameSpecific/ robot config, controls, autons, lift
+  auton_selector/     LVGL 9 touch selector
+  drivetrain.hpp      drive base + drive curves + voltage output type
+  chassis.hpp         top-level drivetrain + motion API
+include/gamespecific/ robot config, controls, autons, lift
 include/Eigen/        vendored Eigen (used by the LTV follower)
 ```
 

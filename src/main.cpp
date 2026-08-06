@@ -1,6 +1,6 @@
 #include "main.h"
 
-#include "GameSpecific/GameSpecific_API.hpp"
+#include "gamespecific/gamespecific_api.hpp"
 #include "riku/api.hpp"
 
 using namespace riku;
