@@ -1,7 +1,10 @@
 // Ported from FBLib - https://github.com/jiazegao/FBLib
 #pragma once
 
+#include <memory>
+
 #include "riku/drivetrain.hpp"
+#include "riku/util/logger.hpp"
 
 namespace riku {
 
@@ -18,7 +21,7 @@ namespace riku {
 // inertias and different amounts of scrub friction.
 //
 // Gains are obtained by fitting recorded (velocity, voltage) data — see
-// VelocityRecorder in Movement_Control/Velocity_Replay.hpp, which dumps CSV
+// FeedforwardController::setLogging() below, which dumps CSV to the SD card
 // suitable for an offline least-squares fit.
 //
 // UNITS: kV, kA and kS are only meaningful in the units they were fitted in.
@@ -123,7 +126,14 @@ public:
     void setMaxVoltage(float volts) { mMaxVoltage = volts; }
     float getMaxVoltage() const { return mMaxVoltage; }
 
+    /// Dump every tick to /usd/ff<n>.csv: commanded and measured per-side
+    /// velocity, the acceleration the model saw, and the voltage produced.
+    /// This is the data an offline least-squares fit needs to recover
+    /// kV/kA/kS. Off by default; no-op without an SD card.
+    void setLogging(bool enabled);
+
 private:
+    std::unique_ptr<Logger> mLog;
     FeedforwardGains mGains;
     float mTrackWidth;
     float mMaxVoltage{12.0f};

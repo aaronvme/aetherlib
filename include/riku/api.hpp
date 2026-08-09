@@ -10,6 +10,7 @@
 #include "riku/util/scaledimu.hpp"
 #include "riku/util/jam_detector.hpp"
 #include "riku/util/warnings.hpp"
+#include "riku/util/logger.hpp"
 
 #include "riku/drivetrain.hpp"
 

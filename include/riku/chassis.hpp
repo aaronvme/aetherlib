@@ -21,6 +21,7 @@
 #include "riku/tracking/mcl_tracking.hpp"
 #include "riku/tracking/odom_tracking.hpp"
 #include "riku/tracking/rcl_tracking.hpp"
+#include "riku/util/logger.hpp"
 #include "riku/util/pid.hpp"
 #include "riku/util/util.hpp"
 
@@ -214,6 +215,15 @@ public:
     /// Reset the dry-run path recording
     void resetDryRunPath();
 
+    // ========================================================================
+    // Tuning log
+    // ========================================================================
+
+    /// Log pose, per-axis error and controller output to /usd/chas<n>.csv for
+    /// the duration of each motion. Off by default; no-op without an SD card.
+    void setMotionLogging(bool enabled);
+    bool isMotionLogging() const { return mMotionLogging; }
+
 private:
     // ========================================================================
     // Internal motion helpers
@@ -289,6 +299,9 @@ private:
     // Drive curves
     DriveCurve mThrottleCurve;
     DriveCurve mSteerCurve;
+
+    // Tuning log
+    std::atomic<bool> mMotionLogging{false};
 
     // Dry-run mode
     bool mDryRun{false};

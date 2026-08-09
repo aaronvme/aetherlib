@@ -2,6 +2,9 @@
 #include "riku/movement_control/feedforward.hpp"
 
 #include <cmath>
+#include <memory>
+#include <string>
+#include <vector>
 
 #include "riku/util/util.hpp"
 
@@ -111,7 +114,26 @@ DrivetrainVoltages FeedforwardController::update(float targetLinearVel, float ta
     mPrevLeftError = leftError;
     mPrevRightError = rightError;
 
+    if (mLog) {
+        mLog->row({targetLinearVel, targetAngularVel, leftTargetVel, rightTargetVel,
+                   measuredLeftVel, measuredRightVel, linearAccel, angularAccel,
+                   leftVoltage, rightVoltage, dt});
+    }
+
     return {leftVoltage, rightVoltage};
+}
+
+void FeedforwardController::setLogging(bool enabled) {
+    if (!enabled) {
+        mLog.reset();
+        return;
+    }
+    if (mLog) return;
+    mLog = std::make_unique<Logger>(
+        "ff", std::vector<std::string>{"vTarget", "wTarget", "vLeftTarget", "vRightTarget",
+                                       "vLeftMeas", "vRightMeas", "aLinear", "aAngular",
+                                       "voltLeft", "voltRight", "dt"});
+    mLog->start();
 }
 
 }  // namespace riku

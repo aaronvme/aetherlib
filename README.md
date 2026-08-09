@@ -40,6 +40,22 @@ export PATH="$APPDATA/Code/User/globalStorage/sigbots.pros/install/pros-toolchai
 make clean && make
 ```
 
+## Tuning logs
+
+Every tunable subsystem can dump CSV to the microSD card for offline fitting.
+All are off by default and no-op without a card inserted.
+
+```cpp
+chassis.setMotionLogging(true);   // /usd/chas<n>.csv  lateral + angular PID
+liftSetLogging(true);             // /usd/lift<n>.csv  lift kP / kG
+jam.setLogging(true);             // /usd/jam<n>.csv   efficiency band
+ltv.setLogging(true);             // /usd/ff<n>.csv    kV / kA / kS fitting
+```
+
+Each run picks the first free index, so files are never overwritten. `t_ms` is
+prepended to every row. `Logger::droppedRows()` is non-zero if the flush task
+could not keep up.
+
 ## License
 
 GPL-3.0-or-later — see [LICENSE](LICENSE).

@@ -330,6 +330,10 @@ void Chassis::executeCurrentMotion() {
     bool settleStarted = false;
     uint32_t settleStartElapsed = 0;
 
+    Logger motionLog("chas", {"type", "x", "y", "thetaDeg", "targetX", "targetY",
+                              "latOut", "angOut", "settled"});
+    if (mMotionLogging && !mDryRun) motionLog.start();
+
     while (mMotionRunning && !mMotionCancelled) {
         // Odometry freshness is provided by the background odometry task — do
         // NOT call mOdom.update() here (it would race and consume deltas).
@@ -716,6 +720,12 @@ void Chassis::executeCurrentMotion() {
         }
         }
 
+        motionLog.row({static_cast<float>(static_cast<int>(req.type)),
+                       pose.x, pose.y, stdRadToVexDeg(pose.theta),
+                       req.targetX, req.targetY,
+                       lateralOut, angularOut,
+                       settled ? 1.0f : 0.0f});
+
         // Timeout: abort if motion exceeds the requested duration
         uint32_t elapsed = mDryRun ? (dryRunSteps * 10u)
                                    : (pros::millis() - req.startTime);
@@ -987,6 +997,10 @@ void Chassis::setDistanceSensors(const std::array<pros::Distance*, MAX_DISTANCE_
 // ========================================================================
 // Dry-run mode
 // ========================================================================
+
+void Chassis::setMotionLogging(bool enabled) {
+    mMotionLogging = enabled;
+}
 
 void Chassis::setDryRun(bool enabled) {
     mDryRun = enabled;

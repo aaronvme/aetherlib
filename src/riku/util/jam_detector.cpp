@@ -1,5 +1,8 @@
 // Ported from FBLib - https://github.com/jiazegao/FBLib
 #include <cmath>
+#include <memory>
+#include <string>
+#include <vector>
 
 #include "pros/rtos.hpp"
 
@@ -206,8 +209,35 @@ bool JamDetector::serviceThermalCutoff() {
 // reads/writes and returns immediately, every time, in every state.
 // ============================================================================
 
+void JamDetector::setLogging(bool enabled) {
+    if (!enabled) {
+        mLog.reset();
+        return;
+    }
+    if (mLog) return;
+    mLog = std::make_unique<Logger>(
+        "jam", std::vector<std::string>{"eff0", "temp0", "cmd0", "eff1", "temp1", "cmd1",
+                                        "eff2", "temp2", "cmd2", "state", "jams"});
+    mLog->start();
+}
+
 void JamDetector::update() {
     const uint32_t now = pros::millis();
+
+    // Logged before the thermal/suppression early-returns, so every tick lands
+    // in the file. A disconnected motor logs inf, which is worth seeing.
+    if (mLog) {
+        float m[9] = {0};
+        for (std::size_t i = 0; i < 3 && i < mMotors.size(); ++i) {
+            if (mMotors[i].motor == nullptr) continue;
+            m[i * 3 + 0] = static_cast<float>(mMotors[i].motor->get_efficiency());
+            m[i * 3 + 1] = static_cast<float>(mMotors[i].motor->get_temperature());
+            m[i * 3 + 2] = mMotors[i].command;
+        }
+        mLog->row({m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8],
+                   static_cast<float>(static_cast<int>(mState.load())),
+                   static_cast<float>(mJamCount.load())});
+    }
 
     // Thermal protection runs in every state and outranks everything else.
     if (serviceThermalCutoff()) return;

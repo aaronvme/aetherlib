@@ -8,10 +8,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <vector>
 
 #include "pros/motors.hpp"
 
+#include "riku/util/logger.hpp"
 #include "riku/util/util.hpp"
 
 namespace riku {
@@ -91,6 +93,13 @@ public:
     const Config& config() const;
     void setConfig(const Config& config);
 
+    /// Log per-motor efficiency, temperature, command and state to
+    /// /usd/jam<n>.csv. This is how the empirical efficiency band above is
+    /// meant to be found: enable it, deliberately jam the mechanism, then read
+    /// off the band the stalled motor actually sits in. Off by default; no-op
+    /// without an SD card. Logs at most the first 3 motors.
+    void setLogging(bool enabled);
+
 private:
     struct MotorEntry {
         pros::Motor* motor{nullptr};
@@ -108,6 +117,7 @@ private:
 
     std::vector<MotorEntry> mMotors;
     Config mConfig;
+    std::unique_ptr<Logger> mLog;
 
     std::atomic<State> mState{State::Normal};
     std::atomic<uint32_t> mStateStartMs{0};

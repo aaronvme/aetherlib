@@ -78,6 +78,10 @@ public:
     /// global. Empty = never abort.
     void setAbortCondition(std::function<bool()> abort);
 
+    /// Log the velocity controller's inputs and outputs to /usd/ff<n>.csv while
+    /// following. Use this to gather kV/kA/kS fitting data on a real path.
+    void setLogging(bool enabled) { controller.setLogging(enabled); }
+
 private:
     /// Motor RPM -> m/s, derived from the drivetrain rather than hardcoded.
     float rpmToMps() const;

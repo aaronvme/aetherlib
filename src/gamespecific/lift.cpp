@@ -4,6 +4,7 @@
 #include "gamespecific/lift.hpp"
 #include "gamespecific/robot_config.hpp"
 #include "riku/util/exitcondition.hpp"
+#include "riku/util/logger.hpp"
 #include "riku/util/pid.hpp"
 #include "pros/rtos.hpp"
 
@@ -34,6 +35,9 @@ static const double SETTLE_ERROR   = 2.0;
 static const double SETTLE_TIME    = 250;
 
 static std::atomic<uint32_t> gLiftGen{0};
+static std::atomic<bool> gLiftLogging{false};
+
+void liftSetLogging(bool enabled) { gLiftLogging = enabled; }
 
 static double gravityFeedforward(double motorPosition) {
     if (kG == 0.0) return 0.0;
@@ -53,6 +57,9 @@ static void liftLoop(double targetDegrees, double maxSpeed, double timeoutMs,
     ExitCondition settle(static_cast<float>(SETTLE_ERROR),
                          static_cast<int>(SETTLE_TIME));
 
+    Logger log("lift", {"target", "position", "error", "pid", "ff", "power"});
+    if (gLiftLogging) log.start();
+
     uint32_t startTime = pros::millis();
 
     while (gen == gLiftGen) {
@@ -69,11 +76,16 @@ static void liftLoop(double targetDegrees, double maxSpeed, double timeoutMs,
         }
 
         double error = targetDegrees - position;
-        double power = pid.update(static_cast<float>(error)) + gravityFeedforward(position);
+        double pidOut = pid.update(static_cast<float>(error));
+        double ff = gravityFeedforward(position);
+        double power = pidOut + ff;
 
         if (power >  maxSpeed) power =  maxSpeed;
         if (power < -maxSpeed) power = -maxSpeed;
         armMotor.move(static_cast<int>(power));
+
+        log.row({(float)targetDegrees, (float)position, (float)error,
+                 (float)pidOut, (float)ff, (float)power});
 
         if (settle.update(static_cast<float>(error))) break;
 
