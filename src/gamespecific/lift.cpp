@@ -35,9 +35,11 @@ static const double SETTLE_ERROR   = 2.0;
 static const double SETTLE_TIME    = 250;
 
 static std::atomic<uint32_t> gLiftGen{0};
-static std::atomic<bool> gLiftLogging{false};
+static std::function<void(const LiftSample&)> gLiftTelemetry;
 
-void liftSetLogging(bool enabled) { gLiftLogging = enabled; }
+void liftSetTelemetry(std::function<void(const LiftSample&)> callback) {
+    gLiftTelemetry = std::move(callback);
+}
 
 static double gravityFeedforward(double motorPosition) {
     if (kG == 0.0) return 0.0;
@@ -57,8 +59,6 @@ static void liftLoop(double targetDegrees, double maxSpeed, double timeoutMs,
     ExitCondition settle(static_cast<float>(SETTLE_ERROR),
                          static_cast<int>(SETTLE_TIME));
 
-    Logger log("lift", {"target", "position", "error", "pid", "ff", "power"});
-    if (gLiftLogging) log.start();
 
     uint32_t startTime = pros::millis();
 
@@ -84,8 +84,10 @@ static void liftLoop(double targetDegrees, double maxSpeed, double timeoutMs,
         if (power < -maxSpeed) power = -maxSpeed;
         armMotor.move(static_cast<int>(power));
 
-        log.row({(float)targetDegrees, (float)position, (float)error,
-                 (float)pidOut, (float)ff, (float)power});
+        if (gLiftTelemetry) {
+            gLiftTelemetry({(float)targetDegrees, (float)position, (float)error,
+                            (float)pidOut, (float)ff, (float)power});
+        }
 
         if (settle.update(static_cast<float>(error))) break;
 

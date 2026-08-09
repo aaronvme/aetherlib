@@ -13,7 +13,6 @@
 
 #include "pros/motors.hpp"
 
-#include "riku/util/logger.hpp"
 #include "riku/util/util.hpp"
 
 namespace riku {
@@ -41,6 +40,15 @@ struct JamDetectorConfig {
 
     /// Return true to skip detection and reset the jam timer. Empty = never.
     std::function<bool()> suppress{[]() { return false; }};
+};
+
+// One update() tick, for tuning. Covers up to the first 3 registered motors.
+struct JamSample {
+    float efficiency[3]{};   // percent; inf if that motor is disconnected
+    float temperature[3]{};  // celsius
+    float command[3]{};      // latched rpm
+    int state{0};
+    uint32_t jamCount{0};
 };
 
 class JamDetector {
@@ -93,12 +101,10 @@ public:
     const Config& config() const;
     void setConfig(const Config& config);
 
-    /// Log per-motor efficiency, temperature, command and state to
-    /// /usd/jam<n>.csv. This is how the empirical efficiency band above is
-    /// meant to be found: enable it, deliberately jam the mechanism, then read
-    /// off the band the stalled motor actually sits in. Off by default; no-op
-    /// without an SD card. Logs at most the first 3 motors.
-    void setLogging(bool enabled);
+    /// Called once per update() tick. Empty by default. See util/tuning.hpp
+    /// for a hook that streams this to the SD card - that is how the empirical
+    /// efficiency band above is meant to be found.
+    void setTelemetry(std::function<void(const JamSample&)> callback);
 
 private:
     struct MotorEntry {
@@ -117,7 +123,7 @@ private:
 
     std::vector<MotorEntry> mMotors;
     Config mConfig;
-    std::unique_ptr<Logger> mLog;
+    std::function<void(const JamSample&)> mTelemetry;
 
     std::atomic<State> mState{State::Normal};
     std::atomic<uint32_t> mStateStartMs{0};

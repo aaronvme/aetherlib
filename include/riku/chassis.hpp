@@ -3,6 +3,7 @@
 
 #include <array>
 #include <atomic>
+#include <functional>
 #include <queue>
 #include <vector>
 
@@ -21,7 +22,6 @@
 #include "riku/tracking/mcl_tracking.hpp"
 #include "riku/tracking/odom_tracking.hpp"
 #include "riku/tracking/rcl_tracking.hpp"
-#include "riku/util/logger.hpp"
 #include "riku/util/pid.hpp"
 #include "riku/util/util.hpp"
 
@@ -71,6 +71,15 @@ struct ChassisConfig {
     bool useRclTracking{false};
     MclTracking::Config mclConfig;
     RclTracking::Config rclConfig;
+};
+
+// One motion-loop tick, for tuning. Angles in VEX degrees.
+struct ChassisSample {
+    int type{0};             // MotionType of the running motion
+    float x{0}, y{0}, thetaDeg{0};
+    float targetX{0}, targetY{0};
+    float lateralOut{0}, angularOut{0};
+    bool settled{false};
 };
 
 // ============================================================================
@@ -216,13 +225,14 @@ public:
     void resetDryRunPath();
 
     // ========================================================================
-    // Tuning log
+    // Telemetry
     // ========================================================================
 
-    /// Log pose, per-axis error and controller output to /usd/chas<n>.csv for
-    /// the duration of each motion. Off by default; no-op without an SD card.
-    void setMotionLogging(bool enabled);
-    bool isMotionLogging() const { return mMotionLogging; }
+    /// Called once per motion tick with the controller's internal state.
+    /// Empty by default and costs nothing when unset. Set it before starting
+    /// motions - it is read by the motion task. See util/tuning.hpp for a
+    /// ready-made hook that streams this to the SD card.
+    void setTelemetry(std::function<void(const ChassisSample&)> callback);
 
 private:
     // ========================================================================
@@ -300,8 +310,7 @@ private:
     DriveCurve mThrottleCurve;
     DriveCurve mSteerCurve;
 
-    // Tuning log
-    std::atomic<bool> mMotionLogging{false};
+    std::function<void(const ChassisSample&)> mTelemetry;
 
     // Dry-run mode
     bool mDryRun{false};

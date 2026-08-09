@@ -11,6 +11,7 @@
 #include "riku/util/jam_detector.hpp"
 #include "riku/util/warnings.hpp"
 #include "riku/util/logger.hpp"
+#include "riku/util/tuning.hpp"
 
 #include "riku/drivetrain.hpp"
 

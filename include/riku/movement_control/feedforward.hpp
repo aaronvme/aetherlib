@@ -1,10 +1,9 @@
 // Ported from FBLib - https://github.com/jiazegao/FBLib
 #pragma once
 
-#include <memory>
+#include <functional>
 
 #include "riku/drivetrain.hpp"
-#include "riku/util/logger.hpp"
 
 namespace riku {
 
@@ -21,7 +20,7 @@ namespace riku {
 // inertias and different amounts of scrub friction.
 //
 // Gains are obtained by fitting recorded (velocity, voltage) data — see
-// FeedforwardController::setLogging() below, which dumps CSV to the SD card
+// FeedforwardController::setTelemetry() below, which dumps CSV to the SD card
 // suitable for an offline least-squares fit.
 //
 // UNITS: kV, kA and kS are only meaningful in the units they were fitted in.
@@ -86,6 +85,16 @@ struct FeedforwardGains {
 // Not thread-safe — one instance per control loop.
 // ============================================================================
 
+// One update() tick, for offline kV/kA/kS fitting.
+struct FeedforwardSample {
+    float vTarget{0}, wTarget{0};
+    float vLeftTarget{0}, vRightTarget{0};
+    float vLeftMeasured{0}, vRightMeasured{0};
+    float aLinear{0}, aAngular{0};
+    float voltLeft{0}, voltRight{0};
+    float dt{0};
+};
+
 class FeedforwardController {
 public:
     /// @param gains            characterized model + PI gains
@@ -126,14 +135,13 @@ public:
     void setMaxVoltage(float volts) { mMaxVoltage = volts; }
     float getMaxVoltage() const { return mMaxVoltage; }
 
-    /// Dump every tick to /usd/ff<n>.csv: commanded and measured per-side
-    /// velocity, the acceleration the model saw, and the voltage produced.
-    /// This is the data an offline least-squares fit needs to recover
-    /// kV/kA/kS. Off by default; no-op without an SD card.
-    void setLogging(bool enabled);
+    /// Called once per update(). Empty by default. See util/tuning.hpp for a
+    /// hook that streams this to the SD card - it is the data an offline
+    /// least-squares fit needs to recover kV/kA/kS.
+    void setTelemetry(std::function<void(const FeedforwardSample&)> callback);
 
 private:
-    std::unique_ptr<Logger> mLog;
+    std::function<void(const FeedforwardSample&)> mTelemetry;
     FeedforwardGains mGains;
     float mTrackWidth;
     float mMaxVoltage{12.0f};

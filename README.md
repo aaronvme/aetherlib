@@ -42,19 +42,37 @@ make clean && make
 
 ## Tuning logs
 
-Every tunable subsystem can dump CSV to the microSD card for offline fitting.
-All are off by default and no-op without a card inserted.
+Subsystems emit telemetry through a callback; `riku/util/tuning.hpp` and
+`gamespecific/tuning.hpp` attach hooks that write CSV to the microSD card.
+The subsystems themselves know nothing about logging. All off by default, and
+no-ops without a card.
 
 ```cpp
-chassis.setMotionLogging(true);   // /usd/chas<n>.csv  lateral + angular PID
-liftSetLogging(true);             // /usd/lift<n>.csv  lift kP / kG
-jam.setLogging(true);             // /usd/jam<n>.csv   efficiency band
-ltv.setLogging(true);             // /usd/ff<n>.csv    kV / kA / kS fitting
+riku::tuning::logChassis(chassis, true);                          // chas<n>.csv
+riku::tuning::logJamDetector(jam, true);                          // jam<n>.csv
+riku::tuning::logFeedforward(ltv.velocityController(), true);     // ff<n>.csv
+logLift(true);                                                    // lift<n>.csv
 ```
 
 Each run picks the first free index, so files are never overwritten. `t_ms` is
-prepended to every row. `Logger::droppedRows()` is non-zero if the flush task
-could not keep up.
+prepended to every row, and the flush task fsyncs every 50 ms, so a power-off
+loses at most that much. `Logger::droppedRows()` is non-zero if logging
+outpaced the writer.
+
+To graph one:
+
+```sh
+python tools/plot_log.py lift00.csv                  # every column vs time
+python tools/plot_log.py lift00.csv --cols error pid
+python tools/plot_log.py chas00.csv --xy             # path in field coords
+```
+
+You can also attach a raw callback with no SD card involved, e.g. to print to
+the terminal or drive a screen widget:
+
+```cpp
+chassis.setTelemetry([](const riku::ChassisSample& s) { ... });
+```
 
 ## License
 
