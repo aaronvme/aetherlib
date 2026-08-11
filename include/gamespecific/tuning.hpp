@@ -1,9 +1,5 @@
 #pragma once
 
-// Game-specific tuning logs. The library-side equivalents live in
-// riku/util/tuning.hpp.
-
-/// /usd/lift<n>.csv - target, position, error, and the PID and gravity
-/// feedforward contributions separately, so kG's effect is visible while
-/// tuning it. One file per liftMoveTo. No-op without an SD card.
+/// lift<n>.csv, one file per liftMoveTo. Logs the PID and gravity terms
+/// separately so kG's effect is visible. No-op without an SD card.
 void logLift(bool enabled);

@@ -73,7 +73,7 @@ struct ChassisConfig {
     RclTracking::Config rclConfig;
 };
 
-// One motion-loop tick, for tuning. Angles in VEX degrees.
+// One motion-loop tick. Angles in VEX degrees.
 struct ChassisSample {
     int type{0};             // MotionType of the running motion
     float x{0}, y{0}, thetaDeg{0};
@@ -228,10 +228,8 @@ public:
     // Telemetry
     // ========================================================================
 
-    /// Called once per motion tick with the controller's internal state.
-    /// Empty by default and costs nothing when unset. Set it before starting
-    /// motions - it is read by the motion task. See util/tuning.hpp for a
-    /// ready-made hook that streams this to the SD card.
+    /// Empty by default. Set before starting motions - the motion task reads it.
+    /// util/tuning.hpp has a hook that streams this to the SD card.
     void setTelemetry(std::function<void(const ChassisSample&)> callback);
 
 private:

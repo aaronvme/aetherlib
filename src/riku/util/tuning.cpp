@@ -8,8 +8,7 @@ namespace riku::tuning {
 
 namespace {
 
-// One Logger per subsystem, kept alive here rather than by the subsystem.
-// shared_ptr because the callback captures it and outlives this scope.
+// shared_ptr because the callback captures it.
 std::shared_ptr<Logger> gChassisLog;
 std::shared_ptr<Logger> gJamLog;
 std::shared_ptr<Logger> gFeedforwardLog;

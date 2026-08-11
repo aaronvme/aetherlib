@@ -3,15 +3,13 @@
 
 namespace riku {
 
-/// Debounced settle check: error must stay within `range` for `time` ms.
-/// Prevents exiting a motion while still carrying velocity through the target.
+/// Error must stay within `range` for `time` ms. Stops a motion exiting while
+/// still carrying velocity through the target.
 class ExitCondition {
 public:
     ExitCondition(float range, int time);
 
     bool getExit() const;
-
-    /// Feed the current error. Returns true once the condition is met.
     bool update(float input);
 
     void reset();

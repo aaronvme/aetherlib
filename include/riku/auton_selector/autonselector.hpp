@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-// Opaque LVGL types, so including this header does not pull in all of LVGL.
+// Opaque, to keep LVGL out of every TU that includes this.
 typedef struct _lv_obj_t lv_obj_t;
 typedef struct _lv_event_t lv_event_t;
 
@@ -13,24 +13,18 @@ namespace riku {
 
 using AutonFunc = std::function<void()>;
 
-// Touch selector for autonomous routines, drawn with LVGL 9 on the V5 screen.
 class AutonSelector {
 public:
-    /// Register before calling init(). Routines added afterwards are not drawn.
+    /// Must be called before init().
     void registerAuton(const std::string& name, AutonFunc func);
 
-    /// Build and show the selector screen. Does nothing on a second call.
     void init();
 
     void select(int index);
     int selectedIndex() const { return mSelectedIndex; }
-
-    /// Empty if nothing is registered.
     std::string selectedName() const;
-
     std::size_t count() const { return mAutons.size(); }
 
-    /// Invoke the selected routine. No-op if nothing is registered.
     void runSelected();
 
 private:

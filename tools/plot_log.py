@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plot a riku tuning CSV pulled off the SD card.
+"""Plot a tuning CSV pulled off the SD card.
 
     python tools/plot_log.py lift00.csv
     python tools/plot_log.py chas00.csv --cols x y targetX targetY

@@ -135,9 +135,8 @@ public:
     void setMaxVoltage(float volts) { mMaxVoltage = volts; }
     float getMaxVoltage() const { return mMaxVoltage; }
 
-    /// Called once per update(). Empty by default. See util/tuning.hpp for a
-    /// hook that streams this to the SD card - it is the data an offline
-    /// least-squares fit needs to recover kV/kA/kS.
+    /// Empty by default. util/tuning.hpp has a hook that logs this to the SD
+    /// card for offline kV/kA/kS fitting.
     void setTelemetry(std::function<void(const FeedforwardSample&)> callback);
 
 private:

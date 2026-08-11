@@ -31,7 +31,6 @@ bool Logger::start() {
     if (mRunning) return true;
     if (!sdInserted()) return false;
 
-    // First free index, so a new run never overwrites the previous one.
     for (int i = 0; i < 100; ++i) {
         char candidate[64];
         std::snprintf(candidate, sizeof(candidate), "/usd/%s%02d.csv", mName.c_str(), i);
@@ -67,8 +66,8 @@ void Logger::stop() {
     if (!mRunning) return;
     mRunning = false;
 
-    // join() before touching mFile. Deleting the Task wrapper does not stop the
-    // underlying task, so closing the file here would race a flush in progress.
+    // join() first: deleting the wrapper does not stop the task, so closing
+    // mFile here would race a flush in progress.
     if (mTask != nullptr) {
         mTask->join();
         delete mTask;
@@ -104,8 +103,7 @@ void Logger::row(std::initializer_list<float> values) {
 
     std::lock_guard<pros::Mutex> lock(mMutex);
     if (mCount == mRing.size()) {
-        // Full: drop the newest rather than the oldest, so the start of a
-        // motion - the part worth looking at - survives.
+        // Drop the newest, so the start of a motion survives.
         mDropped++;
         return;
     }
@@ -131,7 +129,7 @@ void Logger::flushLoop() {
     batch.reserve(kBatchRows);
 
     while (mRunning) {
-        // Writes happen outside the mutex, so row() never waits on the SD card.
+        // Writes stay outside the mutex so row() never waits on the card.
         while (drain(batch) > 0) {
             for (const Entry& e : batch) {
                 std::fprintf(mFile, "%lu", static_cast<unsigned long>(e.t));
@@ -142,7 +140,6 @@ void Logger::flushLoop() {
         std::fflush(mFile);
         pros::delay(kFlushPeriodMs);
     }
-    // stop() joins on this returning, then does the final drain itself.
 }
 
 }  // namespace riku

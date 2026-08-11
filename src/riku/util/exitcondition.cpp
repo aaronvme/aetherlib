@@ -29,3 +29,4 @@ void ExitCondition::reset() {
 }
 
 }  // namespace riku
+//dsfassadf

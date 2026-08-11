@@ -42,7 +42,7 @@ struct JamDetectorConfig {
     std::function<bool()> suppress{[]() { return false; }};
 };
 
-// One update() tick, for tuning. Covers up to the first 3 registered motors.
+// One update() tick. Covers the first 3 registered motors.
 struct JamSample {
     float efficiency[3]{};   // percent; inf if that motor is disconnected
     float temperature[3]{};  // celsius
@@ -101,9 +101,8 @@ public:
     const Config& config() const;
     void setConfig(const Config& config);
 
-    /// Called once per update() tick. Empty by default. See util/tuning.hpp
-    /// for a hook that streams this to the SD card - that is how the empirical
-    /// efficiency band above is meant to be found.
+    /// Empty by default. util/tuning.hpp has a hook that logs this to the SD
+    /// card, which is how the efficiency band above is meant to be found.
     void setTelemetry(std::function<void(const JamSample&)> callback);
 
 private:
