@@ -12,6 +12,7 @@
 #include "riku/util/warnings.hpp"
 #include "riku/util/logger.hpp"
 #include "riku/util/tuning.hpp"
+#include "riku/util/autotune.hpp"
 
 #include "riku/drivetrain.hpp"
 
