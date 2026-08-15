@@ -30,6 +30,14 @@ include/Eigen/        vendored Eigen (used by the LTV follower)
 using namespace riku;
 ```
 
+Every public class and function is listed in [API.md](API.md).
+
+Two conventions to know before writing anything: `Chassis` methods take **VEX
+degrees** (0 = forward, clockwise positive) while `Pose::theta` is **standard
+math radians** (0 = +X, counter-clockwise) — convert with `vexToStdRad()` /
+`stdRadToVexDeg()`. And everything is in **inches** except the feedforward
+controller and LTV follower, which work in metres.
+
 ## Building
 
 The PROS toolchain ships with the VS Code extension and is not on the default
