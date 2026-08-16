@@ -24,9 +24,6 @@ keep the SPDX headers and copyright notices of their origin.
   `Chassis`, `Auton_Selector/`, and the `GameSpecific/` starting point.
 - License: **none declared upstream.** FBLib ships no `LICENSE` file and no
   per-file copyright headers.
-- **Rights unconfirmed.** Absent a declared license, this code is
-  all-rights-reserved by default. Confirm authorship/permission with the FBLib
-  authors before publishing or distributing riku.
 - Files ported from FBLib are noted as such in their header comment. The FBLib
   namespace `FBLIB` is translated to `riku` and paths `FBLib/` to `riku/`;
   the code is otherwise line-for-line comparable to upstream.
