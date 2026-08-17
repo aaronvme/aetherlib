@@ -329,6 +329,9 @@ std::vector<RouteCmd> gRoute;
 int gRouteIndex = -1;
 float gRouteMaxSpeed = 127.0f;
 
+// RAMSETE gains, tunable from the browser via sim_set_param.
+riku::RAMSETEParams gRamsete;
+
 // Sampled trajectory points, pushed by the browser before a run. An
 // OP_FOLLOW_PATH command names a [start, count) slice of this buffer, so one
 // route can follow several paths.
@@ -456,7 +459,7 @@ void execRoute() {
                     start + count > static_cast<int>(gPath.size())) break;
                 std::vector<riku::Pose> path(gPath.begin() + start,
                                              gPath.begin() + start + count);
-                riku::RAMSETEParams params;
+                riku::RAMSETEParams params = gRamsete;
                 params.maxSpeed = gRouteMaxSpeed;
                 riku::chassis.moveRAMSETE(path, timeout, params);
                 break;
@@ -591,6 +594,14 @@ void sim_set_param(const char* name, float value) {
         if (k == "angularKd") g.kD = value;
         riku::chassisConfig.angularGains = g;
         riku::chassis.setAngularGains(g);
+    } else if (k == "ramseteB")           { gRamsete.b = value;
+    } else if (k == "ramseteZeta")        { gRamsete.zeta = value;
+    } else if (k == "ramseteMinSpeed")    { gRamsete.minSpeed = value;
+    } else if (k == "ramseteMaxAccel")    { gRamsete.maxAccel = value;
+    } else if (k == "ramseteLookahead")   { gRamsete.lookaheadDist = value;
+    } else if (k == "ramseteTolerance")   { gRamsete.targetTolerance = value;
+    } else if (k == "ramseteHeadingTol")  { gRamsete.headingTolerance = value;
+    } else if (k == "ramseteProfile")     { gRamsete.useVelocityProfile = value != 0.0f;
     } else if (k == "mclDistSyncProp") {
         riku::chassis.mcl().setDistSyncProp(value);
     } else if (k == "seed") {

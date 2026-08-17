@@ -264,49 +264,91 @@ check('path uploaded to the bridge', api.pathCount() === pathPts.length,
       `${api.pathCount()} points`);
 
 // --- plumbing: DSL -> bridge -> moveRAMSETE ---------------------------------
+// The driving checks use a path clear of the field posts. The route above ends
+// 8.6 in from the post at (23.5,-47), close enough that the robot's corner
+// wedges on it, which measures the obstacle rather than the controller.
+const openPath = buildPath(parseRoute(
+  'via(x:-40,y:-35); via(x:-20,y:-22); via(x:0,y:-35); followPath();').paths[0]);
+const openEnd = openPath.at(-1);
+const uploadOpen = () => {
+  api.pathClear();
+  for (const q of openPath) api.pathPush(q.x, q.y, q.h);
+};
+// Drive it, returning the closest approach to the end and the peak speed.
+const runOpen = (startH, timeout, ticks = 700) => {
+  uploadOpen();
+  api.reset(openPath[0].x, openPath[0].y, startH);
+  api.routeClear();
+  api.routePush(13, 0, openPath.length, 0, timeout);
+  api.routeRun();
+  run(50);
+  const started = api.routeRunning() === 1;
+  let nearest = Infinity, peak = 0, collided = false, prev = st().true;
+  for (let i = 0; i < ticks; i++) {
+    api.step(10);
+    const q = st().true;
+    nearest = Math.min(nearest, Math.hypot(q.x - openEnd.x, q.y - openEnd.y));
+    peak = Math.max(peak, Math.hypot(q.x - prev.x, q.y - prev.y) / 0.01);
+    collided = collided || st().colliding;
+    prev = q;
+    if (api.routeRunning() !== 1) break;
+  }
+  api.stopAuton();
+  run(200);
+  return { started, nearest, peak, collided };
+};
+
 // Started PARTWAY along the path, so the velocity profile is already above
 // zero. This is the check that the whole path pipeline is wired correctly.
-api.reset(-10, -25, 90);
+uploadOpen();
+api.reset(-20, -22, 90);
 api.routeClear();
-api.routePush(13, 0, pathPts.length, 0, 5000);
+api.routePush(13, 0, openPath.length, 0, 5000);
 api.routeRun();
 run(300);
 check('path route started', api.routeRunning() === 1);
-
 let nearestEnd = Infinity;
 for (let i = 0; i < 500; i++) {
   api.step(10);
   const q = st().true;
-  nearestEnd = Math.min(nearestEnd, Math.hypot(q.x - 20, q.y + 40));
+  nearestEnd = Math.min(nearestEnd, Math.hypot(q.x - openEnd.x, q.y - openEnd.y));
 }
-check('RAMSETE tracks the uploaded path to its end', nearestEnd < 12,
+check('RAMSETE tracks the uploaded path to its end', nearestEnd < 3,
       `closest approach to path end ${nearestEnd.toFixed(1)} in`);
 api.stopAuton();
 run(200);
 
-// --- characterisation: RAMSETE cannot start from progress 0 -----------------
-// KNOWN BUG, pinned deliberately so this test fails once it is fixed.
-//
-// chassis.cpp samples the trapezoidal profile by ARC-LENGTH position, but
-// generateTrapezoidal() builds it over TIME, so its first sample is
-// {position: 0, velocity: 0}. At the path start progress == 0, so v_d == 0,
-// which zeroes k = 2*zeta*sqrt(w_d^2 + b*v_d^2) and therefore both v and w.
-// No motion -> progress stays 0 -> v_d stays 0. Self-sustaining deadlock.
-//
-// When this is fixed, flip the assertion to expect movement.
-api.reset(-40, -40, 61);
-api.routeClear();
-api.routePush(13, 0, pathPts.length, 0, 3000);
-api.routeRun();
-run(3000);
-s = st();
-const movedFromStart = Math.hypot(s.true.x + 40, s.true.y + 40);
-check('KNOWN BUG: RAMSETE stalls when started at the path start',
-      movedFromStart < 0.5,
-      `moved ${movedFromStart.toFixed(2)} in (expected ~0 until the profile ` +
-      `lookup is fixed; a non-zero value here means it now works)`);
-api.stopAuton();
-run(200);
+// --- regression: RAMSETE starts from progress 0 -----------------------------
+// v_d is read from the profile by arc-length position and a trapezoid is 0 at
+// its start, so v_d was 0 there. Every term of the law scales with v_d, so v
+// and w came out 0, progress stayed 0 and nothing ever moved. minSpeed floors
+// v_d below the profile's peak, which breaks the fixed point.
+const fromStart = runOpen(53.7, 5000);
+check('RAMSETE drives off the first point of its own path',
+      fromStart.nearest < 3 && !fromStart.collided,
+      `closest approach ${fromStart.nearest.toFixed(2)} in` +
+      (fromStart.collided ? ' (hit an obstacle)' : ''));
+
+// --- regression: the profile governs the speed ------------------------------
+// generateTrapezoidal left dAccel at its full-speed value on a triangular
+// profile, so the position axis jumped past `distance` and a position-keyed
+// lookup read peak velocity for the whole second half: the robot never
+// decelerated and sailed 20 in past the end.
+check('RAMSETE decelerates into the end instead of overshooting',
+      fromStart.nearest < 3,
+      `overshoot would leave the closest approach far short; got ` +
+      `${fromStart.nearest.toFixed(2)} in`);
+
+// Peak speed must track the profile, not exceed it. A lookahead reference left
+// a standing e_x whose k*e_x term inflated every speed by roughly half.
+// Triangular peak over this 48.4 in path at 50 in/s^2 is sqrt(a*L) = 49 in/s.
+check('peak speed follows the velocity profile', fromStart.peak < 60,
+      `peak ${fromStart.peak.toFixed(1)} in/s vs a 49 in/s profile peak`);
+
+// The floor must not swamp the profile -- the run should not creep at minSpeed.
+check('the profile still shapes the run, the floor does not',
+      fromStart.peak > 25,
+      `peak ${fromStart.peak.toFixed(1)} in/s, floor is ~7.2 in/s`);
 
 console.log('\n== LTV / LQR follower ==');
 api.setLoc(0);

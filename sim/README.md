@@ -212,31 +212,72 @@ way — directly costs localization quality, and there is no fallback. The Senso
 status panel exists to show exactly that: how many of the four sensors MCL is
 actually able to use at any moment.
 
-**`moveRAMSETE` cannot start from the beginning of its own path.**
-Reproduced by `sim/test/smoke.mjs`: from the path start the robot moves 0.00 in;
-dropped partway along the identical path it drives 56.7 in.
+**`moveRAMSETE` had three separate faults. All are fixed; the suite pins them.**
+The symptom that surfaced first: from the path start the robot moved 0.00 in,
+while dropped partway along the identical path it drove 56.7 in.
 
-`chassis.cpp` samples the trapezoidal profile by **arc-length position**, but
-`generateTrapezoidal()` builds it over **time**, so its first sample is
-`{position: 0, velocity: 0}`. At the path start `progress == 0`, so `v_d == 0`,
-which zeroes `k = 2*zeta*sqrt(w_d^2 + b*v_d^2)` and therefore both `v` and `w`.
-No motion means progress never advances, so `v_d` stays zero -- a
-self-sustaining deadlock.
+1. *It could not start.* `v_d` is read from the trapezoidal profile by
+   **arc-length position**, and a trapezoid is 0 at its start. Every term of the
+   law scales with `v_d` — `k = 2*zeta*sqrt(w_d^2 + b*v_d^2)` collapses with it —
+   so `v` and `w` both came out 0, progress never advanced and `v_d` stayed 0.
+   `RAMSETEParams::minSpeed` (previously declared but never read) now floors
+   `v_d`, but only below the profile's peak: past it the decel ramp has to be
+   allowed to reach zero or the robot creeps off the end of the path.
 
-The profile is a time-parameterised trajectory, so the fix is probably to
-advance a time cursor while the motion runs and sample `ramseteProfile` by
-elapsed time, rather than by arc length. Flooring `v_d` at a small minimum would
-also break the deadlock but leaves the profile mis-indexed for the rest of the
-path. Left alone -- it is a controller behaviour change and yours to make. The
-test pins the current behaviour and will fail once it is fixed.
+2. *It never decelerated.* `generateTrapezoidal()` recomputed `tAccel` and
+   `maxVel` for a triangular profile but left `dAccel` at its full-speed value.
+   The decel branch writes positions starting from `dAccel`, so on any
+   triangular profile the position axis jumped past `distance` and a
+   position-keyed lookup returned peak velocity for the entire second half. The
+   robot held ~48 in/s to the endpoint and sailed 20 in past it. Only the
+   position axis was wrong, so time-indexed users of the profile were unaffected.
 
-**LTV / LQR is fine — it is RAMSETE specifically.**
+3. *It ran roughly 50% fast.* The reference pose was the closest path point
+   pushed forward by `lookaheadDist`, which leaves a standing `e_x` of about
+   that distance. `k*e_x` then adds speed on top of every point of the profile,
+   and since `k` is proportional to `v_d` the inflation is proportional too, so
+   the profile could not govern the speed at all. RAMSETE's reference is where
+   the robot *should be*, so it is now the projection onto the path.
+   `lookaheadDist` is kept in the struct — removing it would break existing
+   designated-initializer calls — but nothing reads it.
+
+From the path start the robot now comes within **0.29 in** of the path end.
+
+**The default `b` was mis-scaled and is now 48.**
+`b` and `zeta` use the meter-based parameterization and the controller converts
+`b` to inches exactly, so the textbook `b = 2.0` is faithfully implemented — it
+is just set for FRC-scale paths. A VEX field's curves are far tighter relative
+to the robot, which needs much more feedback authority. Swept on this
+drivetrain, over three paths, with encoder slip / IMU noise / per-side scale
+error enabled:
+
+| `b` | straight | gentle curve | tight curve | peak speed |
+|----:|---------:|-------------:|------------:|-----------:|
+| 2   | 2.2 in   | 2.6 in       | 6.1 in      | 36–47 in/s |
+| 16  | 0.5 in   | 1.6 in       | 3.0 in      | 36–47 in/s |
+| 48  | 0.3 in   | 0.8 in       | 0.8 in      | 36–48 in/s |
+| 512 | 0.4 in   | 0.5 in       | 0.7 in      | 37–46 in/s |
+
+Error flattens out past ~48 and never destabilises, including at
+`responseTauMs` raised to 200 and 350 ms. Peak speed is unchanged throughout,
+so this buys tracking accuracy without making the robot faster or twitchier.
+
+**What RAMSETE still cannot do: hit a heading at the end.**
+Every term of the law scales with `v_d`, and the profile drives `v_d` to 0 at
+the endpoint, so the controller has no authority left there. On curved paths the
+robot finishes 5–12 deg off the final tangent and cannot correct it, which means
+the default `headingTolerance` of 2 deg is never met and the motion runs out its
+timeout instead of settling. Position converges fine. Widen `headingTolerance`
+per call, or follow the path with a `turnToHeading`. Left as-is because
+loosening an accuracy tolerance is a call about your auton, not a bug fix.
+
+**LTV / LQR was never affected — the deadlock was RAMSETE specifically.**
 The two followers advance their reference completely differently, and only one
-is vulnerable. `LTVPathFollower` steps `for (int i = 0; i < trajectory_size; ++i)`
+was vulnerable. `LTVPathFollower` steps `for (int i = 0; i < trajectory_size; ++i)`
 with `delay_until(&t, 10)`, i.e. one sample per 10 ms tick: the reference moves
 on the clock, not on the robot's progress, so a zero starting velocity is simply
 the first sample and the next tick carries on. Verified in the sim from the exact
-pose that deadlocks RAMSETE — it drives and lands 0.42 in from the path end.
+pose that used to deadlock RAMSETE — it drives and lands 0.42 in from the path end.
 
 Two things about LTV worth knowing, neither of them faults:
 
