@@ -87,6 +87,4 @@ chassis.setTelemetry([](const riku::ChassisSample& s) { ... });
 GPL-3.0-or-later — see [LICENSE](LICENSE).
 
 riku incorporates code from several projects; see
-[ATTRIBUTION.md](ATTRIBUTION.md) for per-source licensing. Note that FBLib
-declares no license upstream, so its rights status must be confirmed before
-publishing this repository.
+[ATTRIBUTION.md](ATTRIBUTION.md) for per-source licensing.

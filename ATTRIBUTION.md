@@ -22,8 +22,11 @@ keep the SPDX headers and copyright notices of their origin.
 ### FBLib — https://github.com/jiazegao/FBLib
 - Used for: `Tracking/` (odometry, MCL, RCL), `Movement_Control/`, `Util/`,
   `Chassis`, `Auton_Selector/`, and the `GameSpecific/` starting point.
-- License: **none declared upstream.** FBLib ships no `LICENSE` file and no
-  per-file copyright headers.
+- License: **none declared upstream** — FBLib ships no `LICENSE` file and no
+  per-file copyright headers. Permission to use it here was granted directly
+  by FBLib's author. That permission is the basis for this project's use; it
+  does not place a license on FBLib itself, so anyone redistributing this
+  repository should seek their own.
 - Files ported from FBLib are noted as such in their header comment. The FBLib
   namespace `FBLIB` is translated to `riku` and paths `FBLib/` to `riku/`;
   the code is otherwise line-for-line comparable to upstream.
