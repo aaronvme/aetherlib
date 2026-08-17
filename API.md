@@ -1029,9 +1029,9 @@ float FastTrig::cos(float rad);
 `include/gamespecific/` — the robot-specific half. Edit these freely; the `riku`
 namespace below them doesn't depend on any of it.
 
-### robot_config.hpp
+### config.hpp
 
-Declares the globals defined in `robot_config.cpp`: `master`, `leftMotors`,
+Declares the globals defined in `config.cpp`: `master`, `leftMotors`,
 `rightMotors`, `frontMotor`, `leverMotor`, `armMotor`, `imu`, `frontOptic`, the
 pneumatics (`matchLoadGate`, `lift`, `leftDescoreArm`, `trapDoor`, `intakeLift`),
 `front_dist` / `left_dist` / `back_dist` / `right_dist`, `distSensors`,

@@ -3,5 +3,5 @@
 #include "autons.hpp"
 #include "controls.hpp"
 #include "lift.hpp"
-#include "robot_config.hpp"
+#include "config.hpp"
 #include "tuning.hpp"

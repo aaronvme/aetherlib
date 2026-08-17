@@ -2,7 +2,7 @@
 #include <cmath>
 
 #include "gamespecific/lift.hpp"
-#include "gamespecific/robot_config.hpp"
+#include "gamespecific/config.hpp"
 #include "riku/util/exitcondition.hpp"
 #include "riku/util/logger.hpp"
 #include "riku/util/pid.hpp"

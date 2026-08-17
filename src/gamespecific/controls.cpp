@@ -1,5 +1,5 @@
 #include "gamespecific/controls.hpp"
-#include "gamespecific/robot_config.hpp"
+#include "gamespecific/config.hpp"
 
 #include "pros/misc.hpp"
 #include "pros/rtos.hpp"

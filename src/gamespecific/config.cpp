@@ -1,8 +1,65 @@
-#include "gamespecific/robot_config.hpp"
+#include "gamespecific/config.hpp"
 
 namespace riku {
 
 pros::Controller master(pros::E_CONTROLLER_MASTER);
+
+
+
+
+
+
+
+// ============================================================================
+// Field obstacles
+
+namespace {
+
+struct FieldCircle { float x, y, r; };
+
+constexpr FieldCircle kFieldPosts[] = {
+    // alliance studs
+    {-47.0f, -23.5f, 2.0f},   // red stud up
+    {-23.5f, -47.0f, 2.0f},   // red stud down
+    {23.5f,  47.0f, 2.0f},   // blue stud up
+    {47.0f,  23.5f, 2.0f},   // blue stud down
+    // neutral goals
+    {0.0f,   0.0f, 2.0f},   // center goal
+    {-47.0f,  23.5f, 2.0f},   // neutral red up
+    {23.5f, -47.0f, 2.0f},   // neutral red down
+    {-23.5f,  47.0f, 2.0f},   // neutral blue up
+    {47.0f, -23.5f, 2.0f},   // neutral blue down 
+};
+
+// MCL keeps POINTERS to its obstacle lists — these must outlive the tracker
+std::vector<MclTracking::LineObstacle> gMclLineObstacles;
+std::vector<MclTracking::CircleObstacle> gMclCircleObstacles;
+
+}  // namespace
+
+void registerFieldObstacles() {
+    gMclCircleObstacles.clear();
+    for (const auto& c : kFieldPosts) {
+        chassis.rcl().addCircleObstacle(c.x, c.y, c.r);   // lifetime 0 = permanent
+        gMclCircleObstacles.push_back({c.x, c.y, c.r});
+    }
+    chassis.mcl().setObstacles(&gMclLineObstacles, &gMclCircleObstacles);
+}
+
+void registerAutonDisableLine(float lifetimeMs) {
+    // Diagonal auton line: readings crossing it during autonomous see robots /
+    // game objects, not walls. Temporary — expires after `lifetimeMs`.
+    chassis.rcl().addLineObstacle(Field::FIELD_HALF, -Field::FIELD_HALF,
+                                  -Field::FIELD_HALF,  Field::FIELD_HALF,
+                                  lifetimeMs);
+}
+
+
+
+
+
+//CHASSIS/MOTORS============================================================================
+
 
 pros::MotorGroup leftMotors({7, 6}, pros::MotorGearset::green);
 pros::MotorGroup rightMotors({9, 10}, pros::MotorGearset::green);
@@ -51,50 +108,6 @@ std::array<Pose, MAX_DISTANCE_SENSORS> sensorMounts = {{
     {  0.0f, -3.5f,  3.0f * HALF_PI },
 }};
 
-// ============================================================================
-// Field obstacles — fixed elements that block distance-sensor rays.
-// ============================================================================
-
-namespace {
-
-struct FieldCircle { float x, y, r; };
-
-constexpr FieldCircle kFieldPosts[] = {
-    // alliance studs
-    {-47.0f, -23.5f, 2.0f},   // red stud up
-    {-23.5f, -47.0f, 2.0f},   // red stud down
-    {23.5f,  47.0f, 2.0f},   // blue stud up
-    {47.0f,  23.5f, 2.0f},   // blue stud down
-    // neutral goals
-    {0.0f,   0.0f, 2.0f},   // center goal
-    {-47.0f,  23.5f, 2.0f},   // neutral red up
-    {23.5f, -47.0f, 2.0f},   // neutral red down
-    {-23.5f,  47.0f, 2.0f},   // neutral blue up
-    {47.0f, -23.5f, 2.0f},   // neutral blue down 
-};
-
-// MCL keeps POINTERS to its obstacle lists — these must outlive the tracker
-std::vector<MclTracking::LineObstacle> gMclLineObstacles;
-std::vector<MclTracking::CircleObstacle> gMclCircleObstacles;
-
-}  // namespace
-
-void registerFieldObstacles() {
-    gMclCircleObstacles.clear();
-    for (const auto& c : kFieldPosts) {
-        chassis.rcl().addCircleObstacle(c.x, c.y, c.r);   // lifetime 0 = permanent
-        gMclCircleObstacles.push_back({c.x, c.y, c.r});
-    }
-    chassis.mcl().setObstacles(&gMclLineObstacles, &gMclCircleObstacles);
-}
-
-void registerAutonDisableLine(float lifetimeMs) {
-    // Diagonal auton line: readings crossing it during autonomous see robots /
-    // game objects, not walls. Temporary — expires after `lifetimeMs`.
-    chassis.rcl().addLineObstacle(Field::FIELD_HALF, -Field::FIELD_HALF,
-                                  -Field::FIELD_HALF,  Field::FIELD_HALF,
-                                  lifetimeMs);
-}
 
 ChassisConfig chassisConfig = {
     .lateralGains = { 5.0f, 0.0f, 5.0f },
