@@ -807,4 +807,32 @@ Pose MclTracking::getRawEstimate() const {
     return mRawEstimate;
 }
 
+void MclTracking::setSeed(std::uint32_t seed) {
+    mGen.seed(seed);
+    mDist.reset();
+
+    // The noise pool was filled from the old sequence; refill it so the whole
+    // generator state is a function of the seed alone.
+    for (int i = 0; i < NOISE_POOL_SIZE; i++) {
+        mNoisePool[i] = mDist(mGen);
+    }
+    mNoiseIdx = 0;
+    mRegenIdx = 0;
+}
+
+int MclTracking::snapshotParticles(float* out, int maxParticles) const {
+    if (out == nullptr || maxParticles <= 0) return 0;
+
+    const int count = std::min(mConfig.particleCount, maxParticles);
+    const auto& particles = *mParticles;
+    for (int i = 0; i < count; i++) {
+        const auto& p = particles[i];
+        out[i * 4 + 0] = p.pose.x;
+        out[i * 4 + 1] = p.pose.y;
+        out[i * 4 + 2] = p.pose.theta;
+        out[i * 4 + 3] = p.weight;
+    }
+    return count;
+}
+
 }  // namespace riku

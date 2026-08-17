@@ -201,6 +201,23 @@ public:
     /// Set the distance sync proportion
     void setDistSyncProp(float prop) { mConfig.distSyncProp = prop; }
 
+    /// Copy the live particle cloud out for visualisation or telemetry.
+    /// Writes 4 floats per particle (x, y, theta, weight) into `out`, up to
+    /// `maxParticles`. Returns the number actually written.
+    int snapshotParticles(float* out, int maxParticles) const;
+
+    /// Read-only view of the active configuration.
+    const Config& config() const { return mConfig; }
+
+    /// Reseed the particle RNG and regenerate the noise pool.
+    ///
+    /// The constructor seeds from std::random_device, which is what you want on
+    /// a robot. Pinning the seed makes a run reproducible instead — the same
+    /// inputs then produce the same particle cloud every time, which is what
+    /// lets a divergence be replayed in a simulator or a regression test.
+    /// Call immediately after construction, before startTracking().
+    void setSeed(std::uint32_t seed);
+
 private:
     // ========================================================================
     // Internal types
