@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>riku-sim</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="app">
+
+  <!-- ================= left: parameters ================= -->
+  <aside id="left" class="panel">
+
+    <div class="card">
+      <h3>Drivetrain <small>read from config.cpp</small></h3>
+      <div id="dt-facts" class="facts"></div>
+    </div>
+
+    <div class="card">
+      <h3>PID gains</h3>
+      <div id="params-pid"></div>
+    </div>
+
+    <div class="card">
+      <h3>Sensor error <small>what makes localization hard</small></h3>
+      <div id="params-sensor"></div>
+    </div>
+
+    <div class="card">
+      <h3>Drive error</h3>
+      <div id="params-drive"></div>
+    </div>
+
+    <div class="card">
+      <h3>Device rates <small>real hardware is not instant</small></h3>
+      <div id="params-rate"></div>
+    </div>
+
+    <div class="card">
+      <h3>Sensor status <small>sim reading vs what each filter accepts</small></h3>
+      <div id="sensor-diag" class="diag"></div>
+    </div>
+
+  </aside>
+
+  <!-- ================= centre: field ================= -->
+  <section id="stage">
+    <canvas id="field" width="900" height="900"></canvas>
+
+    <div id="hud">
+      <div class="row"><span>t</span><b id="hud-t">0.00 s</b></div>
+      <div class="row"><span>true</span><b id="hud-true">—</b></div>
+      <div class="row"><span>odom</span><b id="hud-odom">—</b></div>
+      <div class="row"><span>mcl</span><b id="hud-mcl">—</b></div>
+      <div class="row"><span>error</span><b id="hud-err">—</b></div>
+      <div class="row"><span>speed</span><b id="hud-speed">—</b></div>
+      <div class="row"><span>sensors</span><b id="hud-sensors">—</b></div>
+      <div class="row"><span>N_eff</span><b id="hud-neff">—</b></div>
+      <div class="row"><span>tasks</span><b id="hud-tasks">—</b></div>
+    </div>
+
+    <div id="transport">
+      <button id="btn-play" class="primary">Pause</button>
+      <button id="btn-step">Step 10 ms</button>
+      <button id="btn-reset">Reset</button>
+      <label class="slider">speed
+        <input id="speed" type="range" min="0.1" max="6" step="0.1" value="1">
+        <output id="speed-val">1.0×</output>
+      </label>
+      <select id="loc">
+        <option value="0">odometry only</option>
+        <option value="1">odom + MCL</option>
+        <option value="2">odom + RCL</option>
+        <option value="3">odom + MCL + RCL</option>
+      </select>
+    </div>
+
+    <div id="stage-hint">drag the robot to kidnap it · WASD or arrows drive it</div>
+  </section>
+
+  <!-- ================= right: route / plots / layers ================= -->
+  <aside id="right" class="panel">
+
+    <div class="tabs">
+      <button class="tab active" data-tab="route">Route</button>
+      <button class="tab" data-tab="plots">Plots</button>
+      <button class="tab" data-tab="view">View</button>
+    </div>
+
+    <!-- ---- route ---- -->
+    <div class="tabpane active" data-pane="route">
+      <div class="card">
+        <div class="row2">
+          <select id="saved"></select>
+          <button id="btn-save">Save</button>
+        </div>
+        <input id="route-name" type="text" placeholder="route name" value="untitled">
+      </div>
+
+      <div class="card grow">
+        <h3>Route code <small>runs the real Chassis API</small></h3>
+        <textarea id="editor" spellcheck="false"></textarea>
+        <div id="route-status" class="status"></div>
+      </div>
+
+      <div class="card">
+        <div class="btnrow">
+          <button id="btn-run-route" class="primary">Run route</button>
+          <button id="btn-stop">Stop</button>
+        </div>
+        <div class="row2" style="margin-top:8px">
+          <select id="auton"></select>
+          <button id="btn-run-auton">Run auton</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ---- plots ---- -->
+    <div class="tabpane" data-pane="plots">
+      <div class="card">
+        <h3>Signals</h3>
+        <div id="plot-picks" class="layers"></div>
+      </div>
+      <div class="card grow">
+        <canvas id="plot" width="640" height="900"></canvas>
+      </div>
+      <div class="card">
+        <label class="inline"><input type="checkbox" id="replay-on"> replay scrub
+          <span id="replay-t" class="dimtext">live</span></label>
+        <input id="replay-pos" type="range" min="0" max="1000" step="1" value="1000" disabled>
+        <button id="btn-clear-rec" class="wide">Clear recording</button>
+        <button id="btn-export" class="wide">Export CSV</button>
+      </div>
+    </div>
+
+    <!-- ---- view ---- -->
+    <div class="tabpane" data-pane="view">
+      <div class="card">
+        <h3>Layers</h3>
+        <div id="layers" class="layers"></div>
+      </div>
+      <div class="card">
+        <h3>Start pose</h3>
+        <div class="row3">
+          <label>x <input id="start-x" type="number" value="-48" step="1"></label>
+          <label>y <input id="start-y" type="number" value="-60" step="1"></label>
+          <label>θ° <input id="start-h" type="number" value="90" step="15"></label>
+        </div>
+        <button id="btn-place" class="wide">Reset to this pose</button>
+      </div>
+      <div class="card">
+        <h3>Field geometry</h3>
+        <div id="field-facts" class="facts"></div>
+        <textarea id="field-json" spellcheck="false" rows="8"></textarea>
+        <button id="btn-field-apply" class="wide">Apply geometry</button>
+        <button id="btn-field-reset" class="wide">Reload default</button>
+      </div>
+    </div>
+
+  </aside>
+</div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
