@@ -1,6 +1,7 @@
 // Ported from FBLib - https://github.com/jiazegao/FBLib
 #include "riku/movement_control/arc.hpp"
 
+#include <algorithm>
 #include <cmath>
 
 #include "riku/util/util.hpp"
