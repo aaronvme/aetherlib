@@ -303,6 +303,7 @@ void Chassis::executeCurrentMotion() {
     // and decelerates into the endpoint instead of slamming full speed.
     std::vector<float> ramseteCumLen;
     std::vector<ProfilePoint> ramseteProfile;
+    float ramsetePeakPos = 0.0f;   // arc length at which the profile peaks
     if (req.type == MotionType::RAMSETE) {
         const auto& path = req.ramsetePath;
         ramseteCumLen.resize(path.size(), 0.0f);
@@ -317,6 +318,10 @@ void Chassis::executeCurrentMotion() {
             cruiseInPerSec > 1e-3f && req.ramseteParams.maxAccel > 1e-3f) {
             ramseteProfile = generateTrapezoidal(totalLen, cruiseInPerSec,
                                                  req.ramseteParams.maxAccel);
+            float best = -1.0f;
+            for (const auto& pt : ramseteProfile) {
+                if (pt.velocity > best) { best = pt.velocity; ramsetePeakPos = pt.position; }
+            }
         }
     }
 
@@ -550,13 +555,11 @@ void Chassis::executeCurrentMotion() {
 
             float distToEnd = distanceToPoint(pose, path.back().x, path.back().y);
 
-            // — Reference pose: closest point on the path, nudged forward by a
-            //   small lookahead so the robot always aims slightly ahead. —
+            // — Reference pose: where the robot should BE, i.e. its projection
+            //   onto the path. Offsetting it forward leaves a standing e_x, and
+            //   k·e_x then adds speed on top of every point of the profile. —
             int closestIdx = closestPathIndex(path, pose);
-            int targetIdx = lookaheadIndex(path, pose, req.ramseteParams.lookaheadDist);
-            if (distToEnd < req.ramseteParams.lookaheadDist) {
-                targetIdx = static_cast<int>(path.size()) - 1;
-            }
+            int targetIdx = closestIdx;
             const Pose& target = path[targetIdx];
 
             // — Desired forward speed v_d (in/s) from the velocity profile,
@@ -572,6 +575,15 @@ void Chassis::executeCurrentMotion() {
                 for (const auto& pt : ramseteProfile) {
                     if (pt.position >= progress) { v_d = pt.velocity; break; }
                 }
+            }
+
+            // The profile reads 0 at both ends and the whole law scales with
+            // v_d, so without a floor a path never starts from its own first
+            // point. Only floor before the peak — past it the decel ramp has
+            // to be allowed to reach zero or the robot creeps off the end.
+            if (progress < ramsetePeakPos) {
+                v_d = std::max(v_d, maxSpeedInPerSec *
+                                    (req.ramseteParams.minSpeed / 127.0f));
             }
 
             // — Reference angular velocity ω_d = v_d · curvature (rad/s) —

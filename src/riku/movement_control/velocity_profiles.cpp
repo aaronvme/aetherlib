@@ -23,6 +23,11 @@ std::vector<ProfilePoint> generateTrapezoidal(float distance, float maxVel,
         // Triangular: never reaches maxVel
         tAccel = std::sqrt(distance / maxAccel);
         maxVel = maxAccel * tAccel;
+        // dAccel must follow tAccel down. Left at its full-speed value the
+        // decel branch below writes positions starting past `distance`, so the
+        // profile's position axis jumps and anything sampling it by position
+        // reads peak velocity for the whole second half of the move.
+        dAccel = 0.5f * maxAccel * tAccel * tAccel;
         tCruise = 0.0f;
         dCruise = 0.0f;
     } else {
