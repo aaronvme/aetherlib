@@ -259,19 +259,23 @@ RclTracking::ReadingClass RclTracking::classifyReading(int index, float& wallDis
         if (dist < wallRange) return ReadingClass::Invalid;
     }
 
+    // Cone test, matching MCL and the EKF: a post owns the return either because
+    // the reading sits on its surface or because it stands in front of the wall.
     for (const auto& obs : mCircleObstacles) {
-        float fx = s.worldX - obs.x;
-        float fy = s.worldY - obs.y;
-        float b = 2.0f * (fx * s.rayCos + fy * s.raySin);
-        float c = fx * fx + fy * fy - obs.radius * obs.radius;
-        float disc = b * b - 4.0f * c;
-        if (disc < 0.0f) continue;
+        const float ox = obs.x - s.worldX;
+        const float oy = obs.y - s.worldY;
+        const float along = ox * s.rayCos + oy * s.raySin;
+        if (along < 0.0f) continue;
+        const float perp = std::fabs(-ox * s.raySin + oy * s.rayCos);
+        if (perp > obs.radius + along * mConfig.obstacleConeFrac) continue;
 
-        disc = std::sqrt(disc);
-        float tNear = (-b - disc) * 0.5f;
-        float tFar  = (-b + disc) * 0.5f;
-        // tNear < 0 <= tFar means the sensor sits inside the obstacle.
-        if (tFar >= 0.0f && tNear < wallRange) return ReadingClass::Invalid;
+        const float postRange = std::sqrt(ox * ox + oy * oy) - obs.radius;
+        if (std::fabs(readingInch - postRange) <= mConfig.obstacleRangeTol) {
+            return ReadingClass::Invalid;
+        }
+        if (postRange > 0.0f && postRange + mConfig.obstacleRangeTol < wallRange) {
+            return ReadingClass::Invalid;
+        }
     }
 
     // — Agreement check —
@@ -507,12 +511,14 @@ void RclTracking::syncUpdate() {
     // cycle turns one bad reading into a pose teleport.
     // Once the pose is disproved this is not refining an estimate, it is replacing
     // a discredited one with a direct wall measurement.
-    const float prop = mDisplaced ? mConfig.recoverySyncProp : mConfig.syncProp;
+    const float prop = mConfig.hardSync ? 1.0f
+                     : (mDisplaced ? mConfig.recoverySyncProp : mConfig.syncProp);
     // Rate-limited so whatever consumes the pose sees it continuous; a proven
-    // displacement is exempt.
+    // displacement is exempt, and so is hardSync.
     const float rateStep = mConfig.maxSyncRate * (mConfig.updatePeriodMs / 1000.0f);
-    const float maxStep = mDisplaced ? Field::FIELD_LENGTH
-                                     : std::min(mConfig.maxSyncDist, rateStep);
+    const float maxStep = (mDisplaced || mConfig.hardSync)
+                              ? Field::FIELD_LENGTH
+                              : std::min(mConfig.maxSyncDist, rateStep);
 
     float dx = mXMeasured ? (mLatestEstimate.x - odomPose.x) * prop : 0.0f;
     float dy = mYMeasured ? (mLatestEstimate.y - odomPose.y) * prop : 0.0f;

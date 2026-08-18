@@ -76,6 +76,12 @@ public:
     struct Config {
         int sensorCount = MAX_DISTANCE_SENSORS;
         float maxSyncDist = 5.0f;          // max distance (inches) to sync per update
+        // A wall reading that passed every check is not an estimate to blend
+        // toward -- it is the coordinate, to within sensor noise. hardSync writes
+        // the measured axes outright, ignoring syncProp and maxSyncRate. The cost
+        // is that a misclassified reading teleports the pose instead of nudging
+        // it, so the gating ahead of it has to be trusted.
+        bool hardSync = false;
         float syncProp = 0.15f;            // fraction of the RCL/odometry error
                                            //   applied per update (0-1)
         float maxSyncRate = 8.0f;          // inches/sec ceiling on ordinary
@@ -99,6 +105,13 @@ public:
                                            //   than this must produce a return,
                                            //   so silence contradicts the pose
         int confidenceThreshold = 30;      // min V5 sensor confidence (0-63)
+
+        // Circle obstacles are tested over the sensor's cone, not a pencil ray,
+        // and matched against the reading -- the same rule MCL and the EKF use.
+        // The V5 has a 25 degree field of view, so a post a foot off the axis
+        // still owns the return, and a pencil ray misses most real post hits.
+        float obstacleConeFrac = 0.22f;    // tan(12.5 deg), the V5 half-cone
+        float obstacleRangeTol = 6.0f;     // inches; reading vs post surface
         bool autoSync = true;              // automatically sync pose to odometry
         bool useAccumulation = false;      // average multiple readings for stability
     };
@@ -222,6 +235,21 @@ public:
     /// Set the RCL internal estimate (called by Chassis::setPose to keep estimates
     /// synchronized)
     void setRclPose(const Pose& pose) { mLatestEstimate = pose; }
+
+    /// Read-only view of the active configuration.
+    const Config& config() const { return mConfig; }
+
+    /// Replace the tuning parameters on a running filter. sensorCount is held at
+    /// its current value -- it is derived from the sensors actually wired up, not
+    /// something to tune.
+    void setConfig(const Config& config) {
+        int count = mConfig.sensorCount;
+        mConfig = config;
+        mConfig.sensorCount = count;
+    }
+
+    /// Whether this filter writes its estimate back into odometry.
+    void setAutoSync(bool enabled) { mConfig.autoSync = enabled; }
 
     // ========================================================================
     // Accessors
