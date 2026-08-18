@@ -23,6 +23,7 @@ Chassis::Chassis(Drivetrain& drivetrain, const OdomSensors& sensors,
       mEkf(mOdom, config.distanceSensors, Pose{}, config.ekfConfig),
       mLateralPID(config.lateralGains, config.lateralWindupRange, config.lateralFlipReset),
       mAngularPID(config.angularGains, config.angularWindupRange, config.angularFlipReset),
+      mRamseteFf(FeedforwardGains{}, drivetrain.trackWidth * INCH_TO_METER),
       mThrottleCurve(config.throttleCurve),
       mSteerCurve(config.steerCurve)
 {
@@ -42,14 +43,14 @@ Chassis::Chassis(Drivetrain& drivetrain, const OdomSensors& sensors,
     // Start the persistent motion task (created once, reused for all async motions)
     ensureMotionTask();
 
-    // Start the background odometry task â€” the SOLE caller of mOdom.update().
+    // Start the background odometry task — the SOLE caller of mOdom.update().
     // Centralizing updates in one task fixes two concurrency bugs that arise
     // now that odometry is read from several tasks:
     //   1. Data race: the motion loop, MCL, and RCL used to each call update()
     //      concurrently, corrupting mPose/mPrev* (unserialized read-modify-write).
     //   2. Missed deltas: every update() call consumes the sensor baseline, so
     //      MCL's per-tick getLastDelta() lost the motion consumed by other
-    //      callers' ticks â€” particles systematically fell behind the robot.
+    //      callers' ticks — particles systematically fell behind the robot.
     // It also keeps the pose fresh during driver control, when no motion
     // command is running (previously the pose froze outside of motions).
     mOdom.startBackgroundOdom();
@@ -70,7 +71,7 @@ Chassis::~Chassis() {
     }
     mDrivetrain.setVoltage(0, 0);
 
-    // Stop the tracking worker tasks BEFORE the odometry task â€” they call into
+    // Stop the tracking worker tasks BEFORE the odometry task — they call into
     // mOdom every tick, so they must be gone before OdomTracking is torn down.
     mEkf.stopTracking();
     mMcl.stopTracking();
@@ -88,7 +89,7 @@ void Chassis::calibrate() {
 
 void Chassis::setPose(const Pose& pose) {
     // Dry-run: only re-baseline the SIMULATION. The preview must be
-    // side-effect-free â€” auton functions call setPose() at their start, and
+    // side-effect-free — auton functions call setPose() at their start, and
     // mutating real odometry/MCL/RCL here would teleport the robot's actual
     // localization every time a preview is generated.
     if (mDryRun) {
@@ -108,7 +109,7 @@ void Chassis::setPose(const Pose& pose) {
 }
 
 void Chassis::setPosition(float x, float y) {
-    if (mDryRun) {   // side-effect-free in dry-run â€” adjust the sim pose only
+    if (mDryRun) {   // side-effect-free in dry-run — adjust the sim pose only
         mDryRunPose.x = x;
         mDryRunPose.y = y;
         mDryRunPath.push_back(mDryRunPose);
@@ -125,7 +126,7 @@ void Chassis::setPosition(float x, float y) {
 }
 
 void Chassis::setHeading(float thetaDeg) {
-    if (mDryRun) {   // side-effect-free in dry-run â€” adjust the sim pose only
+    if (mDryRun) {   // side-effect-free in dry-run — adjust the sim pose only
         mDryRunPose.theta = vexToStdRad(thetaDeg);
         mDryRunPath.push_back(mDryRunPose);
         return;
@@ -133,7 +134,7 @@ void Chassis::setHeading(float thetaDeg) {
     Pose current = mOdom.getPose();
     Pose newPose{current.x, current.y, vexToStdRad(thetaDeg)};
     mOdom.setPose(newPose);
-    // Propagate to tracking systems â€” same reason as setPosition().
+    // Propagate to tracking systems — same reason as setPosition().
     mMcl.setPose(newPose);
     mRcl.setRclPose(newPose);
     mEkf.setPose(newPose);
@@ -299,18 +300,18 @@ void Chassis::executeCurrentMotion() {
 
     // Distance motions: resolve the relative distance to an ABSOLUTE field
     // target ONCE at execution start. Recomputing it per-iteration from the
-    // live pose moves the target with the robot â€” the error never shrinks and
+    // live pose moves the target with the robot — the error never shrinks and
     // every moveDistance runs at full output until its timeout.
     float distTargetX = 0.0f, distTargetY = 0.0f;
     if (req.type == MotionType::Distance) {
-        // Pose is kept fresh by the background odometry task â€” no update() here.
+        // Pose is kept fresh by the background odometry task — no update() here.
         Pose startPose = mDryRun ? mDryRunPose : mOdom.getPose();
         float dir = req.moveDistParams.forwards ? 1.0f : -1.0f;
         distTargetX = startPose.x + req.targetDistance * dir * std::cos(startPose.theta);
         distTargetY = startPose.y + req.targetDistance * dir * std::sin(startPose.theta);
     }
 
-    // â€” RAMSETE: precompute path arc-length + a velocity profile ONCE â€”
+    // — RAMSETE: precompute path arc-length + a velocity profile ONCE —
     // ramseteCumLen[i] is the arc length from path[0] to path[i] (inches).
     // ramseteProfile gives the desired forward speed (in/s) as a function of
     // distance travelled along the path, so the robot accelerates off the line
@@ -320,6 +321,16 @@ void Chassis::executeCurrentMotion() {
     float ramsetePeakPos = 0.0f;   // arc length at which the profile peaks
     if (req.type == MotionType::RAMSETE) {
         const auto& path = req.ramsetePath;
+        if (req.ramseteParams.useVelocityController) {
+            mRamseteFf.setGains(req.ramseteParams.ffGains);
+            // Desaturate against the authority the caller actually allowed. Left
+            // at 12 V the controller scales the pair against full scale and the
+            // per-side clamp below then truncates one side alone, which is the
+            // curvature loss the pair-scaling exists to prevent.
+            mRamseteFf.setMaxVoltage(12.0f * req.ramseteParams.maxSpeed / 127.0f);
+            mRamseteFf.setTrackWidth(mDrivetrain.trackWidth * INCH_TO_METER);
+            mRamseteFf.reset();
+        }
         ramseteCumLen.resize(path.size(), 0.0f);
         for (size_t i = 1; i < path.size(); ++i) {
             ramseteCumLen[i] = ramseteCumLen[i - 1] +
@@ -393,8 +404,15 @@ void Chassis::executeCurrentMotion() {
     bool settleStarted = false;
     uint32_t settleStartElapsed = 0;
 
+    uint32_t prevTick = pros::millis();
+
     while (mMotionRunning && !mMotionCancelled) {
-        // Odometry freshness is provided by the background odometry task â€” do
+        const uint32_t nowTick = pros::millis();
+        const uint32_t tickMs = nowTick - prevTick;
+        float tickDt = tickMs / 1000.0f;
+        if (mDryRun || tickDt <= 0.0f || tickDt > 0.1f) tickDt = 0.01f;
+        prevTick = nowTick;
+        // Odometry freshness is provided by the background odometry task — do
         // NOT call mOdom.update() here (it would race and consume deltas).
         Pose pose = mDryRun ? mDryRunPose : mOdom.getPose();
 
@@ -403,13 +421,13 @@ void Chassis::executeCurrentMotion() {
         bool settled = false;
         bool exitNow = false;          // timeout / degenerate input: never debounced
         bool useCustomOutput = false;  // Swing / RAMSETE set their own motor outputs
-        float latLimit = 127.0f;       // max lateral output (Â±)
-        float angLimit = 127.0f;       // max angular output (Â±)
+        float latLimit = 127.0f;       // max lateral output (±)
+        float angLimit = 127.0f;       // max angular output (±)
 
         switch (req.type) {
         case MotionType::Distance: {
             latLimit = req.moveDistParams.maxSpeed;
-            // Absolute field target resolved once at execution start (above) â€”
+            // Absolute field target resolved once at execution start (above) —
             // relative to the pose when execution began, so a queued Distance
             // motion still aims correctly after a preceding turn.
             float targetX = distTargetX;
@@ -454,10 +472,10 @@ void Chassis::executeCurrentMotion() {
             float rawErrRad = angleDiffRad(pose.theta, req.targetHeadingRad);
             // Resolve to the requested turn direction (CW, CCW, or SHORTEST).
             // Without this, CW/CCW are ignored and the robot always takes the
-            // shortest path â€” a 350Â° requested CW turn would be 10Â° CCW.
+            // shortest path — a 350° requested CW turn would be 10° CCW.
             float headingErrRad = resolveTurnError(rawErrRad, req.turnHeadingParams.direction);
             // Once inside tolerance the forced direction is satisfied. Keep
-            // resolving and a 1Â° overshoot flips to -359Â°, so the robot spins
+            // resolving and a 1° overshoot flips to -359°, so the robot spins
             // another full lap and never settles.
             float tolRad = degToRad(req.turnHeadingParams.targetTolerance);
             if (std::fabs(rawErrRad) < tolRad) headingErrRad = rawErrRad;
@@ -539,7 +557,7 @@ void Chassis::executeCurrentMotion() {
             if (clampedLead > 24.0f) clampedLead = 24.0f;
 
             // Carrot point: offset BEHIND the target along the target's FINAL
-            // heading (not the robotâ†’target bearing). This offset direction is
+            // heading (not the robot→target bearing). This offset direction is
             // what makes the approach curve in to hit the target facing the
             // right way; using the bearing-to-target collapses the carrot onto
             // the straight line to the target and produces no curve at all.
@@ -548,7 +566,7 @@ void Chassis::executeCurrentMotion() {
 
             // Interpolate carrot toward target as distance decreases.
             // Guard lead == 0: distToTarget/(0*12) is NaN when the robot sits
-            // exactly on the target (0/0) â€” NaN would flow into the PID and
+            // exactly on the target (0/0) — NaN would flow into the PID and
             // then into the motor voltages.
             float t = (lead > 1e-6f)
                       ? std::min(distToTarget / (lead * 12.0f), 1.0f)
@@ -596,18 +614,18 @@ void Chassis::executeCurrentMotion() {
             // RAMSETE controller: nonlinear SE(2) trajectory tracking
             // ================================================================
             // Standard unicycle tracking law (WPILib / De Luca convention):
-            //   k  = 2Î¶Â·âˆš(Ï‰_dÂ² + bÂ·v_dÂ²)
-            //   v  = v_dÂ·cos(e_Î¸) + kÂ·e_x                          [in/s]
-            //   Ï‰  = Ï‰_d + bÂ·v_dÂ·sinc(e_Î¸)Â·e_y + kÂ·e_Î¸             [rad/s]
+            //   k  = 2ζ·√(ω_d² + b·v_d²)
+            //   v  = v_d·cos(e_θ) + k·e_x                          [in/s]
+            //   ω  = ω_d + b·v_d·sinc(e_θ)·e_y + k·e_θ             [rad/s]
             //
-            // Everything is in real units: v/v_d in inches/second, Ï‰/Ï‰_d in
+            // Everything is in real units: v/v_d in inches/second, ω/ω_d in
             // radians/second.  v_d comes from a velocity profile over the path
             // (accel/decel), NOT a constant.  Outputs are converted to per-side
             // wheel speeds and emitted directly (no lateral/angular mixing), so
             // the sign convention is unambiguous.
             //
             // `b` is taken in the conventional meter-based parameterization
-            // (bâ‰ˆ2.0, Î¶â‰ˆ0.7 are good defaults) and scaled to inches here.
+            // (b≈2.0, ζ≈0.7 are good defaults) and scaled to inches here.
             // ================================================================
 
             const auto& path = req.ramsetePath;
@@ -618,21 +636,21 @@ void Chassis::executeCurrentMotion() {
 
             float distToEnd = distanceToPoint(pose, path.back().x, path.back().y);
 
-            // â€” Reference pose: where the robot should BE, i.e. its projection
+            // — Reference pose: where the robot should BE, i.e. its projection
             //   onto the path. Offsetting it forward leaves a standing e_x, and
-            //   kÂ·e_x then adds speed on top of every point of the profile. â€”
+            //   k·e_x then adds speed on top of every point of the profile. —
             int closestIdx = closestPathIndex(path, pose);
             int targetIdx = closestIdx;
             const Pose& target = path[targetIdx];
 
-            // â€” Desired forward speed v_d (in/s) from the velocity profile,
-            //   sampled at the robot's arc-length progress along the path. â€”
+            // — Desired forward speed v_d (in/s) from the velocity profile,
+            //   sampled at the robot's arc-length progress along the path. —
             float progress = (closestIdx >= 0 &&
                               closestIdx < static_cast<int>(ramseteCumLen.size()))
                              ? ramseteCumLen[closestIdx] : 0.0f;
             float v_d = maxSpeedInPerSec * (req.ramseteParams.maxSpeed / 127.0f);
             if (!ramseteProfile.empty()) {
-                // profile positions are monotonic â€” take the first sample at or
+                // profile positions are monotonic — take the first sample at or
                 // past our progress (its velocity is the target speed there).
                 v_d = ramseteProfile.back().velocity;
                 for (const auto& pt : ramseteProfile) {
@@ -642,14 +660,14 @@ void Chassis::executeCurrentMotion() {
 
             // The profile reads 0 at both ends and the whole law scales with
             // v_d, so without a floor a path never starts from its own first
-            // point. Only floor before the peak â€” past it the decel ramp has
+            // point. Only floor before the peak — past it the decel ramp has
             // to be allowed to reach zero or the robot creeps off the end.
             if (progress < ramsetePeakPos) {
                 v_d = std::max(v_d, maxSpeedInPerSec *
                                     (req.ramseteParams.minSpeed / 127.0f));
             }
 
-            // â€” Reference angular velocity Ï‰_d = v_d Â· curvature (rad/s) â€”
+            // — Reference angular velocity ω_d = v_d · curvature (rad/s) —
             float w_d = 0.0f;
             if (targetIdx > 0 && targetIdx < static_cast<int>(path.size()) - 1) {
                 const Pose& prev = path[targetIdx - 1];
@@ -660,49 +678,67 @@ void Chassis::executeCurrentMotion() {
                 }
             }
 
-            // â€” Pose error in the robot frame â€”
+            // — Pose error in the robot frame —
             float dx = target.x - pose.x;
             float dy = target.y - pose.y;
             float e_x =  dx * std::cos(pose.theta) + dy * std::sin(pose.theta);
             float e_y = -dx * std::sin(pose.theta) + dy * std::cos(pose.theta);
             float e_theta = angleDiffRad(pose.theta, target.theta);
 
-            // â€” RAMSETE gains + law (b scaled metersâ†’inches) â€”
+            // — RAMSETE gains + law (b scaled meters→inches) —
             float b = req.ramseteParams.b * (INCH_TO_METER * INCH_TO_METER);
             float zeta = req.ramseteParams.zeta;
             float k = 2.0f * zeta * std::sqrt(w_d * w_d + b * v_d * v_d);
 
-            // sinc(e_Î¸) = sin(e_Î¸)/e_Î¸, â†’ 1 as e_Î¸ â†’ 0 (avoids 0/0)
+            // sinc(e_θ) = sin(e_θ)/e_θ, → 1 as e_θ → 0 (avoids 0/0)
             float sinc = (std::fabs(e_theta) < 1e-4f)
                          ? 1.0f : std::sin(e_theta) / e_theta;
 
             float v = v_d * std::cos(e_theta) + k * e_x;             // in/s
             float w = w_d + b * v_d * sinc * e_y + k * e_theta;      // rad/s
 
-            // â€” Convert (v, Ï‰) to per-side wheel speeds and then motor units â€”
-            //   left/right wheel linear speed = v âˆ“ Ï‰Â·(trackWidth/2)  [in/s]
-            //   CCW (Ï‰>0, increasing heading) â†’ right side faster, matching the
+            // — Convert (v, ω) to per-side wheel speeds and then motor units —
+            //   left/right wheel linear speed = v ∓ ω·(trackWidth/2)  [in/s]
+            //   CCW (ω>0, increasing heading) → right side faster, matching the
             //   library's standard-math heading convention.
             float halfTrack = mDrivetrain.trackWidth * 0.5f;
             float vLeft  = v - w * halfTrack;
             float vRight = v + w * halfTrack;
-            float toMotor = (maxSpeedInPerSec > 1e-3f) ? (127.0f / maxSpeedInPerSec) : 0.0f;
             float maxOut = req.ramseteParams.maxSpeed;
-            customLeft  = clamp(vLeft  * toMotor, -maxOut, maxOut);
-            customRight = clamp(vRight * toMotor, -maxOut, maxOut);
-            useCustomOutput = true;
 
             const bool nearEnd = distToEnd < req.ramseteParams.targetTolerance;
+            const bool wantSideVel = req.ramseteParams.useVelocityController ||
+                                     (nearEnd && req.ramseteParams.stallSpeed > 0.0f);
             float vlMeas = 0.0f, vrMeas = 0.0f;
-            if (nearEnd && req.ramseteParams.stallSpeed > 0.0f) {
+            if (wantSideVel) {
                 vlMeas = mDrivetrain.leftVelocityInPerSec();
                 vrMeas = mDrivetrain.rightVelocityInPerSec();
             }
+
+            if (req.ramseteParams.useVelocityController) {
+                // Scale the pair, not each side, so a saturated side cannot
+                // quietly straighten the commanded curvature.
+                const float outLimit = maxSpeedInPerSec * (maxOut / 127.0f);
+                const float peak = std::max(std::fabs(vLeft), std::fabs(vRight));
+                if (peak > outLimit && peak > 1e-6f) {
+                    const float sc = outLimit / peak;
+                    v *= sc; w *= sc;
+                }
+                const DrivetrainVoltages out = mRamseteFf.update(
+                    v * INCH_TO_METER, w,
+                    vlMeas * INCH_TO_METER, vrMeas * INCH_TO_METER, tickDt);
+                customLeft  = clamp(out.leftPower(),  -maxOut, maxOut);
+                customRight = clamp(out.rightPower(), -maxOut, maxOut);
+            } else {
+                float toMotor = (maxSpeedInPerSec > 1e-3f) ? (127.0f / maxSpeedInPerSec) : 0.0f;
+                customLeft  = clamp(vLeft  * toMotor, -maxOut, maxOut);
+                customRight = clamp(vRight * toMotor, -maxOut, maxOut);
+            }
+            useCustomOutput = true;
+
             {
                 const bool headingOk =
                     std::fabs(e_theta) < degToRad(req.ramseteParams.headingTolerance);
-                // The average of two signed side speeds is ~0 through any
-                // in-place rotation, so it would read stalled at full spin.
                 const bool stalled =
                     req.ramseteParams.stallSpeed > 0.0f &&
                     std::max(std::fabs(vlMeas), std::fabs(vrMeas)) <
@@ -729,7 +765,7 @@ void Chassis::executeCurrentMotion() {
             angularOut = mAngularPID.update(headingErrRad);
             lateralOut = 0;
 
-            // Only one side moves â€” store in custom output vars
+            // Only one side moves — store in custom output vars
             if (req.swingSide == SwingSide::Left) {
                 // Left stationary, right turns. Pivoting about the left wheel,
                 // driving the right side forward rotates CCW.
@@ -764,7 +800,7 @@ void Chassis::executeCurrentMotion() {
             // angularOut is CCW-positive (it comes from angleDiffRad on
             // standard-math thetas), and CCW needs the RIGHT side faster.
             // Adding it to the left instead makes the heading loop positive
-            // feedback, stable at target Â± 180Â°.
+            // feedback, stable at target ± 180°.
             left  = clamp(lateralOut - angularOut, -127.0f, 127.0f);
             right = clamp(lateralOut + angularOut, -127.0f, 127.0f);
         }
@@ -772,8 +808,8 @@ void Chassis::executeCurrentMotion() {
         if (!mDryRun) {
             mDrivetrain.setVoltage(left, right);
         } else {
-            // â€” Dry-run: integrate motor outputs into synthetic pose â€”
-            // Convert voltage outputs â†’ linear/angular velocity â†’ pose update
+            // — Dry-run: integrate motor outputs into synthetic pose —
+            // Convert voltage outputs → linear/angular velocity → pose update
             float leftFrac  = left / 127.0f;
             float rightFrac = right / 127.0f;
 
@@ -802,8 +838,8 @@ void Chassis::executeCurrentMotion() {
             mDryRunPose.theta += dThetaRad;
             mDryRunPose.theta = wrapRad(mDryRunPose.theta);
 
-            // Cap recording at the preview's draw limit (4096 â‰ˆ 41 s of sim
-            // time) â€” keeps worst-case path memory bounded at ~48 KB
+            // Cap recording at the preview's draw limit (4096 ≈ 41 s of sim
+            // time) — keeps worst-case path memory bounded at ~48 KB
             if (mDryRunPath.size() < 4096) {
                 mDryRunPath.push_back(mDryRunPose);
             }
@@ -858,7 +894,7 @@ void Chassis::executeCurrentMotion() {
 void Chassis::moveDistance(float target, float timeout, const MoveDistanceParams& params, bool async) {
     MotionRequest req;
     req.type = MotionType::Distance;
-    req.targetDistance = target;     // store raw distance â€” target X/Y computed at exec time
+    req.targetDistance = target;     // store raw distance — target X/Y computed at exec time
     req.moveDistParams = params;
     req.timeout = timeout;
 
@@ -1004,7 +1040,7 @@ void Chassis::cancelMotion() {
     // resolved (either it ran, or it was dropped from the queue above).
     mCompletedSeq.store(mMotionSeqCounter.load());
 
-    // Reset cancel flag â€” without this, subsequent async motions are
+    // Reset cancel flag — without this, subsequent async motions are
     // silently discarded because runMotionTask() checks mMotionCancelled
     // after dequeue and skips execution if it's still true.
     mMotionCancelled = false;
@@ -1023,10 +1059,10 @@ void Chassis::waitUntilSettled() {
 }
 
 void Chassis::waitUntilDist(float dist) {
-    // In dry-run the real pose never moves â€” waiting would hang the preview.
+    // In dry-run the real pose never moves — waiting would hang the preview.
     if (mDryRun) return;
     Pose start = mOdom.getPose();
-    // The background odometry task keeps the pose fresh â€” no update() here
+    // The background odometry task keeps the pose fresh — no update() here
     // (calling it from this task too would race and consume MCL's deltas).
     while (distanceToPoint(mOdom.getPose(), start.x, start.y) < dist) {
         // A motion that times out, stalls against a wall, or is cancelled may
@@ -1135,7 +1171,7 @@ void Chassis::setDryRun(bool enabled) {
     mDryRun = enabled;
 
     // The offline dry-run loop doesn't consume wall-clock time, so the PIDs
-    // must use the simulated 10 ms step â€” otherwise dt â‰ˆ 0 kills the I/D terms
+    // must use the simulated 10 ms step — otherwise dt ≈ 0 kills the I/D terms
     // and the previewed motion is under-damped compared to the real loop.
     mLateralPID.setFixedDt(enabled ? 0.01f : 0.0f);
     mAngularPID.setFixedDt(enabled ? 0.01f : 0.0f);

@@ -17,6 +17,7 @@
 #include "riku/movement_control/turntopoint.hpp"
 #include "riku/movement_control/arc.hpp"
 #include "riku/movement_control/boomerang.hpp"
+#include "riku/movement_control/feedforward.hpp"
 #include "riku/movement_control/ramsete.hpp"
 #include "riku/movement_control/velocity_profiles.hpp"
 #include "riku/tracking/ekf_tracking.hpp"
@@ -314,6 +315,10 @@ private:
     // PID controllers
     PID mLateralPID;
     PID mAngularPID;
+
+    // Closes RAMSETE's loop on measured wheel speed when the motion asks for
+    // it. Reset at the start of every RAMSETE motion, so one instance is fine.
+    FeedforwardController mRamseteFf;
 
     // Motion state
     std::atomic<bool> mMotionRunning{false};

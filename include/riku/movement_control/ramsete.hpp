@@ -3,6 +3,7 @@
 
 #include <vector>
 
+#include "riku/movement_control/feedforward.hpp"
 #include "riku/util/util.hpp"
 
 namespace riku {
@@ -24,8 +25,8 @@ int lookaheadIndex(const std::vector<Pose>& path, const Pose& pose,
 
 struct RAMSETEParams {
     // b and zeta use the conventional (meter-based) parameterization; the
-    // controller scales b to inches internally. The textbook bâ‰ˆ2.0 is set for
-    // FRC-scale paths and tracks a VEX field badly â€” its curves are far tighter
+    // controller scales b to inches internally. The textbook b≈2.0 is set for
+    // FRC-scale paths and tracks a VEX field badly — its curves are far tighter
     // relative to the robot, and measured on this drivetrain b=2 leaves 6 in of
     // cross-track where b=48 leaves under 1 in at the same peak speed.
     //
@@ -35,9 +36,9 @@ struct RAMSETEParams {
     // mass, so it rewards aggression whose cost it cannot show.
     float b{48.0f};      // aggressiveness (higher = tighter tracking), b > 0
     float zeta{0.85f};   // damping ratio, 0 < zeta < 1
-    float maxSpeed{127.0f};            // peak output, motor units (0â€“127)
+    float maxSpeed{127.0f};            // peak output, motor units (0–127)
     // Floor on the profiled reference speed, motor units. Must stay above 0 or
-    // the motion cannot start; binds within ~minSpeedÂ²/(2Â·maxAccel) of the start.
+    // the motion cannot start; binds within ~minSpeed²/(2·maxAccel) of the start.
     float minSpeed{12.0f};
     float targetTolerance{1.0f};       // inches
     // Curved paths finish 5-12 deg off the final tangent and the law has no
@@ -45,23 +46,38 @@ struct RAMSETEParams {
     // has driven to 0), so a tight value here means the motion runs out its
     // timeout. Widen it, or follow the path with a turnToHeading.
     float headingTolerance{2.0f};      // VEX degrees
+    // Below this the robot has stopped, so the heading it has is the heading it
+    // is going to get: exiting beats burning the timeout to no effect. 0 keeps
+    // the old behaviour of waiting for headingTolerance or the timeout.
+    float stallSpeed{1.5f};            // in/s
     // No longer read by the controller: RAMSETE's reference is the robot's
     // projection onto the path, and offsetting it forward left a standing e_x
     // that inflated every commanded speed by roughly half. Kept so existing
     // calls still compile.
     float lookaheadDist{10.0f};
-    // Below this the robot has stopped, so the heading it has is the heading it
-    // is going to get: exiting beats burning the timeout to no effect. 0 keeps
-    // the old behaviour of waiting for headingTolerance or the timeout.
-    float stallSpeed{1.5f};            // in/s
     bool useVelocityProfile{true};     // profile v_d for accel/decel along path
-    float maxAccel{50.0f};             // in/sÂ², used when useVelocityProfile
+    float maxAccel{50.0f};             // in/s², used when useVelocityProfile
 
     // Caps speed where the path bends, to v <= sqrt(maxLateralAccel/|curvature|).
     // Lets one set of gains cover paths of different tightness: slow into the
     // corner rather than raise b to fight it. Far below the traction limit --
     // it bounds tracking authority, not grip. 0 disables.
     float maxLateralAccel{60.0f};
+
+    // Open loop, RAMSETE's per-side speed becomes voltage by scaling against
+    // the drivetrain's free speed -- true only unloaded, and wrong by more the
+    // harder the path pushes. Closing the loop on measured wheel speed instead
+    // is worth more on a curved path than any gain change.
+    bool useVelocityController{false};
+    // Fitted against the simulator, whose motor model is a first-order lag with
+    // no load: refit on hardware before trusting them. kP is the sensitive one
+    // -- it trades against motor response time, and 12 is the only value that
+    // held over a 20-200 ms lag sweep on both test paths.
+    // integralClamp is set even though kI is 0: "<= 0 disables" means a user who
+    // sets only kI gets no gate and no clamp, and a drivetrain held short of its
+    // target -- against a wall, against another robot -- winds up without bound.
+    FeedforwardGains ffGains{.kV = 6.2f, .ksStraight = 0.3f, .kP = 12.0f,
+                             .integralClamp = 2.0f};
 
     // How long the settle condition must hold, overriding
     // ChassisConfig::settleTimeMs for this motion. 0 exits on the first sample.
