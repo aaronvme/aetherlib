@@ -19,6 +19,7 @@
 
 #include "riku/movement_control/ltv.hpp"
 #include "riku/movement_control/ltvlqr.hpp"
+#include "riku/movement_control/mpc_follower.hpp"
 
 #include "gamespecific/autons.hpp"
 #include "gamespecific/config.hpp"
@@ -59,6 +60,10 @@ pros::Rotation gHorizPod(12);
 riku::TrackingWheel gVertWheel(gVertPod, 2.75f, 0.0f);
 riku::TrackingWheel gHorizWheel(gHorizPod, 2.75f, 0.0f);
 bool gOdomPods = false;
+
+// Ticks spent in contact, not just a bool: a controller that grazes a post for
+// one tick and one that leans on it all run read the same otherwise.
+int gCollideTicks = 0;
 
 std::string gStateJson;
 std::vector<float> gParticleBuf(riku::MclTracking::PARTICLE_MAX * 4);
@@ -198,6 +203,7 @@ EMSCRIPTEN_KEEPALIVE
 void sim_reset(float x, float y, float thetaDeg) {
     const riku::Pose p{x, y, riku::vexToStdRad(thetaDeg)};
     const int wasLoc = gLocMode;
+    gCollideTicks = 0;
 
     // Tear the run down through the library's own lifecycle calls so its
     // pros::Task pointers are released properly, rather than killing the
@@ -267,6 +273,7 @@ void sim_step(float ms) {
     sim::sched().runFor(ms);
 
     const auto& t = sim::world().truth();
+    if (t.colliding) gCollideTicks++;
     pushTrail(gTrueTrail, t.x, t.y);
     const riku::Pose op = riku::chassis.getPose();
     pushTrail(gOdomTrail, op.x, op.y);
@@ -1063,6 +1070,429 @@ const char* sim_field_json() {
     out += "]}";
     gStateJson = out;
     return gStateJson.c_str();
+}
+
+}  // extern "C"
+// ============================================================================
+// MPC / RTI study
+// ============================================================================
+//
+// Two separate surfaces:
+//
+//   sim_mpc_* run MpcPathFollower against the world, so tracking is measured
+//   through the same kinematics, device rates and quantisation as every other
+//   controller in the sim.
+//
+//   sim_mpc_bench_json times the QP solver on its own, closed-loop on the
+//   linear error plant with no world in the way. That is the number that decides
+//   feasibility, and it needs thousands of solves rather than the few hundred a
+//   path run provides.
+//
+// Wall time comes from emscripten_get_now(), NOT the virtual clock: the point is
+// how long the arithmetic takes on real silicon.
+
+namespace {
+
+double microsNow() { return emscripten_get_now() * 1000.0; }
+
+riku::MpcPathFollower* gMpc = nullptr;
+std::vector<riku::TrajectorySample> gMpcTraj;
+std::string gMpcJson;
+
+riku::MpcPathFollower::Config defaultMpcConfig() {
+    riku::MpcPathFollower::Config c;
+    c.mode = riku::MpcPathFollower::Mode::MpcRti;
+    c.horizon = 10;
+    c.maxIters = 400;
+    c.rtiIters = 1;
+    c.tol = 1e-6f;
+    c.weights = {1.0f, 40.0f, 4.0f, 1.0f, 0.25f};
+    c.dt = 0.01f;
+    c.constrainInputs = true;
+    c.wheelSpeedLimit = 1.887f;      // (12 V - ksStraight) / kV
+    c.slackToLinear = 0.5f;
+    c.maxVoltage = 12.0f;
+    c.speedBuckets = 16;
+    c.gains = gLtvGains;             // identical output stage to the LTV baseline
+    c.microsClock = &microsNow;
+    return c;
+}
+
+riku::MpcPathFollower::Config gMpcCfg = defaultMpcConfig();
+
+riku::MpcPathFollower& mpcFollower() {
+    if (gMpc == nullptr) {
+        gMpc = new riku::MpcPathFollower(riku::chassis, riku::drivetrain);
+    }
+    return *gMpc;
+}
+
+}  // namespace
+
+extern "C" {
+
+EMSCRIPTEN_KEEPALIVE
+int sim_collide_ticks() { return gCollideTicks; }
+
+EMSCRIPTEN_KEEPALIVE
+void sim_mpc_traj_clear() { gMpcTraj.clear(); }
+
+/// Append one trajectory sample. Position in INCHES, heading in standard math
+/// radians, v in inches/sec, w in rad/sec. Converted to metres here so the
+/// harness can work in field units.
+EMSCRIPTEN_KEEPALIVE
+void sim_mpc_traj_push(float x, float y, float theta, float v, float w) {
+    gMpcTraj.push_back({x * riku::INCH_TO_METER, y * riku::INCH_TO_METER, theta,
+                        v * riku::INCH_TO_METER, w});
+}
+
+EMSCRIPTEN_KEEPALIVE
+int sim_mpc_traj_count() { return static_cast<int>(gMpcTraj.size()); }
+
+EMSCRIPTEN_KEEPALIVE
+void sim_mpc_defaults() { gMpcCfg = defaultMpcConfig(); }
+
+EMSCRIPTEN_KEEPALIVE
+void sim_mpc_set(const char* name, float value) {
+    const std::string k(name);
+    using Mode = riku::MpcPathFollower::Mode;
+
+    if      (k == "mode")       gMpcCfg.mode = static_cast<Mode>(static_cast<int>(value));
+    else if (k == "horizon")    gMpcCfg.horizon = static_cast<int>(value);
+    else if (k == "maxIters")   gMpcCfg.maxIters = static_cast<int>(value);
+    else if (k == "rtiIters")   gMpcCfg.rtiIters = static_cast<int>(value);
+    else if (k == "tol")        gMpcCfg.tol = value;
+    else if (k == "solver")     gMpcCfg.solver =
+                                    static_cast<riku::MpcSolver>(static_cast<int>(value));
+    else if (k == "qx")         gMpcCfg.weights.qx = value;
+    else if (k == "qy")         gMpcCfg.weights.qy = value;
+    else if (k == "qth")        gMpcCfg.weights.qTheta = value;
+    else if (k == "rv")         gMpcCfg.weights.rv = value;
+    else if (k == "rw")         gMpcCfg.weights.rw = value;
+    else if (k == "dt")         gMpcCfg.dt = value;
+    else if (k == "constrain")  gMpcCfg.constrainInputs = (value != 0.0f);
+    else if (k == "wheelLimit") gMpcCfg.wheelSpeedLimit = value;
+    else if (k == "slackSplit") gMpcCfg.slackToLinear = value;
+    else if (k == "wheelBox")   gMpcCfg.wheelSpaceInputs = (value != 0.0f);
+    else if (k == "indepClip")  gMpcCfg.independentClip = (value != 0.0f);
+    else if (k == "maxVoltage") gMpcCfg.maxVoltage = value;
+    else if (k == "buckets")    gMpcCfg.speedBuckets = static_cast<int>(value);
+    else if (k == "kV")         gMpcCfg.gains.kV = value;
+    else if (k == "kS")         gMpcCfg.gains.ksStraight = value;
+    else if (k == "kP")         gMpcCfg.gains.kP = value;
+    else if (k == "timing")     gMpcCfg.microsClock = (value != 0.0f) ? &microsNow : nullptr;
+}
+
+EMSCRIPTEN_KEEPALIVE
+void sim_mpc_run() {
+    if (gMpcTraj.empty()) return;
+    gManualActive = false;
+    mpcFollower().follow(gMpcTraj, gMpcCfg);
+}
+
+EMSCRIPTEN_KEEPALIVE
+int sim_mpc_running() { return (gMpc != nullptr && gMpc->isRunning()) ? 1 : 0; }
+
+EMSCRIPTEN_KEEPALIVE
+void sim_mpc_cancel() { if (gMpc != nullptr) gMpc->cancel(); }
+
+EMSCRIPTEN_KEEPALIVE
+const char* sim_mpc_stats_json() {
+    static const riku::MpcPathFollower::Stats empty{};
+    const auto& s = (gMpc != nullptr) ? gMpc->stats() : empty;
+    const int ticks = (s.ticks > 0) ? s.ticks : 1;
+
+    char buf[1400];
+    std::snprintf(buf, sizeof(buf),
+        "{\"ticks\":%d,\"iters\":%d,\"maxIters\":%d,\"meanIters\":%.3f,"
+        "\"rebuilds\":%d,\"convergedTicks\":%d,"
+        "\"solveUsTotal\":%.1f,\"meanSolveUs\":%.4f,\"worstSolveUs\":%.4f,"
+        "\"worstTickUs\":%.4f,\"setupUs\":%.2f,"
+        "\"meanCrossM\":%.6f,\"peakCrossM\":%.6f,\"meanHeadingRad\":%.6f,"
+        "\"endErrorM\":%.6f,\"endHeadingRad\":%.6f,"
+        "\"satTicks\":%d,\"activeBoundTicks\":%d,"
+        "\"peakWheelDemand\":%.4f,\"peakClipRatio\":%.4f,"
+        "\"collideTicks\":%d,\"running\":%s}",
+        s.ticks, s.solverIterations, s.maxIterations,
+        static_cast<double>(s.solverIterations) / ticks,
+        s.rebuilds, s.convergedTicks,
+        s.solveMicros, s.solveMicros / ticks, s.worstSolveMicros,
+        s.worstTickMicros, s.setupMicros,
+        s.sumAbsCross / ticks, s.peakAbsCross, s.sumAbsHeading / ticks,
+        s.endError, s.endHeading,
+        s.satTicks, s.activeBoundTicks, s.peakWheelDemand, s.peakClipRatio,
+        gCollideTicks, sim_mpc_running() ? "true" : "false");
+    gMpcJson.assign(buf);
+    return gMpcJson.c_str();
+}
+
+// ----------------------------------------------------------------------------
+// Solver benchmark
+// ----------------------------------------------------------------------------
+//
+// Closed loop on the linear error plant, which is what makes the RTI warm start
+// honest: consecutive QPs differ by one tick of real plant motion, exactly as
+// they do on a robot. A benchmark that re-solves the same QP from the same warm
+// start measures nothing.
+//
+// A checksum is accumulated and reported so the optimiser cannot delete the
+// solve.
+
+namespace {
+
+/// Advance the plant one tick: x+ = Ad x + Bd u.
+void plantStep(const riku::DrivetrainPlant& p, float x[3], const float u[2]) {
+    float nx[3];
+    for (int i = 0; i < 3; i++) {
+        nx[i] = p.Ad[i][0] * x[0] + p.Ad[i][1] * x[1] + p.Ad[i][2] * x[2] +
+                p.Bd[i][0] * u[0] + p.Bd[i][1] * u[1];
+    }
+    x[0] = nx[0]; x[1] = nx[1]; x[2] = nx[2];
+}
+
+}  // namespace
+
+/// @param horizon      MPC horizon N
+/// @param solver       0 = fast gradient, 1 = projected Gauss-Seidel
+/// @param itersPerTick 0 = solve to convergence, >0 = fixed RTI budget
+/// @param constrained  1 = box active, 0 = unconstrained
+/// @param ticks        closed-loop ticks to run
+EMSCRIPTEN_KEEPALIVE
+const char* sim_mpc_bench_json(int horizon, int solver, int itersPerTick,
+                               int constrained, int ticks) {
+    if (horizon < 1) horizon = 1;
+    if (horizon > riku::MPC_MAX_HORIZON) horizon = riku::MPC_MAX_HORIZON;
+    if (ticks < 1) ticks = 1;
+
+    const riku::MpcWeights w = gMpcCfg.weights;
+    const float dt = gMpcCfg.dt;
+    const float vRef = 0.75f * gMpcCfg.wheelSpeedLimit;
+    const float wRef = 0.0f;
+
+    const riku::DrivetrainPlant plant = riku::DrivetrainPlant::discretize(vRef, dt);
+    const riku::LqrSolution lqr = riku::solveDiscreteLqr(plant, w);
+
+    static riku::CondensedMpc mpc;
+    mpc.solver = static_cast<riku::MpcSolver>(solver);
+
+    // Setup cost, averaged. Rebuilding the condensed matrices is the expensive
+    // half and happens only when the reference speed crosses a bucket edge, so
+    // it is priced separately from the per-tick solve.
+    const int setupReps = 32;
+    const double s0 = microsNow();
+    for (int i = 0; i < setupReps; i++) {
+        mpc.setup(plant, w, horizon, lqr.P);
+    }
+    const double setupUs = (microsNow() - s0) / setupReps;
+
+    float uMin[2], uMax[2];
+    if (constrained != 0) {
+        // Same inscribed-box construction as MpcPathFollower::inputBox().
+        const float halfTrack = 0.5f * riku::drivetrain.trackWidth * riku::INCH_TO_METER;
+        const float vNeed = std::fabs(vRef), wNeed = std::fabs(wRef) * halfTrack;
+        const float slack = std::fmax(0.0f, gMpcCfg.wheelSpeedLimit - vNeed - wNeed);
+        const float vBudget = vNeed + 0.5f * slack;
+        const float wBudget = (wNeed + 0.5f * slack) / halfTrack;
+        uMin[0] = -vBudget - vRef; uMax[0] = vBudget - vRef;
+        uMin[1] = -wBudget - wRef; uMax[1] = wBudget - wRef;
+    } else {
+        uMin[0] = uMin[1] = -1e6f;
+        uMax[0] = uMax[1] = 1e6f;
+    }
+
+    // Timing methodology: emscripten_get_now() crosses into JS, and at ~0.3 us a
+    // call it swamps a 1 us solve if called per solve. So the clock is read ONCE
+    // around the whole loop, and an identical loop with the solve removed is
+    // timed and subtracted. Its cost is measured, not assumed.
+    float x[3] = {0.02f, 0.06f, 0.12f};
+    mpc.zero();
+
+    double sumCross = 0.0, peakCross = 0.0, checksum = 0.0;
+    long iterSum = 0;
+    int convergedCount = 0, maxIters = 0;
+    // Whether the box actually BINDS. Without this the headline "MPC ties the
+    // clipped LQR" is vacuous -- an inactive constraint is trivially free.
+    int boundTicks = 0, mpcClipTicks = 0, lqrClipTicks = 0;
+    const double t0 = microsNow();
+
+    for (int k = 0; k < ticks; k++) {
+        // Keep the error alive: without a disturbance the loop settles to zero
+        // and every later solve starts from a perfect warm start, which flatters
+        // RTI.
+        if (k % 97 == 0) {
+            x[0] += 0.02f;
+            x[1] += 0.05f;
+            x[2] += 0.10f;
+        }
+
+        float u[2];
+        riku::MpcResult r;
+        if (itersPerTick > 0) {
+            if (k > 0) mpc.shift();
+            r = mpc.solve(x, uMin, uMax, itersPerTick, 0.0f);
+        } else {
+            mpc.zero();
+            r = mpc.solve(x, uMin, uMax, gMpcCfg.maxIters, gMpcCfg.tol);
+        }
+        mpc.firstMove(u);
+
+        iterSum += r.iterations;
+        if (r.iterations > maxIters) maxIters = r.iterations;
+        if (r.converged) convergedCount++;
+
+        // The box is a hard limit on what the drivetrain can do, so an
+        // unconstrained command would be clipped downstream anyway.
+        const float uApplied[2] = {riku::clamp(u[0], uMin[0], uMax[0]),
+                                   riku::clamp(u[1], uMin[1], uMax[1])};
+        if (r.activeBounds > 0) boundTicks++;
+        if (uApplied[0] != u[0] || uApplied[1] != u[1]) mpcClipTicks++;
+        plantStep(plant, x, uApplied);
+
+        const double c = std::fabs(x[1]);
+        sumCross += c;
+        if (c > peakCross) peakCross = c;
+        checksum += u[0] + u[1];
+    }
+    const double totalUs = microsNow() - t0;
+
+    // The same loop with the solve removed: disturbance, clamp, plant step,
+    // bookkeeping. Subtracted from totalUs so the reported cost is the solver.
+    float xh[3] = {0.02f, 0.06f, 0.12f};
+    double harnessChk = 0.0;
+    const double h0 = microsNow();
+    for (int k = 0; k < ticks; k++) {
+        if (k % 97 == 0) { xh[0] += 0.02f; xh[1] += 0.05f; xh[2] += 0.10f; }
+        const float u[2] = {mpc.solution()[0], mpc.solution()[1]};
+        const float ua[2] = {riku::clamp(u[0], uMin[0], uMax[0]),
+                             riku::clamp(u[1], uMin[1], uMax[1])};
+        plantStep(plant, xh, ua);
+        harnessChk += std::fabs(xh[1]) + u[0] + u[1];
+    }
+    const double harnessUs = microsNow() - h0;
+
+    // What one clock read costs, so the floor of this measurement is on record.
+    const double c0 = microsNow();
+    double clockChk = 0.0;
+    for (int k = 0; k < 20000; k++) clockChk += microsNow();
+    const double clockUs = (microsNow() - c0) / 20000.0;
+
+    // Same closed loop under the scheduled LQR, for a cost and tracking
+    // reference point. The LQR cannot see the box, so its command is clipped.
+    float xl[3] = {0.02f, 0.06f, 0.12f};
+    double lqrSum = 0.0, lqrPeak = 0.0, lqrChk = 0.0;
+    const double l0 = microsNow();
+    for (int k = 0; k < ticks; k++) {
+        if (k % 97 == 0) { xl[0] += 0.02f; xl[1] += 0.05f; xl[2] += 0.10f; }
+        float u[2];
+        for (int i = 0; i < 2; i++) {
+            u[i] = -(lqr.K[i][0] * xl[0] + lqr.K[i][1] * xl[1] + lqr.K[i][2] * xl[2]);
+        }
+        lqrChk += u[0] + u[1];
+        const float ua[2] = {riku::clamp(u[0], uMin[0], uMax[0]),
+                             riku::clamp(u[1], uMin[1], uMax[1])};
+        if (ua[0] != u[0] || ua[1] != u[1]) lqrClipTicks++;
+        plantStep(plant, xl, ua);
+        const double c = std::fabs(xl[1]);
+        lqrSum += c;
+        if (c > lqrPeak) lqrPeak = c;
+    }
+    const double lqrUs = ((microsNow() - l0) - harnessUs) / ticks;
+
+    // And the price of solving Riccati every tick instead of scheduling it.
+    const double r0 = microsNow();
+    double riccatiChk = 0.0;
+    long riccatiIters = 0;
+    for (int k = 0; k < ticks; k++) {
+        const riku::LqrSolution s =
+            riku::solveDiscreteLqr(riku::DrivetrainPlant::discretize(vRef, dt), w);
+        riccatiChk += s.K[0][0] + s.K[1][2];
+        riccatiIters += s.iterations;
+    }
+    const double riccatiUs = (microsNow() - r0) / ticks;
+
+    char buf[1800];
+    std::snprintf(buf, sizeof(buf),
+        "{\"horizon\":%d,\"vars\":%d,\"solver\":%d,\"itersPerTick\":%d,"
+        "\"constrained\":%d,\"ticks\":%d,"
+        "\"usPerSolve\":%.4f,\"usGross\":%.4f,\"harnessUs\":%.4f,"
+        "\"clockUs\":%.4f,\"maxIters\":%d,\"meanIters\":%.3f,"
+        "\"convergedFrac\":%.4f,\"setupUs\":%.3f,"
+        "\"flopsPerIter\":%ld,\"flopsSetup\":%ld,"
+        "\"meanCrossM\":%.6f,\"peakCrossM\":%.6f,"
+        "\"lqrUsPerTick\":%.4f,\"lqrMeanCrossM\":%.6f,\"lqrPeakCrossM\":%.6f,"
+        "\"riccatiUsPerTick\":%.4f,\"riccatiIters\":%.1f,"
+        "\"lambdaMax\":%.4f,\"powerIters\":%d,"
+        "\"checksum\":%.6f,\"lqrChecksum\":%.6f,"
+        "\"boundTicks\":%d,\"mpcClipTicks\":%d,\"lqrClipTicks\":%d,"
+        "\"uMin\":[%.4f,%.4f],\"uMax\":[%.4f,%.4f],\"vRef\":%.4f,"
+        "\"riccatiChecksum\":%.6f,\"harnessChecksum\":%.6f,\"clockChecksum\":%.6e}",
+        horizon, 2 * horizon, solver, itersPerTick, constrained, ticks,
+        (totalUs - harnessUs) / ticks, totalUs / ticks, harnessUs / ticks,
+        clockUs, maxIters, static_cast<double>(iterSum) / ticks,
+        static_cast<double>(convergedCount) / ticks, setupUs,
+        mpc.flopsPerIteration(), mpc.flopsSetup(),
+        sumCross / ticks, peakCross,
+        lqrUs, lqrSum / ticks, lqrPeak,
+        riccatiUs, static_cast<double>(riccatiIters) / ticks,
+        mpc.lipschitz(), mpc.powerIterations(),
+        checksum, lqrChk,
+        boundTicks, mpcClipTicks, lqrClipTicks,
+        uMin[0], uMin[1], uMax[0], uMax[1], vRef,
+        riccatiChk, harnessChk, clockChk);
+    gMpcJson.assign(buf);
+    return gMpcJson.c_str();
+}
+
+/// Correctness gate: with the DARE cost-to-go as terminal cost and no active
+/// constraints, the first move of the condensed QP must equal -K x exactly, for
+/// any horizon. If this drifts, the condensing or the terminal cost is wrong and
+/// no tracking number below it means anything.
+EMSCRIPTEN_KEEPALIVE
+const char* sim_mpc_check_json(int horizon) {
+    const riku::MpcWeights w = gMpcCfg.weights;
+    const float dt = gMpcCfg.dt;
+    const float vRef = 0.75f * gMpcCfg.wheelSpeedLimit;
+
+    const riku::DrivetrainPlant plant = riku::DrivetrainPlant::discretize(vRef, dt);
+    const riku::LqrSolution lqr = riku::solveDiscreteLqr(plant, w);
+
+    static riku::CondensedMpc mpc;
+    mpc.solver = riku::MpcSolver::GaussSeidel;
+    mpc.setup(plant, w, horizon, lqr.P);
+
+    const float lo[2] = {-1e6f, -1e6f};
+    const float hi[2] = {1e6f, 1e6f};
+
+    float worst = 0.0f;
+    float lqrU[2] = {0.0f, 0.0f}, mpcU[2] = {0.0f, 0.0f};
+    const float probes[4][3] = {
+        {0.05f, 0.10f, 0.20f},
+        {-0.03f, 0.02f, -0.15f},
+        {0.00f, -0.08f, 0.05f},
+        {0.12f, 0.00f, 0.00f},
+    };
+    for (const auto& x : probes) {
+        mpc.zero();
+        mpc.solve(x, lo, hi, 4000, 1e-12f);
+        mpc.firstMove(mpcU);
+        for (int i = 0; i < 2; i++) {
+            lqrU[i] = -(lqr.K[i][0] * x[0] + lqr.K[i][1] * x[1] + lqr.K[i][2] * x[2]);
+            const float d = std::fabs(lqrU[i] - mpcU[i]) / (std::fabs(lqrU[i]) + 1e-6f);
+            if (d > worst) worst = d;
+        }
+    }
+
+    char buf[480];
+    std::snprintf(buf, sizeof(buf),
+        "{\"horizon\":%d,\"worstRelErr\":%.3e,"
+        "\"lqrK\":[[%.5f,%.5f,%.5f],[%.5f,%.5f,%.5f]],"
+        "\"lastLqrU\":[%.6f,%.6f],\"lastMpcU\":[%.6f,%.6f],\"lqrIters\":%d}",
+        horizon, worst,
+        lqr.K[0][0], lqr.K[0][1], lqr.K[0][2],
+        lqr.K[1][0], lqr.K[1][1], lqr.K[1][2],
+        lqrU[0], lqrU[1], mpcU[0], mpcU[1], lqr.iterations);
+    gMpcJson.assign(buf);
+    return gMpcJson.c_str();
 }
 
 }  // extern "C"
