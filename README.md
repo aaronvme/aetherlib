@@ -48,6 +48,32 @@ export PATH="$APPDATA/Code/User/globalStorage/sigbots.pros/install/pros-toolchai
 make clean && make
 ```
 
+## Path following
+
+`moveRAMSETE` is the recommended path follower. Set
+`RAMSETEParams::useVelocityController` to close the loop on measured wheel speed
+instead of treating voltage as speed; it measured faster with better heading at
+every setting tried. Its feedforward gains were fitted against the simulator, so
+refit `kV`/`ksStraight`/`kP` on hardware before relying on them
+(`riku/util/tuning.hpp` logs the CSV for it).
+
+### Deprecated
+
+`LtvLqrFollower` (`movement_control/ltvlqr.hpp`) and `LTVPathFollower`
+(`movement_control/ltv.hpp`) are kept for completeness and are not recommended
+for competition use. Both solve an LQR over the same pose-error plant that
+`moveRAMSETE` now covers with a solved gain, and both duplicate the velocity
+profile and settle logic that live in `Chassis`. `LtvLqrFollower` ends 2-3
+degrees closer to the final tangent than RAMSETE; a `turnToHeading` afterwards is
+the cheaper way to get that. The reusable pieces are `movement_control/lqr.hpp`
+(Riccati solve plus a speed-scheduled gain table) and
+`movement_control/drivetrain_plant.hpp`.
+
+`util/slew.hpp` is disabled by default and measured worse than leaving it off on
+every path tried. Shape acceleration with `RAMSETEParams::maxAccel` and
+`maxLateralAccel` instead -- in the profile, in real units, ahead of the
+controller.
+
 ## Tuning logs
 
 Subsystems emit telemetry through a callback; `riku/util/tuning.hpp` and
