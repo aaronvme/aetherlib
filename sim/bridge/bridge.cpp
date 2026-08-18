@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -17,6 +18,7 @@
 #include "../world/world.hpp"
 
 #include "riku/movement_control/ltv.hpp"
+#include "riku/movement_control/ltvlqr.hpp"
 
 #include "gamespecific/autons.hpp"
 #include "gamespecific/config.hpp"
@@ -404,6 +406,14 @@ std::vector<riku::Pose> gPath;
 // prepare_trajectory() parses on a robot -- positions in METRES, velocities in
 // m/s and rad/s, one sample per 10 ms tick.
 
+riku::LtvLqrFollower* gLqr = nullptr;
+riku::LtvLqrParams gLqrParams;
+
+riku::LtvLqrFollower& lqr() {
+    if (gLqr == nullptr) gLqr = new riku::LtvLqrFollower(riku::chassis, riku::drivetrain);
+    return *gLqr;
+}
+
 riku::LTVPathFollower* gLtv = nullptr;
 std::string gLtvPath;
 
@@ -520,7 +530,7 @@ void execRoute() {
                 std::vector<riku::Pose> path(gPath.begin() + start,
                                              gPath.begin() + start + count);
                 riku::RAMSETEParams params = gRamsete;
-                params.maxSpeed = gRouteMaxSpeed;
+                params.maxSpeed = std::min(gRouteMaxSpeed, gRamsete.maxSpeed);
                 riku::chassis.moveRAMSETE(path, timeout, params);
                 break;
             }
@@ -592,6 +602,53 @@ int sim_ltv_running() { return ltv().isRunning() ? 1 : 0; }
 
 EMSCRIPTEN_KEEPALIVE
 void sim_ltv_cancel() { ltv().cancel(); }
+
+/// Follow gPath[start, start+count) with the speed-scheduled LQR.
+EMSCRIPTEN_KEEPALIVE
+void sim_lqr_follow(int start, int count, float timeoutMs) {
+    if (start < 0 || count <= 0 || start + count > static_cast<int>(gPath.size())) return;
+    if (gRouteTask != sim::kInvalidTask) sim::sched().kill(gRouteTask);
+    gManualActive = false;
+    // Own fiber, so the browser keeps driving the clock and can sample the run
+    // while it happens -- the same reason a route runs on one.
+    auto path = std::make_shared<std::vector<riku::Pose>>(
+        gPath.begin() + start, gPath.begin() + start + count);
+    gRouteTask = sim::sched().spawn([path, timeoutMs]() {
+        lqr().followPath(*path, gLqrParams, timeoutMs);
+    }, "lqr");
+}
+
+EMSCRIPTEN_KEEPALIVE
+int sim_lqr_running() { return lqr().isRunning() ? 1 : 0; }
+
+EMSCRIPTEN_KEEPALIVE
+float sim_lqr_peak() { return lqr().lastPeakError(); }
+
+EMSCRIPTEN_KEEPALIVE
+float sim_lqr_final() { return lqr().lastFinalError(); }
+
+EMSCRIPTEN_KEEPALIVE
+void sim_lqr_set(const char* name, float value) {
+    const std::string k(name);
+    if      (k == "qx")     gLqrParams.weights.qx = value;
+    else if (k == "qy")     gLqrParams.weights.qy = value;
+    else if (k == "qtheta") gLqrParams.weights.qtheta = value;
+    else if (k == "rv")     gLqrParams.weights.rv = value;
+    else if (k == "romega") gLqrParams.weights.romega = value;
+    else if (k == "maxSpeed")   gLqrParams.maxSpeed = value;
+    else if (k == "maxAccel")   gLqrParams.maxAccel = value;
+    else if (k == "maxLatAccel") gLqrParams.maxLateralAccel = value;
+    else if (k == "tolerance")  gLqrParams.targetTolerance = value;
+    else if (k == "headingTol") gLqrParams.headingTolerance = value;
+    else if (k == "velCtrl")    gLqrParams.useVelocityController = (value != 0.0f);
+    else if (k == "ffKv")       gLqrParams.ffGains.kV = value;
+    else if (k == "ffKs")       gLqrParams.ffGains.ksStraight = value;
+    else if (k == "ffKp")       gLqrParams.ffGains.kP = value;
+    else if (k == "ffKi")       gLqrParams.ffGains.kI = value;
+    else if (k == "ffKa")       gLqrParams.ffGains.kaStraight = value;
+    else if (k == "slewRise")   gLqrParams.slewRisePerSec = value;
+    else if (k == "slewFall")   gLqrParams.slewFallPerSec = value;
+}
 
 EMSCRIPTEN_KEEPALIVE
 void sim_route_push(int op, float a, float b, float c, float d) {
@@ -724,7 +781,15 @@ void sim_set_param(const char* name, float value) {
     } else if (k == "ramseteLookahead")   { gRamsete.lookaheadDist = value;
     } else if (k == "ramseteTolerance")   { gRamsete.targetTolerance = value;
     } else if (k == "ramseteHeadingTol")  { gRamsete.headingTolerance = value;
+    } else if (k == "ramseteStall")       { gRamsete.stallSpeed = value;
     } else if (k == "ramseteProfile")     { gRamsete.useVelocityProfile = value != 0.0f;
+    } else if (k == "ramseteLatAccel")    { gRamsete.maxLateralAccel = value;
+    } else if (k == "ramseteMaxSpeed")    { gRamsete.maxSpeed = value;
+    } else if (k == "ramseteVelCtrl")     { gRamsete.useVelocityController = value != 0.0f;
+    } else if (k == "ramseteFfKv")        { gRamsete.ffGains.kV = value;
+    } else if (k == "ramseteFfKs")        { gRamsete.ffGains.ksStraight = value;
+    } else if (k == "ramseteFfKp")        { gRamsete.ffGains.kP = value;
+    } else if (k == "ramseteFfKi")        { gRamsete.ffGains.kI = value;
     } else if (k == "mclDistSyncProp") {
         riku::chassis.mcl().setDistSyncProp(value);
     } else if (k == "seed") {
