@@ -223,15 +223,18 @@ void OdomTracking::update(bool force) {
 
     // — Accumulate for consumeDelta() so consumers polling slower than the
     //   update rate (e.g. MCL at 25ms vs odometry at 10ms) never miss motion —
-    mAccumDelta.dVert  += dVert;
-    mAccumDelta.dHoriz += dHoriz;
-    mAccumDelta.dTheta += dThetaRad;
+    for (auto& acc : mAccumDelta) {
+        acc.dVert  += dVert;
+        acc.dHoriz += dHoriz;
+        acc.dTheta += dThetaRad;
+    }
 }
 
-OdomDelta OdomTracking::consumeDelta() {
+OdomDelta OdomTracking::consumeDelta(int channel) {
+    if (channel < 0 || channel >= DELTA_CHANNELS) return {};
     std::lock_guard<pros::Mutex> lock(mMutex);
-    OdomDelta out = mAccumDelta;
-    mAccumDelta = {};
+    OdomDelta out = mAccumDelta[channel];
+    mAccumDelta[channel] = {};
     return out;
 }
 
@@ -325,7 +328,7 @@ void OdomTracking::reset() {
     // Drop any motion accumulated before the reset — it belongs to the old
     // baseline and would otherwise be applied to consumers after re-zeroing.
     mLastDelta = {};
-    mAccumDelta = {};
+    for (auto& acc : mAccumDelta) acc = {};
 }
 
 void OdomTracking::calibrate() {

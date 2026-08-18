@@ -138,11 +138,15 @@ public:
     // more than one task may drive update() (the background odom task does).
     OdomDelta getLastDelta() const { return mLastDelta; }
 
-    // Retrieve the ACCUMULATED decomposed delta since the previous call to
-    // consumeDelta(), and reset the accumulator. Thread-safe. This is what
-    // MCL uses to propagate particles — it never misses motion regardless of
-    // how many update() ticks the background task ran between MCL iterations.
-    OdomDelta consumeDelta();
+    // One independent accumulator per consumer. Two filters sharing a channel
+    // would each see only the motion the other had not yet taken.
+    enum DeltaChannel { CHANNEL_MCL = 0, CHANNEL_EKF = 1, DELTA_CHANNELS = 2 };
+
+    // Retrieve the ACCUMULATED decomposed delta on `channel` since the previous
+    // call for that channel, and reset it. Thread-safe. This is what MCL and the
+    // EKF use to propagate state — it never misses motion regardless of how many
+    // update() ticks the background task ran between filter iterations.
+    OdomDelta consumeDelta(int channel = CHANNEL_MCL);
 
     // Whether horizontal tracking is available (dedicated wheel, not zero-fallback).
     bool hasHorizontalTracking() const {
@@ -197,7 +201,7 @@ private:
 
     // Accumulated delta since last consumeDelta() — survives multiple update()
     // ticks so consumers polling slower than the update rate never miss motion.
-    OdomDelta mAccumDelta;
+    OdomDelta mAccumDelta[DELTA_CHANNELS];
 
     // Helper: average distance across a wheel collection
     static float averageDistance(const std::vector<TrackingWheel*>& wheels);
