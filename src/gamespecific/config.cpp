@@ -31,7 +31,7 @@ constexpr FieldCircle kFieldPosts[] = {
     {47.0f, -23.5f, 2.0f},   // neutral blue down 
 };
 
-// MCL keeps POINTERS to its obstacle lists — these must outlive the tracker
+// MCL keeps POINTERS to its obstacle lists â€” these must outlive the tracker
 std::vector<MclTracking::LineObstacle> gMclLineObstacles;
 std::vector<MclTracking::CircleObstacle> gMclCircleObstacles;
 
@@ -48,7 +48,7 @@ void registerFieldObstacles() {
 
 void registerAutonDisableLine(float lifetimeMs) {
     // Diagonal auton line: readings crossing it during autonomous see robots /
-    // game objects, not walls. Temporary — expires after `lifetimeMs`.
+    // game objects, not walls. Temporary â€” expires after `lifetimeMs`.
     chassis.rcl().addLineObstacle(Field::FIELD_HALF, -Field::FIELD_HALF,
                                   -Field::FIELD_HALF,  Field::FIELD_HALF,
                                   lifetimeMs);
@@ -134,7 +134,7 @@ ChassisConfig chassisConfig = {
         .trackingWheelVariance = 0.08f,
         .imeVariance = 0.12f,
         .imuVariance = 0.005f,
-        .horizDependentVarianceProp = 0.03f,
+        .horizDependentVarianceProp = 0.01f,
         .horizConstantNoise = 0.03f,
         .distSyncProp = 0.10f,
         .thetaSyncProp = 0.001f,

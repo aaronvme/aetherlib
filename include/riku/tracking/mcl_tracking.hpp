@@ -80,7 +80,57 @@ public:
         // Score for a beam blocked for this particle. Not 1.0, or particles would
         // win by hiding behind obstacles.
         float deadzoneLikelihood = 0.25f;
+
+        // Beam model mixture. A pure Gaussian says a reading 6 in short is
+        // impossible, so one robot in the way annihilates the whole cloud; the
+        // extra terms make such a reading uninformative instead of fatal, and
+        // give the tails a slope so a badly placed particle still knows which
+        // way to improve. Residuals are in sigmas, which folds the short term's
+        // decay length into the range-dependent sigma.
+        // The floor has to stay small. At 0.02 a beam reading 95 in away from
+        // what a particle predicted costs the same as one reading 8 sigma away,
+        // so a particle on the wrong side of the field is competitive with the
+        // right one and the cloud migrates to a false mode. Together these bottom
+        // out near 1e-3, matching the penalty the plain Gaussian used to apply,
+        // while keeping a slope out to ~5 sigma where the old model had a cliff.
+        float hitWeight = 1.0f;          // weight on the Gaussian
+        float shortWeight = 0.50f;       // weight on the unexpected-obstacle tail
+        float shortDecaySigmas = 1.2f;   // decay of that tail, in sigmas
+        float randWeight = 0.0008f;      // floor; no single beam can zero a particle
+
+        // Augmented MCL recovery (Probabilistic Robotics 8.3, in logs). A
+        // kidnapped robot makes every particle equally wrong, so N_eff stays
+        // high and plain resampling never fires. Comparing a fast and a slow
+        // average of the measurement likelihood detects that, and the gap sets
+        // how much of the cloud is redrawn across the field.
+        // alphaFast must stay slow enough that ordinary measurement noise does
+        // not reach injectResampleFloor: forcing a resample every cycle adds
+        // distResampleVariance of jitter every cycle, which is a random walk
+        // that dwarfs the drift the filter exists to correct.
+        float alphaSlow = 0.005f;
+        float alphaFast = 0.10f;
+        //
+        // OFF by default, and not yet safe to turn on. With injection enabled a
+        // parked filter migrates to a false mode within ~1.5 s at poses where
+        // only two beams are in range: an injected particle can point one beam
+        // at a post, get it deadzoned for log(deadzoneLikelihood) = -1.4, and so
+        // out-score the truth on its one remaining beam. deadzoneLikelihood has
+        // to come down to about the beam-model floor before this can ship on --
+        // hiding behind an obstacle must not be cheaper than measuring a wall.
+        // Set to 0.10 to exercise it: recovery from a 36 in displacement goes
+        // from never to 0.2 in within 3 s.
+        float maxRandomFrac = 0.0f;      // cap on the share redrawn per resample
+        float injectResampleFloor = 0.03f;  // below this, do not force a resample
+
         bool autoSync = true;              // automatically sync pose to odometry
+    };
+
+    /// Pose estimate plus the cloud's own account of how sure it is.
+    struct Estimate {
+        Pose pose;
+        float nEff{0.0f};
+        float covXX{0.0f}, covXY{0.0f}, covYY{0.0f};  // inches^2
+        float covTheta{0.0f};                         // radians^2
     };
 
     // ========================================================================
@@ -149,6 +199,10 @@ public:
     /// Returns {estimatedPose, N_eff}. N_eff below threshold triggers resample.
     std::pair<Pose, float> getEstimate() const;
 
+    /// Weighted mean plus the weighted spread of the cloud. The spread is what
+    /// lets a downstream filter weigh this estimate instead of guessing at it.
+    Estimate estimate() const;
+
     // ========================================================================
     // Pose management
     // ========================================================================
@@ -216,6 +270,14 @@ public:
     /// Set the distance sync proportion
     void setDistSyncProp(float prop) { mConfig.distSyncProp = prop; }
 
+    /// Whether this filter writes its estimate back into odometry. Turn it off
+    /// when a downstream filter owns the fused pose, or the two fight over it.
+    void setAutoSync(bool enabled) { mConfig.autoSync = enabled; }
+
+    /// Share of the cloud redrawn across the field on the last resample. Rises
+    /// above 0 when the measurements stop fitting — i.e. after a kidnapping.
+    float randomInjectFraction() const { return mInjectFrac; }
+
     /// Copy the live particle cloud out for visualisation or telemetry.
     /// Writes 4 floats per particle (x, y, theta, weight) into `out`, up to
     /// `maxParticles`. Returns the number actually written.
@@ -231,6 +293,7 @@ public:
         int particles = mConfig.particleCount;
         mConfig = config;
         mConfig.particleCount = particles;
+        buildGaussianLUT();   // the mixture weights are baked into it
     }
 
     /// Reseed the particle RNG and regenerate the noise pool.
@@ -250,6 +313,12 @@ private:
     struct Particle {
         Pose pose;
         float weight = 1.0f;
+        // Weights are accumulated in logs and exponentiated relative to the
+        // cloud maximum. Multiplying eight beam likelihoods directly underflows
+        // to zero for every particle at once, and the recovery from that is a
+        // uniform reset — throwing the filter away exactly when it was only
+        // slightly wrong.
+        float logWeight = 0.0f;
     };
 
     struct Trig {
@@ -317,8 +386,13 @@ private:
     /// Cast a ray from a particle through a sensor and find nearest obstacle
     float castRay(const Particle& particle, int sensorIndex) const;
 
-    /// Build the Gaussian probability LUT (sigma is scaled by sensor angle)
+    /// Build the log-likelihood LUT over the SIGNED residual in sigmas, so one
+    /// lookup covers the whole beam mixture.
     void buildGaussianLUT();
+
+    /// Log-likelihood of a residual of `sigmas` (signed: negative = the reading
+    /// came back shorter than the particle expected).
+    float logLikelihood(float sigmas) const;
 
     // ========================================================================
     // Noise generation
@@ -364,7 +438,8 @@ private:
     std::array<Particle, PARTICLE_MAX>* mNewParticles{&mParticlesB};
 
 
-    // Gaussian LUT
+    // Beam-model log-likelihood over the signed residual, +/- LUT_SIGMA_SPAN.
+    static constexpr float LUT_SIGMA_SPAN = 8.0f;
     alignas(64) float mGaussianLUT[GAUSSIAN_LUT_SIZE]{};
 
     // Sensor mount poses (robot-frame offsets + pointing angles)
@@ -389,6 +464,14 @@ private:
     Pose mRawEstimate{};
     float mLastImuHeading{0.0f};
     float mLatestSpeed{0.0f};
+
+    // Augmented-MCL recovery state. Slow and fast averages of the log
+    // measurement likelihood; their gap is the evidence that the cloud is in
+    // the wrong place rather than merely spread out.
+    float mLogWSlow{0.0f};
+    float mLogWFast{0.0f};
+    bool  mHaveLogAvg{false};
+    float mInjectFrac{0.0f};
 
     // Background task.
     // mRunning is atomic: written by stopTracking() (caller task) and read by

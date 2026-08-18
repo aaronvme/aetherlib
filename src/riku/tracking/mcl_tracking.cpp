@@ -96,10 +96,28 @@ void MclTracking::regenerateNoise() {
 // ============================================================================
 
 void MclTracking::buildGaussianLUT() {
+    // Signed residual across +/- LUT_SIGMA_SPAN, holding the log of the beam
+    // mixture so weighting costs one lookup and an add.
+    const float step = (2.0f * LUT_SIGMA_SPAN) / GAUSSIAN_LUT_SIZE;
     for (int i = 0; i < GAUSSIAN_LUT_SIZE; i++) {
-        float x = (static_cast<float>(i) / GAUSSIAN_LUT_SIZE) * 4.0f;  // 0..4 sigmas
-        mGaussianLUT[i] = std::exp(-(x * x) / 2.0f);
+        const float u = -LUT_SIGMA_SPAN + (static_cast<float>(i) + 0.5f) * step;
+        float p = mConfig.hitWeight * std::exp(-0.5f * u * u) + mConfig.randWeight;
+        // Short readings mean something unmodelled is in the way; long ones have
+        // no such excuse, so the tail is one-sided.
+        if (u < 0.0f) {
+            p += mConfig.shortWeight *
+                 std::exp(u / std::max(mConfig.shortDecaySigmas, 0.05f));
+        }
+        mGaussianLUT[i] = std::log(std::max(p, 1e-30f));
     }
+}
+
+float MclTracking::logLikelihood(float sigmas) const {
+    const float t = (sigmas + LUT_SIGMA_SPAN) / (2.0f * LUT_SIGMA_SPAN);
+    int idx = static_cast<int>(t * GAUSSIAN_LUT_SIZE);
+    if (idx < 0) idx = 0;
+    if (idx >= GAUSSIAN_LUT_SIZE) idx = GAUSSIAN_LUT_SIZE - 1;
+    return mGaussianLUT[idx];
 }
 
 // ============================================================================
@@ -227,6 +245,8 @@ void MclTracking::setPose(const Pose& pose) {
     mRawEstimate = pose;
     mLastResamplePose = pose;
     mLatestSpeed = 0.0f;
+    mHaveLogAvg = false;
+    mInjectFrac = 0.0f;
 }
 
 void MclTracking::uniformReset() {
@@ -245,6 +265,8 @@ void MclTracking::uniformReset() {
     mRawEstimate = Pose{};
     mLastResamplePose = Pose{};
     mLatestSpeed = 0.0f;
+    mHaveLogAvg = false;
+    mInjectFrac = 0.0f;
 }
 
 // ============================================================================
@@ -494,14 +516,17 @@ void MclTracking::updateWeights() {
     // Weight particles
     auto& particles = *mParticles;
     mDeadzoneHits.fill(0);
+    const float logDeadzone = std::log(std::max(mConfig.deadzoneLikelihood, 1e-30f));
+    static constexpr float kLogFloor = -80.0f;
+
     for (int i = 0; i < mConfig.particleCount; i++) {
-        float totalWeight = 1.0f;
+        float logWeight = 0.0f;
         auto& p = particles[i];
 
         // Instant disqualification if outside field bounds
         if (std::fabs(p.pose.x) > Field::FIELD_HALF_WALL ||
             std::fabs(p.pose.y) > Field::FIELD_HALF_WALL) {
-            p.weight = 1e-35f;
+            p.logWeight = kLogFloor;
             continue;
         }
 
@@ -539,7 +564,7 @@ void MclTracking::updateWeights() {
                 }
                 if (blocked) {
                     mDeadzoneHits[j]++;
-                    totalWeight *= mConfig.deadzoneLikelihood;
+                    logWeight += logDeadzone;
                     continue;
                 }
             }
@@ -571,23 +596,49 @@ void MclTracking::updateWeights() {
                 }
             }
 
-            // If no object hit at max range, weight is very low
+            // Nothing in range from here, but the sensor returned something.
             if (pDist >= mConfig.maxSensorRange - 1e-6f) {
-                totalWeight *= 0.001f;
+                logWeight += logLikelihood(-LUT_SIGMA_SPAN);
                 continue;
             }
 
-            // Compare expected vs actual distance using Gaussian LUT
-            float z = std::fabs(mSensorReadingsInch[j] - pDist) * invSigmas[j];
-            int lutIdx = static_cast<int>(z * 256.0f);
-
-            if (lutIdx < GAUSSIAN_LUT_SIZE) {
-                totalWeight *= mGaussianLUT[lutIdx];
-            } else {
-                totalWeight *= mGaussianLUT[GAUSSIAN_LUT_SIZE - 1] * 0.01f;
-            }
+            // Signed, in sigmas: negative means the return came back shorter
+            // than this particle expected, which the mixture treats gently.
+            logWeight += logLikelihood((mSensorReadingsInch[j] - pDist) * invSigmas[j]);
         }
-        p.weight = totalWeight;
+        p.logWeight = std::max(logWeight, kLogFloor);
+    }
+
+    // Exponentiate relative to the best particle: the offset cancels in every
+    // downstream ratio (resampling, the weighted mean, N_eff) but keeps the
+    // whole cloud inside float range.
+    float maxLog = kLogFloor;
+    for (int i = 0; i < mConfig.particleCount; i++) {
+        maxLog = std::max(maxLog, particles[i].logWeight);
+    }
+    float sumRel = 0.0f;
+    for (int i = 0; i < mConfig.particleCount; i++) {
+        particles[i].weight = std::exp(particles[i].logWeight - maxLog);
+        sumRel += particles[i].weight;
+    }
+
+    // Augmented MCL, in logs. The arithmetic slow/fast averages of the textbook
+    // become geometric ones here, which is what keeps the ratio meaningful when
+    // likelihoods span many orders of magnitude.
+    if (activeSensors > 0.0f && sumRel > 0.0f) {
+        const float logWAvg =
+            maxLog + std::log(sumRel / static_cast<float>(mConfig.particleCount));
+        if (!mHaveLogAvg) {
+            mLogWSlow = mLogWFast = logWAvg;
+            mHaveLogAvg = true;
+        } else {
+            mLogWSlow += mConfig.alphaSlow * (logWAvg - mLogWSlow);
+            mLogWFast += mConfig.alphaFast * (logWAvg - mLogWFast);
+        }
+        const float ratio = std::exp(std::min(mLogWFast - mLogWSlow, 0.0f));
+        mInjectFrac = clamp(1.0f - ratio, 0.0f, mConfig.maxRandomFrac);
+    } else {
+        mInjectFrac = 0.0f;
     }
 
     // mValidSensors no longer carries deadzones, so publish the share of the
@@ -616,7 +667,21 @@ void MclTracking::resample() {
         return;
     }
 
-    float step = totalWeight / static_cast<float>(mConfig.particleCount);
+    // Replace the tail of the draw with fresh field-wide samples when the
+    // likelihood says the cloud is in the wrong place. Their heading comes from
+    // the IMU rather than being random: on a V5 the heading is the one thing
+    // never in doubt, and fixing it turns a 3-D search into a 2-D one.
+    // Only when the likelihood evidence clears the floor. Injecting a trickle on
+    // every resample is self-sustaining: the fresh particles carry no weight, so
+    // N_eff drops, which triggers the next resample, which injects again -- and
+    // each pass jitters the whole cloud by distResampleVariance.
+    const float frac = (mInjectFrac >= mConfig.injectResampleFloor) ? mInjectFrac : 0.0f;
+    const int injected =
+        std::min(mConfig.particleCount - 1,
+                 static_cast<int>(frac * mConfig.particleCount));
+    const int drawn = mConfig.particleCount - injected;
+
+    float step = totalWeight / static_cast<float>(drawn);
 
     // Random start in [0, step)
     std::uniform_real_distribution<float> starter(0.0f, step);
@@ -625,7 +690,7 @@ void MclTracking::resample() {
     float cumWeight = particles[0].weight;
     int index = 0;
 
-    for (int m = 0; m < mConfig.particleCount; m++) {
+    for (int m = 0; m < drawn; m++) {
         // Walk to target position
         while (index < mConfig.particleCount - 1 && currPos > cumWeight) {
             index++;
@@ -639,9 +704,23 @@ void MclTracking::resample() {
         selected.pose.theta  = wrapRad(selected.pose.theta +
                                        nextNoise() * mConfig.thetaResampleVariance);
         selected.weight = 1.0f;
+        selected.logWeight = 0.0f;
 
         newParticles[m] = selected;
         currPos += step;
+    }
+
+    if (injected > 0) {
+        const float heading = mOdom.imuHeadingRad();
+        std::uniform_real_distribution<float> spread(-Field::FIELD_HALF_WALL,
+                                                      Field::FIELD_HALF_WALL);
+        for (int m = drawn; m < mConfig.particleCount; m++) {
+            newParticles[m].pose = {
+                spread(mGen), spread(mGen),
+                wrapRad(heading + nextNoise() * mConfig.thetaResampleVariance)};
+            newParticles[m].weight = 1.0f;
+            newParticles[m].logWeight = 0.0f;
+        }
     }
 
     // Swap buffers
@@ -685,6 +764,40 @@ std::pair<Pose, float> MclTracking::getEstimate() const {
     return {estimate, nEff};
 }
 
+MclTracking::Estimate MclTracking::estimate() const {
+    Estimate out;
+    const auto pair = getEstimate();
+    out.pose = pair.first;
+    out.nEff = pair.second;
+    if (!(out.nEff > 0.0f)) return out;
+
+    // Weighted spread about the weighted mean. This is the cloud's opinion of
+    // its own error, which understates the truth whenever the cloud has
+    // converged on the wrong place -- so consumers should inflate it.
+    float totalWeight = 0.0f;
+    float sxx = 0.0f, sxy = 0.0f, syy = 0.0f, stt = 0.0f;
+    const auto& particles = *mParticles;
+    for (int i = 0; i < mConfig.particleCount; i++) {
+        const auto& p = particles[i];
+        const float dx = p.pose.x - out.pose.x;
+        const float dy = p.pose.y - out.pose.y;
+        const float dt = angleDiffRad(out.pose.theta, p.pose.theta);
+        sxx += p.weight * dx * dx;
+        sxy += p.weight * dx * dy;
+        syy += p.weight * dy * dy;
+        stt += p.weight * dt * dt;
+        totalWeight += p.weight;
+    }
+    if (totalWeight < 1e-20f) return out;
+
+    const float inv = 1.0f / totalWeight;
+    out.covXX = sxx * inv;
+    out.covXY = sxy * inv;
+    out.covYY = syy * inv;
+    out.covTheta = stt * inv;
+    return out;
+}
+
 // ============================================================================
 // update() — one full MCL iteration
 // ============================================================================
@@ -718,6 +831,10 @@ Pose MclTracking::update() {
     } else if (estimate.second < mConfig.resampleThreshold &&
                distSinceResample > 5.0f &&
                mLatestSpeed < 100.0f) {
+        shouldResample = true;
+    } else if (mInjectFrac >= mConfig.injectResampleFloor) {
+        // A displaced cloud is uniformly wrong, so N_eff stays high and neither
+        // test above ever fires. This is the only path that resamples it.
         shouldResample = true;
     }
 
