@@ -50,6 +50,40 @@ void Drivetrain::setBrakeMode(pros::motor_brake_mode_e mode) {
     if (rightMotors != nullptr) rightMotors->set_brake_mode(mode);
 }
 
+float Drivetrain::groupVelocityInPerSec(const pros::MotorGroup* a,
+                                       const pros::MotorGroup* b) const {
+    if (a == nullptr && b == nullptr) return 0.0f;
+
+    auto accumulate = [](const std::vector<double>& rpms, double& sum, int& count) {
+        for (double rpm : rpms) {
+            if (!std::isfinite(rpm) || std::fabs(rpm) >= 2147483647.0) continue;
+            sum += rpm;
+            count++;
+        }
+    };
+
+    double sum = 0.0;
+    int count = 0;
+    if (a != nullptr) accumulate(a->get_actual_velocity_all(), sum, count);
+    if (b != nullptr) accumulate(b->get_actual_velocity_all(), sum, count);
+    if (count == 0) return 0.0f;
+
+    const double motorRpm = sum / count;
+    return static_cast<float>(motorRpm * externalGearRatio() / 60.0 * 3.14159265358979 * wheelDiameter);
+}
+
+float Drivetrain::averageVelocityInPerSec() const {
+    return groupVelocityInPerSec(leftMotors, rightMotors);
+}
+
+float Drivetrain::leftVelocityInPerSec() const {
+    return groupVelocityInPerSec(leftMotors, nullptr);
+}
+
+float Drivetrain::rightVelocityInPerSec() const {
+    return groupVelocityInPerSec(rightMotors, nullptr);
+}
+
 float Drivetrain::averagePositionDeg() const {
     if (leftMotors == nullptr && rightMotors == nullptr) return 0.0f;
 

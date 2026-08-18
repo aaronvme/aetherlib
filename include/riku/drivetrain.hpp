@@ -29,6 +29,15 @@ public:
 
     void setBrakeMode(pros::motor_brake_mode_e mode);
 
+    /// Average wheel speed (inches/sec), signed. Ignores PROS_ERR from dead
+    /// motors, same as averagePositionDeg().
+    float averageVelocityInPerSec() const;
+
+    /// Per-side wheel speed (inches/sec), signed. A velocity controller needs
+    /// the sides apart -- averaging them hides the turn.
+    float leftVelocityInPerSec() const;
+    float rightVelocityInPerSec() const;
+
     /// Average motor position (degrees). Ignores PROS_ERR from dead motors.
     float averagePositionDeg() const;
 
@@ -37,6 +46,9 @@ public:
     float externalGearRatio() const;
 
 private:
+    float groupVelocityInPerSec(const pros::MotorGroup* a,
+                                const pros::MotorGroup* b) const;
+
     mutable float mExtGearRatio{0.0f};   // 0 = unresolved
 };
 
