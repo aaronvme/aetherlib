@@ -255,6 +255,8 @@ input[type="range"] { accent-color: var(--accent); }
 .diag .r  { text-align: right; }
 .diag .ok   { color: var(--true); }
 .diag .bad  { color: #f87171; }
+/* beam deadzoned for part of the cloud: ignored by some hypotheses */
+.diag .warn { color: #e2b341; }
 .diag .off  { color: #4b5563; }
 .diag .hdr  { color: #6b7280; font-size: 10px; text-transform: uppercase; letter-spacing: .06em; }
 

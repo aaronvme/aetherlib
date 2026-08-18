@@ -50,15 +50,19 @@ Chassis::Chassis(Drivetrain& drivetrain, const OdomSensors& sensors,
 }
 
 Chassis::~Chassis() {
-    // Stop the motion task (blocks in notify_take — wake it so it can exit)
+    // executeCurrentMotion()'s loop only watches mMotionCancelled, so cancel
+    // first and wait for it to unwind. Removing the task mid-motion skips
+    // endMotion() and the drive holds its last voltage forever.
+    mMotionCancelled = true;
     mTaskShouldStop = true;
     if (mMotionTask != nullptr) {
         mMotionTask->notify();       // wake from notify_take so it can exit
-        pros::delay(20);             // give it a moment to exit cleanly
+        for (int i = 0; i < 100 && mMotionRunning; ++i) pros::delay(5);
         mMotionTask->remove();
         delete mMotionTask;
         mMotionTask = nullptr;
     }
+    mDrivetrain.setVoltage(0, 0);
 
     // Stop the tracking worker tasks BEFORE the odometry task — they call into
     // mOdom every tick, so they must be gone before OdomTracking is torn down.
@@ -314,10 +318,54 @@ void Chassis::executeCurrentMotion() {
         float totalLen = ramseteCumLen.empty() ? 0.0f : ramseteCumLen.back();
         // Peak profile speed (in/s), scaled by the caller's maxSpeed fraction.
         float cruiseInPerSec = maxSpeedInPerSec * (req.ramseteParams.maxSpeed / 127.0f);
+        const float maxAccel = req.ramseteParams.maxAccel;
+        const float latAccel = req.ramseteParams.maxLateralAccel;
+
         if (req.ramseteParams.useVelocityProfile && totalLen > 1e-3f &&
-            cruiseInPerSec > 1e-3f && req.ramseteParams.maxAccel > 1e-3f) {
-            ramseteProfile = generateTrapezoidal(totalLen, cruiseInPerSec,
-                                                 req.ramseteParams.maxAccel);
+            cruiseInPerSec > 1e-3f && maxAccel > 1e-3f) {
+
+            if (latAccel <= 1e-3f || path.size() < 3) {
+                // Cornering limit disabled: plain trapezoid over arc length.
+                ramseteProfile = generateTrapezoidal(totalLen, cruiseInPerSec, maxAccel);
+            } else {
+                // Curvature-limited profile, sampled at the path points: cap each
+                // point at the speed its bend can hold, then sweep both ways so the
+                // acceleration limit holds too -- braking starts before the corner,
+                // not at it. Both ends pinned to rest.
+                const size_t n = path.size();
+                std::vector<float> v(n, cruiseInPerSec);
+
+                for (size_t i = 1; i + 1 < n; ++i) {
+                    // Same curvature estimate the law uses for w_d, so the profile and
+                    // the feedforward cannot disagree about the path.
+                    float segDist = distance(path[i - 1].x, path[i - 1].y,
+                                             path[i + 1].x, path[i + 1].y);
+                    if (segDist <= 1e-3f) continue;
+                    float curvature = std::fabs(
+                        angleDiffRad(path[i - 1].theta, path[i + 1].theta)) / segDist;
+                    if (curvature > 1e-5f) {
+                        v[i] = std::min(v[i], std::sqrt(latAccel / curvature));
+                    }
+                }
+                v.front() = 0.0f;
+                v.back() = 0.0f;
+
+                for (size_t i = 1; i < n; ++i) {           // accelerate forwards
+                    float ds = ramseteCumLen[i] - ramseteCumLen[i - 1];
+                    v[i] = std::min(v[i], std::sqrt(v[i - 1] * v[i - 1] + 2.0f * maxAccel * ds));
+                }
+                for (size_t i = n - 1; i > 0; --i) {       // brake backwards
+                    float ds = ramseteCumLen[i] - ramseteCumLen[i - 1];
+                    v[i - 1] = std::min(v[i - 1], std::sqrt(v[i] * v[i] + 2.0f * maxAccel * ds));
+                }
+
+                ramseteProfile.resize(n);
+                for (size_t i = 0; i < n; ++i) {
+                    ramseteProfile[i].position = ramseteCumLen[i];
+                    ramseteProfile[i].velocity = v[i];
+                }
+            }
+
             float best = -1.0f;
             for (const auto& pt : ramseteProfile) {
                 if (pt.velocity > best) { best = pt.velocity; ramsetePeakPos = pt.position; }
@@ -393,24 +441,31 @@ void Chassis::executeCurrentMotion() {
         }
         case MotionType::Heading: {
             angLimit = req.turnHeadingParams.maxSpeed;
-            float headingErrRad = angleDiffRad(pose.theta, req.targetHeadingRad);
+            float rawErrRad = angleDiffRad(pose.theta, req.targetHeadingRad);
             // Resolve to the requested turn direction (CW, CCW, or SHORTEST).
             // Without this, CW/CCW are ignored and the robot always takes the
             // shortest path — a 350° requested CW turn would be 10° CCW.
-            headingErrRad = resolveTurnError(headingErrRad, req.turnHeadingParams.direction);
+            float headingErrRad = resolveTurnError(rawErrRad, req.turnHeadingParams.direction);
+            // Once inside tolerance the forced direction is satisfied. Keep
+            // resolving and a 1° overshoot flips to -359°, so the robot spins
+            // another full lap and never settles.
+            float tolRad = degToRad(req.turnHeadingParams.targetTolerance);
+            if (std::fabs(rawErrRad) < tolRad) headingErrRad = rawErrRad;
             angularOut = mAngularPID.update(headingErrRad);
             lateralOut = 0;
-            settled = std::fabs(headingErrRad) < degToRad(req.turnHeadingParams.targetTolerance);
+            settled = std::fabs(rawErrRad) < tolRad;
             break;
         }
         case MotionType::TurnPoint: {
             angLimit = req.turnPointParams.maxSpeed;
-            float targetHeadingRad = bearingToPoint(pose, req.targetX, req.targetY);
-            float headingErrRad = angleDiffRad(pose.theta, targetHeadingRad);
-            headingErrRad = resolveTurnError(headingErrRad, req.turnPointParams.direction);
+            float rawErrRad = headingToPointOffset(pose, req.targetX, req.targetY,
+                                                   req.turnPointParams.offset);
+            float headingErrRad = resolveTurnError(rawErrRad, req.turnPointParams.direction);
+            float tolRad = degToRad(req.turnPointParams.targetTolerance);
+            if (std::fabs(rawErrRad) < tolRad) headingErrRad = rawErrRad;
             angularOut = mAngularPID.update(headingErrRad);
             lateralOut = 0;
-            settled = std::fabs(headingErrRad) < degToRad(req.turnPointParams.targetTolerance);
+            settled = std::fabs(rawErrRad) < tolRad;
             break;
         }
         case MotionType::Arc: {
@@ -432,14 +487,12 @@ void Chassis::executeCurrentMotion() {
                 float headingErrRad = angleDiffRad(pose.theta, chordBearingRad);
                 angularOut = mAngularPID.update(headingErrRad);
             } else {
-                // Exact arc angle: angle = 2 * asin(chord / (2*|radius|))
-                // Using chordDist/radius (small-angle approximation) diverges for
-                // large arcs — the exact formula matches the Arc utility.
-                float halfAngle = std::asin(std::min(chordDist / (2.0f * radius), 1.0f));
-                float arcSign = (req.targetRadius > 0) ? 1.0f : -1.0f;
-
-                // Target heading tangential to arc at endpoint
-                float targetHeadingRad = chordBearingRad + arcSign * (HALF_PI - halfAngle);
+                // The setpoint is the tangent at the START of the arc that
+                // remains, which is the heading the robot should hold now. The
+                // end tangent is a further arcAngle away and reaching for it
+                // demands a turn the arc has not earned yet.
+                float targetHeadingRad =
+                    arcStartHeading(pose, req.targetX, req.targetY, req.targetRadius);
                 float headingErrRad = angleDiffRad(pose.theta, targetHeadingRad);
 
                 // Lateral error: how far off the arc
@@ -653,14 +706,14 @@ void Chassis::executeCurrentMotion() {
 
             // Only one side moves — store in custom output vars
             if (req.swingSide == SwingSide::Left) {
-                // Left stationary, right turns.  For CCW (+angularOut),
-                // the right motor must go backward → negate angularOut.
+                // Left stationary, right turns. Pivoting about the left wheel,
+                // driving the right side forward rotates CCW.
                 customLeft = 0;
-                customRight = clamp(-angularOut, -127.0f, 127.0f);
+                customRight = clamp(angularOut, -127.0f, 127.0f);
             } else {
-                // Right stationary, left turns.  For CCW (+angularOut),
-                // the left motor goes forward.
-                customLeft = clamp(angularOut, -127.0f, 127.0f);
+                // Right stationary, left turns. Pivoting about the right wheel,
+                // CCW needs the left side backward.
+                customLeft = clamp(-angularOut, -127.0f, 127.0f);
                 customRight = 0;
             }
             useCustomOutput = true;
@@ -683,8 +736,12 @@ void Chassis::executeCurrentMotion() {
             left  = customLeft;
             right = customRight;
         } else {
-            left  = clamp(lateralOut + angularOut, -127.0f, 127.0f);
-            right = clamp(lateralOut - angularOut, -127.0f, 127.0f);
+            // angularOut is CCW-positive (it comes from angleDiffRad on
+            // standard-math thetas), and CCW needs the RIGHT side faster.
+            // Adding it to the left instead makes the heading loop positive
+            // feedback, stable at target ± 180°.
+            left  = clamp(lateralOut - angularOut, -127.0f, 127.0f);
+            right = clamp(lateralOut + angularOut, -127.0f, 127.0f);
         }
 
         if (!mDryRun) {
@@ -696,7 +753,7 @@ void Chassis::executeCurrentMotion() {
             float rightFrac = right / 127.0f;
 
             float linearVel  = (leftFrac + rightFrac) * 0.5f * maxSpeedInPerSec;
-            float angularVel = (leftFrac - rightFrac) * maxSpeedInPerSec /
+            float angularVel = (rightFrac - leftFrac) * maxSpeedInPerSec /
                 mDrivetrain.trackWidth;
 
             float dt = 0.01f;  // 10ms loop period
@@ -944,6 +1001,11 @@ void Chassis::waitUntilDist(float dist) {
     // The background odometry task keeps the pose fresh — no update() here
     // (calling it from this task too would race and consume MCL's deltas).
     while (distanceToPoint(mOdom.getPose(), start.x, start.y) < dist) {
+        // A motion that times out, stalls against a wall, or is cancelled may
+        // never cover `dist`, and this is a straight-line displacement so a
+        // path that curves back cannot reach it either. Without this the
+        // calling routine blocks for the rest of the match.
+        if (isSettled()) return;
         pros::delay(10);
     }
 }
@@ -1023,6 +1085,10 @@ void Chassis::setDryRun(bool enabled) {
     if (enabled) {
         mDryRunPath.clear();
         mDryRunStartPose = mOdom.getPose();
+        // Seed the synthetic pose too. executeCurrentMotion() only seeds it
+        // when mDryRunPath is empty, which it no longer is after the push
+        // below, so leaving it stale previews a path from the wrong origin.
+        mDryRunPose = mDryRunStartPose;
         mDryRunPath.push_back(mDryRunStartPose);
     }
 }

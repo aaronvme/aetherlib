@@ -342,11 +342,10 @@ void OdomTracking::calibrate() {
 }
 
 float OdomTracking::imuHeadingDeg() const {
-    if (!mSensors.imuCollection.empty() && mSensors.imuCollection[0] != nullptr) {
-        float rawHeading = mSensors.imuCollection[0]->get_heading();
-        return rawHeading * mSensors.imuScaleFactor;
-    }
-    return 0.0f;
+    // Route through currentHeadingRad() so this shares its PROS_ERR_F guard.
+    // Unguarded, one bad read became vexToStdRad(inf) == 0, a plausible-looking
+    // heading that MCL then clamps every particle to.
+    return stdRadToVexDeg(currentHeadingRad());
 }
 
 float OdomTracking::imuHeadingRad() const {

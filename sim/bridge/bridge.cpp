@@ -594,6 +594,11 @@ void sim_set_param(const char* name, float value) {
         if (k == "angularKd") g.kD = value;
         riku::chassisConfig.angularGains = g;
         riku::chassis.setAngularGains(g);
+    } else if (k == "mclObsCone" || k == "mclObsTol") {
+        auto c = riku::chassis.mcl().config();
+        if (k == "mclObsCone") c.obstacleConeFrac = value;
+        else                   c.obstacleRangeTol = value;
+        riku::chassis.mcl().setConfig(c);
     } else if (k == "ramseteB")           { gRamsete.b = value;
     } else if (k == "ramseteZeta")        { gRamsete.zeta = value;
     } else if (k == "ramseteMinSpeed")    { gRamsete.minSpeed = value;
@@ -746,6 +751,7 @@ const char* sim_state_json() {
     n += std::snprintf(buf + n, sizeof(buf) - n, "],\"filters\":[");
     const auto& mclValid = riku::chassis.mcl().validSensors();
     const auto& mclRead  = riku::chassis.mcl().sensorReadings();
+    const auto& mclDead  = riku::chassis.mcl().deadzoneFraction();
     const auto& rclSensors = riku::chassis.rcl().sensors();
 
     first = true;
@@ -754,11 +760,12 @@ const char* sim_state_json() {
         const auto& rs = rclSensors[i];
         n += std::snprintf(buf + n, sizeof(buf) - n,
             "%s{\"i\":%d,\"mclValid\":%s,\"mclIn\":%.2f,"
-            "\"rclValid\":%s,\"rclIn\":%.2f,\"rclConf\":%d,"
+            "\"rclValid\":%s,\"rclIn\":%.2f,\"rclConf\":%d,\"mclDead\":%.2f,"
             "\"rx\":%.2f,\"ry\":%.2f,\"rdx\":%.3f,\"rdy\":%.3f}",
             first ? "" : ",", i,
             mclValid[i] ? "true" : "false", mclRead[i],
             rs.valid ? "true" : "false", rs.readingInch, rs.confidence,
+            mclDead[i],
             rs.worldX, rs.worldY, rs.rayCos, rs.raySin);
         first = false;
     }

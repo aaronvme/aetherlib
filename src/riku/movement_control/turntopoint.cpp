@@ -34,10 +34,12 @@ float headingToPoint(const Pose& current, float targetX, float targetY) {
     return angleDiffRad(current.theta, desiredHeadingRad);
 }
 
-/// Compute heading error with an angular offset (positive = CCW).
+/// Compute heading error with an angular offset, in VEX degrees (CW positive)
+/// to match the rest of the API — hence the subtraction from a CCW-positive
+/// bearing.
 float headingToPointOffset(const Pose& current, float targetX, float targetY,
                             float offsetDeg) {
-    float desiredHeadingRad = bearingToPoint(current, targetX, targetY) + degToRad(offsetDeg);
+    float desiredHeadingRad = bearingToPoint(current, targetX, targetY) - degToRad(offsetDeg);
     return angleDiffRad(current.theta, desiredHeadingRad);
 }
 

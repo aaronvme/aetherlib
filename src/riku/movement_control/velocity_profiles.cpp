@@ -12,6 +12,14 @@ std::vector<ProfilePoint> generateTrapezoidal(float distance, float maxVel,
                                                float maxAccel, float dt) {
     std::vector<ProfilePoint> profile;
 
+    // Without this the triangular branch takes sqrt of a negative, or divides
+    // by a zero accel, and NaN propagates into tTotal — the sampling loop then
+    // never runs and callers get an empty profile to index into.
+    if (distance <= 0.0f || maxVel <= 0.0f || maxAccel <= 0.0f || dt <= 0.0f) {
+        profile.push_back({0.0f, 0.0f, 0.0f});
+        return profile;
+    }
+
     // Time to accelerate to max velocity
     float tAccel = maxVel / maxAccel;
     // Distance covered during acceleration
@@ -39,27 +47,23 @@ std::vector<ProfilePoint> generateTrapezoidal(float distance, float maxVel,
     float pos = 0.0f;
 
     for (float t = 0.0f; t <= tTotal + dt; t += dt) {
-        float vel, accel;
+        float vel;
 
         if (t < tAccel) {
             // Accelerating
-            accel = maxAccel;
             vel = maxAccel * t;
             pos = 0.5f * maxAccel * t * t;
         } else if (t < tAccel + tCruise) {
             // Cruising
-            accel = 0.0f;
             vel = maxVel;
             pos = dAccel + maxVel * (t - tAccel);
         } else if (t < tTotal) {
             // Decelerating
             float tDecel = t - tAccel - tCruise;
-            accel = -maxAccel;
             vel = maxVel - maxAccel * tDecel;
             pos = dAccel + dCruise + maxVel * tDecel - 0.5f * maxAccel * tDecel * tDecel;
         } else {
             // Done
-            accel = 0.0f;
             vel = 0.0f;
             pos = distance;
         }
@@ -75,107 +79,50 @@ std::vector<ProfilePoint> generateSCurve(float distance, float maxVel,
                                           float dt) {
     std::vector<ProfilePoint> profile;
 
-    // Guard: zero or negative distance
-    if (distance <= 0.0f) {
+    if (distance <= 0.0f || maxVel <= 0.0f || maxAccel <= 0.0f || dt <= 0.0f) {
         profile.push_back({0.0f, 0.0f, 0.0f});
         return profile;
     }
+    // Without a jerk limit the 7-phase construction degenerates to a trapezoid.
+    if (maxJerk <= 0.0f) return generateTrapezoidal(distance, maxVel, maxAccel, dt);
 
-    // ========================================================================
-    // Compute phase durations for a proper 7-phase S-curve:
-    //   1. Jerk up   (accel: 0 → +A)
-    //   2. Const accel
-    //   3. Jerk down (accel: +A → 0, speed peaks)
-    //   4. Cruise    (constant v)
-    //   5. Jerk down (accel: 0 → -A)
-    //   6. Const decel
-    //   7. Jerk up   (accel: -A → 0)
-    //
-    // Phases 1,3,5,7 each have duration tJ = A / J.
-    // Phases 2,6 each have duration tA (may be zero).
-    // Phase 4 has duration tC (may be zero).
-    // ========================================================================
+    // 7 phases: jerk up / const accel / jerk down / cruise / jerk down /
+    // const decel / jerk up. Phases 1,3,5,7 last tJ; 2,6 last tA; 4 lasts tC.
 
-    // Time to reach max accel from zero at max jerk
-    float tJ = maxAccel / maxJerk;
+    // A jerk-only ramp pair already reaches A²/J. If that is over the speed
+    // limit there is no room for a constant-accel phase and A itself has to
+    // come down, or the profile overshoots maxVel.
+    float a = maxAccel;
+    if (a * a / maxJerk > maxVel) a = std::sqrt(maxVel * maxJerk);
 
-    // Velocity gained in a single jerk-only ramp (no constant-accel phase):
-    //   v(t) = J·t²/2  at t = tJ → vJ = A² / (2·J)
-    float vJ = 0.5f * maxAccel * maxAccel / maxJerk;
-
-    // Distance covered in a single jerk-only ramp:
-    //   s(t) = J·t³/6  at t = tJ → sJ = A³ / (6·J²)
-    float sJ = maxAccel * maxAccel * maxAccel / (6.0f * maxJerk * maxJerk);
-
-    // Can we reach maxVel with full acceleration?
-    // Velocity after phases 1+2+3 = 2·vJ + A·tA  where tA = constant phase
-    float tA = (maxVel - 2.0f * vJ) / maxAccel;
-    bool fullAccel = (tA >= 0.0f);
-
-    float vPeak, aPeak;
-    if (fullAccel) {
-        vPeak = maxVel;
-        aPeak = maxAccel;
-    } else {
-        // Cannot reach maxVel — triangular acceleration (no constant-accel phase).
-        // Use the actual maxAccel; peak velocity is limited by accel + jerk alone.
-        tA = 0.0f;
-        aPeak = maxAccel;
-        vPeak = 2.0f * vJ;   // max speed reachable with jerk-only ramps
+    // An acceleration half is symmetric, so it spans (v/2)·(2·tJ + tA) — mean
+    // speed times duration. Equating 2× that to `distance` inverts in closed
+    // form, which is what sets vPeak when the move is too short to cruise.
+    float vPeak = maxVel;
+    float dJerkOnly = 2.0f * a * a * a / (maxJerk * maxJerk);  // span at v = A²/J
+    float dFull = maxVel * (a / maxJerk + maxVel / a);         // span at v = maxVel
+    if (distance < dJerkOnly) {
+        // Even jerk-only ramps are too long, so a has to shrink with v.
+        vPeak = std::pow(0.5f * distance * std::sqrt(maxJerk), 2.0f / 3.0f);
+        a = std::sqrt(vPeak * maxJerk);
+    } else if (distance < dFull) {
+        float aj = a / maxJerk;
+        vPeak = 0.5f * a * (std::sqrt(aj * aj + 4.0f * distance / a) - aj);
     }
+    if (vPeak < 1e-6f) vPeak = 1e-6f;
 
-    // — Distance during a full acceleration half (phases 1→3) —
-    // Phase 1: s1 = sJ,  v1 = vJ
-    // Phase 2: s2 = s1 + v1·tA + ½·A·tA²,  v2 = v1 + A·tA
-    // Phase 3: s3 = s2 + v2·tJ + ½·A·tJ² − J·tJ³/6 = s2 + v2·tJ + ½·A·tJ² − sJ
-    //   v3 = v2 + A·tJ − ½·J·tJ² = v2 + vJ
+    float tJ = a / maxJerk;
+    float vJ = 0.5f * a * a / maxJerk;
+    float sJ = a * a * a / (6.0f * maxJerk * maxJerk);
+    float tA = std::max(0.0f, (vPeak - 2.0f * vJ) / a);
 
-    float a = aPeak;
     float v1 = vJ;
     float s1 = sJ;
     float v2 = v1 + a * tA;
     float s2 = s1 + v1 * tA + 0.5f * a * tA * tA;
-    float v3 = v2 + vJ;                               // = vPeak
     float s3 = s2 + v2 * tJ + 0.5f * a * tJ * tJ - sJ;
 
-    float dAccel = s3;     // distance during acceleration half
-    float dDecel = dAccel; // symmetric deceleration
-    float dCruise = distance - dAccel - dDecel;
-
-    // — If distance is too short, reduce vPeak to fit —
-    if (dCruise < 0.0f) {
-        if (distance < 1.0f) {
-            return generateTrapezoidal(distance, maxVel, maxAccel, dt);
-        }
-
-        // Solve for vPeak that makes dCruise ≈ 0.
-        // The accel distance scales roughly as: dAccel ≈ (vPeak/A)² · A³/(3·J²)
-        // for jerk-only, or with a constant-accel term otherwise.
-        // Iterate to converge (usually 3-4 iterations).
-        float vTarget = vPeak;
-        for (int iter = 0; iter < 8; iter++) {
-            tA = std::max(0.0f, (vTarget - 2.0f * vJ) / a);
-            float vt1 = vJ;
-            float st1 = sJ;
-            float vt2 = vt1 + a * tA;
-            float st2 = st1 + vt1 * tA + 0.5f * a * tA * tA;
-            float st3 = st2 + vt2 * tJ + 0.5f * a * tJ * tJ - sJ;
-            float dTotal = 2.0f * st3;
-            if (dTotal <= distance + 0.001f) break;
-            vTarget -= (dTotal - distance) / (2.0f * tJ + tA + 0.01f); // approximate derivative
-            if (vTarget < 0.01f) vTarget = 0.01f;
-        }
-        vPeak = vTarget;
-        tA = std::max(0.0f, (vPeak - 2.0f * vJ) / a);
-        // Recompute with converged vPeak
-        v2 = vJ + a * tA;
-        s2 = sJ + vJ * tA + 0.5f * a * tA * tA;
-        v3 = v2 + vJ;
-        s3 = s2 + v2 * tJ + 0.5f * a * tJ * tJ - sJ;
-        dAccel = s3;
-        dCruise = 0.0f;
-    }
-
+    float dCruise = std::max(0.0f, distance - 2.0f * s3);
     float tC = dCruise / vPeak;  // cruise duration
 
     // — Phase time boundaries —
@@ -186,6 +133,14 @@ std::vector<ProfilePoint> generateSCurve(float distance, float maxVel,
     float T5 = T4 + tJ;           // end of decel jerk-in
     float T6 = T5 + tA;           // end of const decel
     float T7 = T6 + tJ;           // end of decel
+
+    // Phase 6/7 entry states, chained forward from s3 rather than measured back
+    // from `distance`. Anchoring phase 7 to `distance` puts a backward step in
+    // the position axis, which breaks any lookup keyed on position.
+    float v5 = vPeak - vJ;
+    float s5 = s3 + dCruise + vPeak * tJ - sJ;
+    float v6 = v5 - a * tA;
+    float s6 = s5 + v5 * tA - 0.5f * a * tA * tA;
 
     // ========================================================================
     // Sample the profile at dt intervals
@@ -226,15 +181,11 @@ std::vector<ProfilePoint> generateSCurve(float distance, float maxVel,
         } else if (t < T6) {
             // Phase 6: constant −accel — a(τ) = −A
             float tau = t - T5;
-            float v5 = vPeak - vJ;                                  // v at start of phase 6
-            float s5 = s3 + dCruise + vPeak * tJ - sJ;              // s at start of phase 6
             vel_t = v5 - a * tau;
             pos_t = s5 + v5 * tau - 0.5f * a * tau * tau;
         } else if (t < T7) {
             // Phase 7: jerk to zero — a(τ) = −A + J·τ
             float tau = t - T6;
-            float v6 = vJ;                                           // v at start of phase 7
-            float s6 = distance - dAccel;                            // s at start of phase 7 (symmetric)
             vel_t = v6 - a * tau + 0.5f * maxJerk * tau * tau;
             pos_t = s6 + v6 * tau - 0.5f * a * tau * tau
                   + maxJerk * tau * tau * tau / 6.0f;
@@ -249,10 +200,13 @@ std::vector<ProfilePoint> generateSCurve(float distance, float maxVel,
         if (pos_t >= distance - 0.001f && std::fabs(vel_t) < 0.01f) break;
     }
 
-    // Ensure final point
-    if (profile.empty() || profile.back().position < distance - 0.01f) {
-        float tFinal = profile.empty() ? 0.0f : profile.back().time + dt;
-        profile.push_back({tFinal, 0.0f, distance});
+    // The sampling loop can stop a hair short of the end, so land the profile
+    // exactly at rest at `distance` — consumers read the final point directly.
+    if (profile.empty()) {
+        profile.push_back({0.0f, 0.0f, distance});
+    } else if (profile.back().position < distance - 1e-4f ||
+               std::fabs(profile.back().velocity) > 1e-4f) {
+        profile.push_back({profile.back().time + dt, 0.0f, distance});
     }
 
     return profile;

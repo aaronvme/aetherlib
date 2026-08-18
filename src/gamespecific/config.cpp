@@ -110,8 +110,11 @@ std::array<Pose, MAX_DISTANCE_SENSORS> sensorMounts = {{
 
 
 ChassisConfig chassisConfig = {
-    .lateralGains = { 5.0f, 0.0f, 5.0f },
-    .angularGains = { 50.0f, 0.0f, 6.0f },
+    // Tuned in riku-sim: ~1.1 s to 0.75 in, vs 5 s at {5,0,5}/{50,0,6}. The sim
+    // is kinematic and cannot show oscillation, so confirm on the robot;
+    // {9,0,5}/{80,0,6} is about half as aggressive if it feels twitchy.
+    .lateralGains = { 17.0f, 0.0f, 2.0f },
+    .angularGains = { 140.0f, 0.0f, 4.0f },
     .lateralWindupRange = 0.0f,
     .angularWindupRange = 0.0f,
     .throttleCurve = { .deadband = 10.0f, .minOutput = 15.0f, .curve = 1.2f },

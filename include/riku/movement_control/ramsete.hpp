@@ -27,10 +27,14 @@ struct RAMSETEParams {
     // controller scales b to inches internally. The textbook b≈2.0 is set for
     // FRC-scale paths and tracks a VEX field badly — its curves are far tighter
     // relative to the robot, and measured on this drivetrain b=2 leaves 6 in of
-    // cross-track where b=48 leaves under 1 in at the same peak speed. Error
-    // flattens out past ~48 and stays stable well beyond it.
+    // cross-track where b=48 leaves under 1 in at the same peak speed.
+    //
+    // Low zeta leaves a curved path off its final tangent with no authority to
+    // converge, so the motion sits out its timeout instead of exiting; the exit
+    // appears between 0.80 and 0.85. Raise b only on hardware -- the sim has no
+    // mass, so it rewards aggression whose cost it cannot show.
     float b{48.0f};      // aggressiveness (higher = tighter tracking), b > 0
-    float zeta{0.7f};    // damping ratio, 0 < zeta < 1
+    float zeta{0.85f};   // damping ratio, 0 < zeta < 1
     float maxSpeed{127.0f};            // peak output, motor units (0–127)
     // Floor on the profiled reference speed, motor units. Must stay above 0 or
     // the motion cannot start; binds within ~minSpeed²/(2·maxAccel) of the start.
@@ -48,6 +52,12 @@ struct RAMSETEParams {
     float lookaheadDist{10.0f};
     bool useVelocityProfile{true};     // profile v_d for accel/decel along path
     float maxAccel{50.0f};             // in/s², used when useVelocityProfile
+
+    // Caps speed where the path bends, to v <= sqrt(maxLateralAccel/|curvature|).
+    // Lets one set of gains cover paths of different tightness: slow into the
+    // corner rather than raise b to fight it. Far below the traction limit --
+    // it bounds tracking authority, not grip. 0 disables.
+    float maxLateralAccel{60.0f};
 };
 
 }  // namespace riku

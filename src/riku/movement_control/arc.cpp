@@ -16,13 +16,14 @@ namespace riku {
 /// Positive radius = center to the left of the robot (CCW arc).
 /// Negative radius = center to the right of the robot (CW arc).
 Pose computeArcCenter(const Pose& current, float radius) {
+    // Left of a robot at theta is (-sin, cos); (sin, -cos) is its right.
     float perpX, perpY;
     if (radius >= 0.0f) {
-        perpX =  std::sin(current.theta);
-        perpY = -std::cos(current.theta);
-    } else {
         perpX = -std::sin(current.theta);
         perpY =  std::cos(current.theta);
+    } else {
+        perpX =  std::sin(current.theta);
+        perpY = -std::cos(current.theta);
     }
     float absRadius = std::fabs(radius);
     return {current.x + perpX * absRadius, current.y + perpY * absRadius, 0.0f};
@@ -44,13 +45,27 @@ float arcAngle(const Pose& current, float targetX, float targetY,
     return 2.0f * halfAngle;
 }
 
+// By the tangent-chord theorem the chord bisects the two tangent directions:
+// chordBearing = startTangent + s·angle/2 = endTangent - s·angle/2, where s is
+// +1 for a CCW (positive-radius) arc.
+
 /// Compute the tangent heading at the end of an arc from current to target.
 float arcEndHeading(const Pose& current, float targetX, float targetY,
                     float radius) {
     float chordBearing = bearingToPoint(current, targetX, targetY);
     float angle = arcAngle(current, targetX, targetY, radius);
     float sign = (radius >= 0.0f) ? 1.0f : -1.0f;
-    return wrapRad(chordBearing + sign * (HALF_PI - angle * 0.5f));
+    return wrapRad(chordBearing + sign * angle * 0.5f);
+}
+
+/// Tangent heading at the START of an arc from current to target — the heading
+/// the robot should hold right now to be on that arc.
+float arcStartHeading(const Pose& current, float targetX, float targetY,
+                      float radius) {
+    float chordBearing = bearingToPoint(current, targetX, targetY);
+    float angle = arcAngle(current, targetX, targetY, radius);
+    float sign = (radius >= 0.0f) ? 1.0f : -1.0f;
+    return wrapRad(chordBearing - sign * angle * 0.5f);
 }
 
 }  // namespace riku

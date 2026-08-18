@@ -3,6 +3,7 @@
 
 #include <array>
 #include <atomic>
+#include <utility>
 #include <vector>
 
 #include "pros/distance.hpp"
@@ -75,10 +76,28 @@ public:
     struct Config {
         int sensorCount = MAX_DISTANCE_SENSORS;
         float maxSyncDist = 5.0f;          // max distance (inches) to sync per update
+        float syncProp = 0.15f;            // fraction of the RCL/odometry error
+                                           //   applied per update (0-1)
+        float maxSyncRate = 8.0f;          // inches/sec ceiling on ordinary
+                                           //   correction, so a path follower
+                                           //   never sees the pose step. The
+                                           //   displacement path below is
+                                           //   deliberately exempt.
         float accumulationAlpha = 0.3f;    // exponential moving average factor
         float updatePeriodMs = 10.0f;      // background task interval
         float angleTolerance = 10.0f;      // degrees — sensor ray must be within this
                                            //   of a wall axis (0°, 90°, 180°, 270°)
+        float maxWallInnovation = 8.0f;    // inches — discard a reading that
+                                           //   disagrees with the predicted wall
+                                           //   distance by more than this
+        float recoverySyncProp = 0.9f;     // sync fraction once readings prove
+                                           //   the pose wrong — the measurement
+                                           //   is absolute, so barely damp it
+        int displaceCycles = 3;            // consecutive impossible readings
+                                           //   before believing the robot moved
+        float noReturnWallLimit = 35.0f;   // inches — a predicted wall closer
+                                           //   than this must produce a return,
+                                           //   so silence contradicts the pose
         int confidenceThreshold = 30;      // min V5 sensor confidence (0-63)
         bool autoSync = true;              // automatically sync pose to odometry
         bool useAccumulation = false;      // average multiple readings for stability
@@ -129,14 +148,47 @@ public:
     /// Update world-space positions of all sensors based on current robot pose
     void updateSensorPoses(const Pose& robotPose);
 
+    /// What a reading means relative to the wall the pose says it should hit.
+    enum class ReadingClass {
+        Invalid,   ///< unusable: out of range, low confidence, skewed, occluded
+        WallHit,   ///< agrees with the predicted wall — a usable measurement
+        Blocked,   ///< nearer than the predicted wall. Under a pose believed
+                   ///< good this is just an object in the beam and carries no
+                   ///< information; once the pose is known to be wrong it is a
+                   ///< candidate wall reading again.
+        TooFar,    ///< further than the wall the current pose predicts. Nothing
+                   ///< is visible through a wall, so this is proof the pose is
+                   ///< wrong, not merely disagreement with it — an object can
+                   ///< only ever shorten a reading, never lengthen it.
+        Impossible ///< reports open space where the pose puts a near wall. Also
+                   ///< proof the pose is wrong, but it pins down no coordinate.
+    };
+
+    /// Classify a reading and report the distance to the wall its ray would hit.
+    ReadingClass classifyReading(int index, float& wallDist) const;
+
     /// Validate a sensor reading (range, confidence, obstacle intersection)
     bool isValidReading(int index) const;
+
+    /// True when readings prove the pose is wrong — pushed, or picked up and
+    /// put down somewhere else. RCL corrects hard while this holds.
+    bool isDisplaced() const { return mDisplaced; }
 
     /// Compute robot coordinate from a single sensor intersecting a field wall.
     /// A sensor pointed at an east/west wall returns X; at a north/south wall
     /// returns Y.  A single distance sensor can only constrain one dimension.
     /// Returns {CoordType, coordinate} — CoordType::INVALID if no valid intersection.
     std::pair<CoordType, float> getBotCoordFromSensor(int index) const;
+
+    /// Per-axis estimate.  X and Y are independently averaged from the sensors
+    /// that constrain each axis; an axis with no sensor holds the odometry value
+    /// and reports a count of 0, so callers can tell a measurement from a
+    /// passthrough.
+    struct AxisEstimate {
+        float x{0.0f}, y{0.0f};
+        int xCount{0}, yCount{0};
+    };
+    AxisEstimate estimateAxes() const;
 
     /// Derive robot position from all valid sensors.
     /// X and Y are independently averaged from sensors that constrain each axis.
@@ -194,6 +246,11 @@ private:
                                 float x1, float y1, float x2, float y2,
                                 float maxRange) const;
 
+    /// First field wall along a sensor's ray.
+    /// Returns {wall id (1=N, 2=E, 3=S, 4=W), distance}, or {-1, 0} if the ray
+    /// reaches no wall.
+    std::pair<int, float> nearestWall(const RclSensor& s) const;
+
     // ========================================================================
     // Background task
     // ========================================================================
@@ -213,6 +270,19 @@ private:
 
     Pose mLatestEstimate;
     int mActiveSensorCount{0};
+
+    // Which axes the last update actually measured. syncUpdate() must not write
+    // odometry on an axis whose "estimate" is only odometry echoed back.
+    bool mXMeasured{false};
+    bool mYMeasured{false};
+
+    // Smoothed offset from odometry, when useAccumulation is set.
+    float mResidualX{0.0f};
+    float mResidualY{0.0f};
+
+    // Displacement detection — readings that the current pose cannot explain
+    bool mDisplaced{false};
+    int mDisplaceCycles{0};
 
     // Timed disable support
     std::array<float, MAX_DISTANCE_SENSORS> mDisableTimers{};

@@ -882,11 +882,20 @@ function updateDiag(s) {
   for (const f of s.filters) {
     const beam = s.beams.find(b => b.i === f.i);
     const simTxt = beam && beam.hit ? `${beam.r.toFixed(1)}"` : '—';
-    const mclCls = (s.locMode & 1) ? (f.mclValid ? 'ok' : 'bad') : 'off';
+    // Deadzones are judged per particle, so a beam is not simply used or
+    // dropped: mclDead is the share of the cloud that ignored it. Reading only
+    // mclValid hid them completely and made the obstacles look inert.
+    const dead = f.mclDead || 0;
+    let mclTxt, mclCls;
+    if (!(s.locMode & 1))   { mclTxt = '–';    mclCls = 'off'; }
+    else if (!f.mclValid)   { mclTxt = 'drop'; mclCls = 'bad'; }
+    else if (dead > 0.60)   { mclTxt = 'dead ' + Math.round(dead * 100) + '%'; mclCls = 'bad'; }
+    else if (dead > 0.05)   { mclTxt = 'part ' + Math.round(dead * 100) + '%'; mclCls = 'warn'; }
+    else                    { mclTxt = 'use';  mclCls = 'ok'; }
     const rclCls = (s.locMode & 2) ? (f.rclValid ? 'ok' : 'bad') : 'off';
     html += cell(f.i, 's')
           + cell(simTxt, 'r')
-          + cell((s.locMode & 1) ? (f.mclValid ? 'use' : 'drop') : '–', `r ${mclCls}`)
+          + cell(mclTxt, `r ${mclCls}`)
           + cell((s.locMode & 2) ? (f.rclValid ? 'use' : 'drop') : '–', `r ${rclCls}`);
   }
   diagEl.innerHTML = html;

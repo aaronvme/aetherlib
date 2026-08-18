@@ -42,6 +42,38 @@ float RclTracking::intersectLineSegment(float rx, float ry,
 }
 
 // ============================================================================
+// nearestWall()
+// ============================================================================
+
+std::pair<int, float> RclTracking::nearestWall(const RclSensor& s) const {
+    // Distance to each of the 4 field walls; the closest positive one is the
+    // wall the ray reaches first.
+    float minDist = 1e9f;
+    int wall = -1;  // 1=N(+Y), 2=E(+X), 3=S(-Y), 4=W(-X)
+
+    // X-walls (vertical planes at x = ±FIELD_HALF_WALL)
+    if (std::fabs(s.rayCos) > 1e-6f) {
+        float dEast = (Field::FIELD_HALF_WALL - s.worldX) / s.rayCos;
+        if (dEast > 0.0f && dEast < minDist) { minDist = dEast; wall = 2; }
+
+        float dWest = (-Field::FIELD_HALF_WALL - s.worldX) / s.rayCos;
+        if (dWest > 0.0f && dWest < minDist) { minDist = dWest; wall = 4; }
+    }
+
+    // Y-walls (horizontal planes at y = ±FIELD_HALF_WALL)
+    if (std::fabs(s.raySin) > 1e-6f) {
+        float dNorth = (Field::FIELD_HALF_WALL - s.worldY) / s.raySin;
+        if (dNorth > 0.0f && dNorth < minDist) { minDist = dNorth; wall = 1; }
+
+        float dSouth = (-Field::FIELD_HALF_WALL - s.worldY) / s.raySin;
+        if (dSouth > 0.0f && dSouth < minDist) { minDist = dSouth; wall = 3; }
+    }
+
+    if (wall < 0) return {-1, 0.0f};
+    return {wall, minDist};
+}
+
+// ============================================================================
 // Constructor / Destructor
 // ============================================================================
 
@@ -146,6 +178,9 @@ void RclTracking::updateSensorPoses(const Pose& robotPose) {
         int readingMm = s.sensor->get();
         s.readingInch = readingMm * MM_TO_INCH;
         s.confidence = s.sensor->get_confidence();
+
+        // Publish validity; without this the flag is never set true.
+        s.valid = isValidReading(i);
     }
 }
 
@@ -154,8 +189,23 @@ void RclTracking::updateSensorPoses(const Pose& robotPose) {
 // ============================================================================
 
 bool RclTracking::isValidReading(int index) const {
+    float wallDist = 0.0f;
+    ReadingClass c = classifyReading(index, wallDist);
+    // A TooFar reading is a real wall measurement from somewhere other than where
+    // odometry thinks the robot is: useless as a correction to a pose assumed
+    // good, and exactly what is needed once that assumption is dropped.
+    // Once the pose is known to be wrong, "that reading is too short to be the
+    // wall" is an inference drawn from a pose we no longer believe. Every
+    // well-formed reading becomes a candidate wall measurement again — which is
+    // what lets an axis recover when its only beam reads short.
+    if (c == ReadingClass::WallHit) return true;
+    return mDisplaced && (c == ReadingClass::TooFar || c == ReadingClass::Blocked);
+}
+
+RclTracking::ReadingClass RclTracking::classifyReading(int index, float& wallDist) const {
+    wallDist = 0.0f;
     const auto& s = mSensors[index];
-    if (!s.enabled || s.sensor == nullptr) return false;
+    if (!s.enabled || s.sensor == nullptr) return ReadingClass::Invalid;
 
     // — Range checks —
     // V5 distance sensor practical maximum is ~2000 mm (~78.7 in). Readings
@@ -164,11 +214,24 @@ bool RclTracking::isValidReading(int index) const {
     // where the sensor value changes between the range check here and the
     // coordinate computation in getBotCoordFromSensor().
     float readingInch = s.readingInch;
-    if (readingInch > 2000.0f * MM_TO_INCH || readingInch < 1.0f * MM_TO_INCH) return false;
+    if (readingInch < 1.0f * MM_TO_INCH) return ReadingClass::Invalid;
+
+    if (readingInch > 2000.0f * MM_TO_INCH) {
+        // Silence where the pose predicts a near wall is as solid a contradiction
+        // as reading through one. It fixes no coordinate, but it is what tells an
+        // axis whose beams have all fallen silent that the robot has moved.
+        float range = 0.0f;
+        auto [w, d] = nearestWall(s);
+        range = d;
+        if (w >= 0 && range < mConfig.noReturnWallLimit) return ReadingClass::Impossible;
+        return ReadingClass::Invalid;
+    }
 
     // — Confidence check —
     // V5 sensor confidence is 0–63. Low-confidence readings produce noise.
-    if (readingInch > 200.0f * MM_TO_INCH && s.confidence < mConfig.confidenceThreshold) return false;
+    if (readingInch > 200.0f * MM_TO_INCH && s.confidence < mConfig.confidenceThreshold) {
+        return ReadingClass::Invalid;
+    }
 
     // — Heading alignment check —
     // RCL requires the sensor ray to be near-orthogonal to a field wall
@@ -178,34 +241,57 @@ bool RclTracking::isValidReading(int index) const {
     float angleTolRad = degToRad(mConfig.angleTolerance);
     float angleMod = std::fmod(std::fabs(s.worldHeading), HALF_PI);
     if (angleMod > angleTolRad && angleMod < HALF_PI - angleTolRad) {
-        return false;
+        return ReadingClass::Invalid;
     }
 
-    // Check if ray hits a known obstacle before the wall
+    auto [wall, wallRange] = nearestWall(s);
+    if (wall < 0) return ReadingClass::Invalid;
+    wallDist = wallRange;
+
+    // — Occlusion check —
+    // A ray crossing an obstacle is measuring the obstacle, not the wall behind
+    // it. Reject on any crossing before the wall: comparing the obstacle distance
+    // against the reading misses the case that matters, since a sensor seeing the
+    // obstacle reports the obstacle's own distance.
     for (const auto& obs : mLineObstacles) {
         float dist = intersectLineSegment(s.worldX, s.worldY, s.rayCos, s.raySin,
-                                           obs.x1, obs.y1, obs.x2, obs.y2, 200.0f);
-        if (dist < 200.0f && dist < readingInch) return false;
+                                           obs.x1, obs.y1, obs.x2, obs.y2, wallRange);
+        if (dist < wallRange) return ReadingClass::Invalid;
     }
 
-    // Check circle obstacles
     for (const auto& obs : mCircleObstacles) {
         float fx = s.worldX - obs.x;
         float fy = s.worldY - obs.y;
         float b = 2.0f * (fx * s.rayCos + fy * s.raySin);
         float c = fx * fx + fy * fy - obs.radius * obs.radius;
         float disc = b * b - 4.0f * c;
+        if (disc < 0.0f) continue;
 
-        if (disc >= 0.0f) {
-            disc = std::sqrt(disc);
-            float t1 = (-b - disc) * 0.5f;
-            float t2 = (-b + disc) * 0.5f;
-            float tMin = std::min(t1, t2);
-            if (tMin >= 0.0f && tMin < readingInch) return false;
-        }
+        disc = std::sqrt(disc);
+        float tNear = (-b - disc) * 0.5f;
+        float tFar  = (-b + disc) * 0.5f;
+        // tNear < 0 <= tFar means the sensor sits inside the obstacle.
+        if (tFar >= 0.0f && tNear < wallRange) return ReadingClass::Invalid;
     }
 
-    return true;
+    // — Agreement check —
+    // The reading has to be consistent with the wall it will be converted
+    // against: 31 in against a wall predicted at 127 in is not that wall.
+    float innovation = readingInch - wallRange;
+    if (innovation > mConfig.maxWallInnovation) {
+        // Further than the wall this pose puts in front of the beam. No object
+        // can lengthen a reading and nothing is visible through a wall, so the
+        // pose is wrong — the robot has been moved.
+        return ReadingClass::TooFar;
+    }
+    if (innovation < -mConfig.maxWallInnovation) {
+        // Nearer than predicted: something unmodelled is in the beam. Common,
+        // and it carries no information about where the robot is — unless the
+        // pose itself turns out to be wrong.
+        return ReadingClass::Blocked;
+    }
+
+    return ReadingClass::WallHit;
 }
 
 // ============================================================================
@@ -232,30 +318,8 @@ std::pair<CoordType, float> RclTracking::getBotCoordFromSensor(int index) const 
     float sinA = s.raySin;
     float reading = s.readingInch;
 
-    // Compute distances to each of the 4 field walls.  Take the closest
-    // positive distance — that's the wall the sensor actually hits first.
-    float minDist = 1e9f;
-    int wall = -1;  // 1=N(+Y), 2=E(+X), 3=S(-Y), 4=W(-X)
-
-    // X-walls (vertical planes at x = ±FIELD_HALF_WALL)
-    if (std::fabs(cosA) > 1e-6f) {
-        float dEast = (Field::FIELD_HALF_WALL - s.worldX) / cosA;
-        if (dEast > 0.0f && dEast < minDist) { minDist = dEast; wall = 2; }
-
-        float dWest = (-Field::FIELD_HALF_WALL - s.worldX) / cosA;
-        if (dWest > 0.0f && dWest < minDist) { minDist = dWest; wall = 4; }
-    }
-
-    // Y-walls (horizontal planes at y = ±FIELD_HALF_WALL)
-    if (std::fabs(sinA) > 1e-6f) {
-        float dNorth = (Field::FIELD_HALF_WALL - s.worldY) / sinA;
-        if (dNorth > 0.0f && dNorth < minDist) { minDist = dNorth; wall = 1; }
-
-        float dSouth = (-Field::FIELD_HALF_WALL - s.worldY) / sinA;
-        if (dSouth > 0.0f && dSouth < minDist) { minDist = dSouth; wall = 3; }
-    }
-
-    if (wall < 0) return {CoordType::INVALID, 0.0f};  // no wall intersected
+    int wall = nearestWall(s).first;  // 1=N(+Y), 2=E(+X), 3=S(-Y), 4=W(-X)
+    if (wall < 0) return {CoordType::INVALID, 0.0f};
 
     // Derive coordinate from the wall that was hit.
     //   sensor_world = wall_coord - rayComponent * reading
@@ -294,7 +358,7 @@ std::pair<CoordType, float> RclTracking::getBotCoordFromSensor(int index) const 
 // computePose()
 // ============================================================================
 
-std::pair<Pose, int> RclTracking::computePose() const {
+RclTracking::AxisEstimate RclTracking::estimateAxes() const {
     // Independently average X and Y coordinates from different sensors.
     // A sensor pointed at an east/west wall constrains X; a sensor pointed
     // at a north/south wall constrains Y.  The two axes are independent —
@@ -313,14 +377,20 @@ std::pair<Pose, int> RclTracking::computePose() const {
         }
     }
 
+    AxisEstimate est;
+    est.xCount = xCount;
+    est.yCount = yCount;
     // When no sensor constrains an axis, fall back to odometry
-    float estX = (xCount > 0) ? sumX / static_cast<float>(xCount) : mOdom.getPose().x;
-    float estY = (yCount > 0) ? sumY / static_cast<float>(yCount) : mOdom.getPose().y;
-    int usedCount = xCount + yCount;
+    est.x = (xCount > 0) ? sumX / static_cast<float>(xCount) : mOdom.getPose().x;
+    est.y = (yCount > 0) ? sumY / static_cast<float>(yCount) : mOdom.getPose().y;
+    return est;
+}
 
+std::pair<Pose, int> RclTracking::computePose() const {
+    AxisEstimate est = estimateAxes();
     return {
-        {estX, estY, mOdom.getPose().theta},
-        usedCount
+        {est.x, est.y, mOdom.getPose().theta},
+        est.xCount + est.yCount
     };
 }
 
@@ -343,16 +413,51 @@ void RclTracking::update() {
     Pose currentPose = mOdom.getPose();
     updateSensorPoses(currentPose);
 
-    auto [estimate, sensorCount] = computePose();
+    // Displacement detection.
+    //
+    // An object can only shorten a reading, so one LONGER than the predicted wall
+    // cannot happen if the pose is right -- proof the robot moved, not a hint.
+    // Require persistence so a stray sample cannot unlock a hard correction.
+    // Weighted, not counted: reading through a wall is conclusive alone, silence
+    // is weaker (a glancing beam drops out legitimately) so it takes two.
+    int evidence = 0;
+    for (int i = 0; i < mConfig.sensorCount; i++) {
+        float wallDist = 0.0f;
+        switch (classifyReading(i, wallDist)) {
+            case ReadingClass::TooFar:     evidence += 2; break;
+            case ReadingClass::Impossible: evidence += 1; break;
+            default: break;
+        }
+    }
+    mDisplaceCycles = (evidence >= 2) ? (mDisplaceCycles + 1) : 0;
+    if (mDisplaceCycles >= mConfig.displaceCycles) {
+        mDisplaced = true;
+    } else if (evidence == 0) {
+        mDisplaced = false;
+    }
+
+    AxisEstimate est = estimateAxes();
+    mXMeasured = est.xCount > 0;
+    mYMeasured = est.yCount > 0;
+    int sensorCount = est.xCount + est.yCount;
     mActiveSensorCount = sensorCount;
 
+    // Measured axes only, and smooth the residual rather than the coordinate: an
+    // EMA over positions lags a moving robot, and sync writes that lag back.
     if (sensorCount > 0) {
         if (mConfig.useAccumulation) {
             float alpha = mConfig.accumulationAlpha;
-            mLatestEstimate.x = alpha * estimate.x + (1.0f - alpha) * mLatestEstimate.x;
-            mLatestEstimate.y = alpha * estimate.y + (1.0f - alpha) * mLatestEstimate.y;
+            if (mXMeasured) {
+                mResidualX = alpha * (est.x - currentPose.x) + (1.0f - alpha) * mResidualX;
+            }
+            if (mYMeasured) {
+                mResidualY = alpha * (est.y - currentPose.y) + (1.0f - alpha) * mResidualY;
+            }
+            mLatestEstimate.x = currentPose.x + (mXMeasured ? mResidualX : 0.0f);
+            mLatestEstimate.y = currentPose.y + (mYMeasured ? mResidualY : 0.0f);
         } else {
-            mLatestEstimate = estimate;
+            mLatestEstimate.x = mXMeasured ? est.x : currentPose.x;
+            mLatestEstimate.y = mYMeasured ? est.y : currentPose.y;
         }
         mLatestEstimate.theta = currentPose.theta;
     }
@@ -397,12 +502,24 @@ void RclTracking::syncUpdate() {
     if (mActiveSensorCount == 0) return;
 
     Pose odomPose = mOdom.getPose();
-    float dx = mLatestEstimate.x - odomPose.x;
-    float dy = mLatestEstimate.y - odomPose.y;
+
+    // Measured axes only, and a fraction of the error: applying all of it every
+    // cycle turns one bad reading into a pose teleport.
+    // Once the pose is disproved this is not refining an estimate, it is replacing
+    // a discredited one with a direct wall measurement.
+    const float prop = mDisplaced ? mConfig.recoverySyncProp : mConfig.syncProp;
+    // Rate-limited so whatever consumes the pose sees it continuous; a proven
+    // displacement is exempt.
+    const float rateStep = mConfig.maxSyncRate * (mConfig.updatePeriodMs / 1000.0f);
+    const float maxStep = mDisplaced ? Field::FIELD_LENGTH
+                                     : std::min(mConfig.maxSyncDist, rateStep);
+
+    float dx = mXMeasured ? (mLatestEstimate.x - odomPose.x) * prop : 0.0f;
+    float dy = mYMeasured ? (mLatestEstimate.y - odomPose.y) * prop : 0.0f;
     float dist = std::hypot(dx, dy);
 
-    if (dist > mConfig.maxSyncDist) {
-        float scale = mConfig.maxSyncDist / dist;
+    if (dist > maxStep) {
+        float scale = maxStep / dist;
         dx *= scale;
         dy *= scale;
     }

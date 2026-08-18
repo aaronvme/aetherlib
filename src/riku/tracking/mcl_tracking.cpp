@@ -365,8 +365,11 @@ void MclTracking::predict() {
         // Transform local-frame motion to global frame using the
         // particle's own heading (each particle has a different heading,
         // so each transforms the same local delta differently).
-        p.pose.x += localVert * pCos + localHoriz * pSin;
-        p.pose.y += localVert * pSin - localHoriz * pCos;
+        // OdomDelta::dHoriz is left-positive and odometry integrates it along
+        // (-sin, cos). Using (sin, -cos) here is the robot's right, so a real
+        // strafe would move the cloud opposite to the pose it corrects.
+        p.pose.x += localVert * pCos - localHoriz * pSin;
+        p.pose.y += localVert * pSin + localHoriz * pCos;
 
         // Add second half of rotation and clamp to IMU heading.
         // Particles cannot deviate arbitrarily far from the IMU —
@@ -449,15 +452,9 @@ void MclTracking::updateWeights() {
         }
         if (!mValidSensors[i]) continue;
 
-        if (mCircleObstacles != nullptr) {
-            for (const auto& circle : *mCircleObstacles) {
-                if (intersectCircle(sx, sy, circle, mConfig.maxSensorRange, sCos, sSin) < mConfig.maxSensorRange) {
-                    mValidSensors[i] = false;
-                    break;
-                }
-            }
-        }
-        if (!mValidSensors[i]) continue;
+        // Circle obstacles are tested per particle in the weighting loop, not
+        // here: judging them from mRawEstimate would use the pose to decide which
+        // readings may correct that pose.
 
         activeSensors += 1.0f;
     }
@@ -496,6 +493,7 @@ void MclTracking::updateWeights() {
 
     // Weight particles
     auto& particles = *mParticles;
+    mDeadzoneHits.fill(0);
     for (int i = 0; i < mConfig.particleCount; i++) {
         float totalWeight = 1.0f;
         auto& p = particles[i];
@@ -521,6 +519,30 @@ void MclTracking::updateWeights() {
 
             float sx = p.pose.x + (mSensorMounts[j].x * pCos - mSensorMounts[j].y * pSin);
             float sy = p.pose.y + (mSensorMounts[j].x * pSin + mSensorMounts[j].y * pCos);
+
+            // Blocked for this hypothesis? Then the reading is of the obstacle,
+            // and says nothing about where this particle is.
+            if (mCircleObstacles != nullptr) {
+                bool blocked = false;
+                for (const auto& circle : *mCircleObstacles) {
+                    const float ox = circle.x - sx;
+                    const float oy = circle.y - sy;
+                    const float along = ox * sCos + oy * sSin;
+                    if (along < 0.0f) continue;
+                    const float perp = std::fabs(-ox * sSin + oy * sCos);
+                    if (perp > circle.radius + along * mConfig.obstacleConeFrac) continue;
+                    const float postRange = std::sqrt(ox * ox + oy * oy) - circle.radius;
+                    if (std::fabs(mSensorReadingsInch[j] - postRange) <= mConfig.obstacleRangeTol) {
+                        blocked = true;
+                        break;
+                    }
+                }
+                if (blocked) {
+                    mDeadzoneHits[j]++;
+                    totalWeight *= mConfig.deadzoneLikelihood;
+                    continue;
+                }
+            }
 
             // Ray cast from particle.
             // Priority order: line targets → circle targets → field walls.
@@ -567,6 +589,11 @@ void MclTracking::updateWeights() {
         }
         p.weight = totalWeight;
     }
+
+    // mValidSensors no longer carries deadzones, so publish the share of the
+    // cloud that ignored each beam or diagnostics show it as used.
+    const float inv = 1.0f / static_cast<float>(mConfig.particleCount);
+    for (int i = 0; i < SENSOR_COUNT; i++) mDeadzoneFrac[i] = mDeadzoneHits[i] * inv;
 }
 
 // ============================================================================

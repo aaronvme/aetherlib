@@ -23,6 +23,11 @@ float arcAngle(const Pose& current, float targetX, float targetY, float radius);
 float arcEndHeading(const Pose& current, float targetX, float targetY,
                     float radius);
 
+/// Tangent heading at the start of an arc from current to target — the heading
+/// to hold right now to be on that arc. This is the arc controller's setpoint.
+float arcStartHeading(const Pose& current, float targetX, float targetY,
+                      float radius);
+
 // ============================================================================
 // Parameter structs
 // ============================================================================

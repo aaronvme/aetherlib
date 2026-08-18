@@ -68,6 +68,18 @@ public:
         int confidenceThreshold = 10;      // min sensor confidence
         float minSensorRange = 1.0f;       // mm — readings below this are invalid
                                            //   (increase if sensors are recessed)
+
+        // A beam is dropped when the obstacle is what it actually RANGED: inside
+        // the cone AND at the reported distance. Cone alone blanks a wide region
+        // and discards good wall readings; a pencil ray misses most real hits.
+        // Judged per particle (see updateWeights) -- deciding once from the
+        // estimate would use the pose to choose which readings may correct it.
+        float obstacleConeFrac = 0.22f;    // tan(12.5 deg), the V5 half-cone
+        float obstacleRangeTol = 8.0f;     // inches; reading vs obstacle surface
+
+        // Score for a beam blocked for this particle. Not 1.0, or particles would
+        // win by hiding behind obstacles.
+        float deadzoneLikelihood = 0.25f;
         bool autoSync = true;              // automatically sync pose to odometry
     };
 
@@ -195,6 +207,9 @@ public:
     /// Get the distance sensor readings (inches), index 0-7
     const std::array<float, SENSOR_COUNT>& sensorReadings() const { return mSensorReadingsInch; }
 
+    /// Share of the particle cloud that treated each beam as deadzoned (0..1).
+    const std::array<float, SENSOR_COUNT>& deadzoneFraction() const { return mDeadzoneFrac; }
+
     /// Get sensor validity flags
     const std::array<bool, SENSOR_COUNT>& validSensors() const { return mValidSensors; }
 
@@ -208,6 +223,15 @@ public:
 
     /// Read-only view of the active configuration.
     const Config& config() const { return mConfig; }
+
+    /// Replace the tuning parameters on a running filter. particleCount is held
+    /// at its current value — resizing the cloud mid-run would invalidate the
+    /// buffers the background task is walking.
+    void setConfig(const Config& config) {
+        int particles = mConfig.particleCount;
+        mConfig = config;
+        mConfig.particleCount = particles;
+    }
 
     /// Reseed the particle RNG and regenerate the noise pool.
     ///
@@ -320,6 +344,9 @@ private:
 
     // Sensor state
     std::array<bool, SENSOR_COUNT> mValidSensors{};
+    // Share of the cloud that ignored each beam as deadzoned (telemetry).
+    std::array<float, SENSOR_COUNT> mDeadzoneFrac{};
+    std::array<int, SENSOR_COUNT> mDeadzoneHits{};
     std::array<int, SENSOR_COUNT> mSensorReadingsMm{};
     std::array<float, SENSOR_COUNT> mSensorReadingsInch{};
     std::array<int, SENSOR_COUNT> mSensorConfs{};
