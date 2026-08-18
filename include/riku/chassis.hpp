@@ -19,6 +19,7 @@
 #include "riku/movement_control/boomerang.hpp"
 #include "riku/movement_control/ramsete.hpp"
 #include "riku/movement_control/velocity_profiles.hpp"
+#include "riku/tracking/ekf_tracking.hpp"
 #include "riku/tracking/mcl_tracking.hpp"
 #include "riku/tracking/odom_tracking.hpp"
 #include "riku/tracking/rcl_tracking.hpp"
@@ -66,11 +67,19 @@ struct ChassisConfig {
     // trigger while still carrying velocity through the target.
     uint32_t settleTimeMs{0};
 
-    // Tracking
+    // Tracking.
+    //
+    // Odometry always runs — it is the motion model every other filter predicts
+    // with, and with no tracking wheels configured it is just the IMU and the
+    // motor encoders. MCL and RCL correct it against the field walls. The EKF
+    // sits downstream of both: enable it with MCL for a smooth fused pose that
+    // still recovers from a displacement.
     bool useMclTracking{false};
     bool useRclTracking{false};
+    bool useEkfTracking{false};
     MclTracking::Config mclConfig;
     RclTracking::Config rclConfig;
+    EkfTracking::Config ekfConfig;
 };
 
 // One motion-loop tick. Angles in VEX degrees.
@@ -190,6 +199,7 @@ public:
     OdomTracking& odom();
     RclTracking& rcl();
     MclTracking& mcl();
+    EkfTracking& ekf();
 
     /// Start/stop all tracking systems
     void startTracking();
@@ -284,10 +294,11 @@ private:
     Drivetrain& mDrivetrain;
     ChassisConfig mConfig;
 
-    // Tracking
+    // Tracking. mEkf reads mMcl, so it is declared after it.
     OdomTracking mOdom;
     RclTracking mRcl;
     MclTracking mMcl;
+    EkfTracking mEkf;
 
     // PID controllers
     PID mLateralPID;

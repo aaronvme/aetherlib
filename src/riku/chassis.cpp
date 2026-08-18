@@ -20,6 +20,7 @@ Chassis::Chassis(Drivetrain& drivetrain, const OdomSensors& sensors,
       mOdom(sensors),
       mRcl(mOdom, config.rclConfig),
       mMcl(mOdom, config.distanceSensors, Pose{}, config.mclConfig),
+      mEkf(mOdom, config.distanceSensors, Pose{}, config.ekfConfig),
       mLateralPID(config.lateralGains, config.lateralWindupRange, config.lateralFlipReset),
       mAngularPID(config.angularGains, config.angularWindupRange, config.angularFlipReset),
       mThrottleCurve(config.throttleCurve),
@@ -27,6 +28,8 @@ Chassis::Chassis(Drivetrain& drivetrain, const OdomSensors& sensors,
 {
     // Apply user-configured sensor mount offsets (robot-specific)
     mMcl.setSensorMounts(config.sensorMounts);
+    mEkf.setSensorMounts(config.sensorMounts);
+    mEkf.attachMcl(&mMcl);
 
     // Auto-configure RCL sensors from config arrays.
     // Null distance sensor entries are automatically disabled;
@@ -66,6 +69,7 @@ Chassis::~Chassis() {
 
     // Stop the tracking worker tasks BEFORE the odometry task — they call into
     // mOdom every tick, so they must be gone before OdomTracking is torn down.
+    mEkf.stopTracking();
     mMcl.stopTracking();
     mRcl.stopTracking();
     mOdom.stopBackgroundOdom();
@@ -97,6 +101,7 @@ void Chassis::setPose(const Pose& pose) {
     // the chassis pose (e.g. during competition_initialize).
     mMcl.setPose(pose);
     mRcl.setRclPose(pose);
+    mEkf.setPose(pose);
 }
 
 void Chassis::setPosition(float x, float y) {
@@ -113,6 +118,7 @@ void Chassis::setPosition(float x, float y) {
     // estimate stays synchronized.
     mMcl.setPose(newPose);
     mRcl.setRclPose(newPose);
+    mEkf.setPose(newPose);
 }
 
 void Chassis::setHeading(float thetaDeg) {
@@ -127,6 +133,7 @@ void Chassis::setHeading(float thetaDeg) {
     // Propagate to tracking systems — same reason as setPosition().
     mMcl.setPose(newPose);
     mRcl.setRclPose(newPose);
+    mEkf.setPose(newPose);
 }
 
 Pose Chassis::getPose() const {
@@ -1024,13 +1031,26 @@ void Chassis::ensureMotionTask() {
 OdomTracking& Chassis::odom() { return mOdom; }
 RclTracking& Chassis::rcl()  { return mRcl; }
 MclTracking& Chassis::mcl()  { return mMcl; }
+EkfTracking& Chassis::ekf()  { return mEkf; }
 
 void Chassis::startTracking() {
     if (mConfig.useRclTracking) mRcl.startTracking();
     if (mConfig.useMclTracking) mMcl.startTracking();
+    if (mConfig.useEkfTracking) {
+        // One owner for the fused pose. Left on, MCL and RCL would keep lerping
+        // odometry toward their own estimates underneath the filter that is
+        // already fusing them, and the jitter the EKF absorbs comes straight
+        // back. The EKF reads the same distance sensors RCL does, so RCL has
+        // nothing to add here beyond a second opinion in the diagnostics.
+        mMcl.setAutoSync(false);
+        mRcl.setAutoSync(false);
+        mEkf.setPose(mOdom.getPose());
+        mEkf.startTracking();
+    }
 }
 
 void Chassis::stopTracking() {
+    mEkf.stopTracking();
     mRcl.stopTracking();
     mMcl.stopTracking();
 }
