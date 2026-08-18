@@ -31,7 +31,7 @@ constexpr FieldCircle kFieldPosts[] = {
     {47.0f, -23.5f, 2.0f},   // neutral blue down 
 };
 
-// MCL keeps POINTERS to its obstacle lists â€” these must outlive the tracker
+// MCL keeps POINTERS to its obstacle lists — these must outlive the tracker
 std::vector<MclTracking::LineObstacle> gMclLineObstacles;
 std::vector<MclTracking::CircleObstacle> gMclCircleObstacles;
 
@@ -44,11 +44,12 @@ void registerFieldObstacles() {
         gMclCircleObstacles.push_back({c.x, c.y, c.r});
     }
     chassis.mcl().setObstacles(&gMclLineObstacles, &gMclCircleObstacles);
+    chassis.ekf().setObstacles(&gMclCircleObstacles);
 }
 
 void registerAutonDisableLine(float lifetimeMs) {
     // Diagonal auton line: readings crossing it during autonomous see robots /
-    // game objects, not walls. Temporary â€” expires after `lifetimeMs`.
+    // game objects, not walls. Temporary — expires after `lifetimeMs`.
     chassis.rcl().addLineObstacle(Field::FIELD_HALF, -Field::FIELD_HALF,
                                   -Field::FIELD_HALF,  Field::FIELD_HALF,
                                   lifetimeMs);
@@ -82,6 +83,10 @@ Drivetrain drivetrain(&leftMotors, &rightMotors,
                       450.0f,
                       2.0f);
 
+// No tracking wheels: vertical distance comes from the drive motor encoders and
+// heading from the IMU. That is what "odometry" means on this robot -- add
+// TrackingWheel pointers to the collections below and the same pipeline uses
+// them instead, with MCL switching to its lower tracking-wheel noise terms.
 OdomSensors odomSensors = {
     .vertWheelCollection = {},
     .horizWheelCollection = {},
@@ -110,19 +115,41 @@ std::array<Pose, MAX_DISTANCE_SENSORS> sensorMounts = {{
 
 
 ChassisConfig chassisConfig = {
-    // Tuned in riku-sim: ~1.1 s to 0.75 in, vs 5 s at {5,0,5}/{50,0,6}. The sim
-    // is kinematic and cannot show oscillation, so confirm on the robot;
-    // {9,0,5}/{80,0,6} is about half as aggressive if it feels twitchy.
-    .lateralGains = { 17.0f, 0.0f, 2.0f },
-    .angularGains = { 140.0f, 0.0f, 4.0f },
+    // Tuned in riku-sim over a closed 26 in square of eight chained motions:
+    // 0.17 in / 0.02 deg closing error in 4.16 s, against 1.57 in / 23.5 deg in
+    // 4.37 s at {17,0,2}/{140,0,4} with settleTimeMs 0.
+    //
+    // kI stays at 0 on both loops -- every non-zero value tried made things
+    // worse, because there is no standing load for an integrator to work
+    // against. On a real robot, static friction is such a load, so a small kI
+    // is the first thing to try if the last inch is consistently short.
+    //
+    // The sim models drivetrain lag but not mass, so it under-prices
+    // aggression. It does show the instability boundary though: lateral kP
+    // above ~45 degrades and 60 diverges outright, so 34 has real margin
+    // measured under it. Halve both kP if the robot feels twitchy.
+    .lateralGains = { 34.0f, 0.0f, 2.0f },
+    .angularGains = { 140.0f, 0.0f, 8.0f },
     .lateralWindupRange = 0.0f,
     .angularWindupRange = 0.0f,
+    // The stock 0.1 gives the D term a ~100 ms lag, so it arrived too late to
+    // brake a turn and every turn overshot. This is a damping control as much
+    // as kD is.
+    .lateralDerivativeFilter = 0.6f,
+    .angularDerivativeFilter = 0.5f,
     .throttleCurve = { .deadband = 10.0f, .minOutput = 15.0f, .curve = 1.2f },
     .steerCurve = { .deadband = 10.0f, .minOutput = 10.0f, .curve = 1.3f },
     .distanceSensors = distSensors,
     .sensorMounts = sensorMounts,
+    // Exiting on the first in-tolerance sample ends the motion while the robot
+    // is still carrying velocity, and nothing corrects the coast that follows:
+    // turns settled 22 deg past the target and stayed there. Holding the
+    // condition for 110 ms costs nothing overall -- motions finish sooner
+    // because they no longer have to recover from their own overshoot.
+    .settleTimeMs = 110,
     .useMclTracking = false,
     .useRclTracking = false,
+    .useEkfTracking = false,
     
     .mclConfig = {
         .particleCount = 1024,
@@ -153,6 +180,7 @@ ChassisConfig chassisConfig = {
         .autoSync = true,
         .useAccumulation = false,
     },
+    .ekfConfig = {},
 };
 
 Chassis chassis(drivetrain, odomSensors, chassisConfig);

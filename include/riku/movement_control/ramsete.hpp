@@ -58,6 +58,17 @@ struct RAMSETEParams {
     // corner rather than raise b to fight it. Far below the traction limit --
     // it bounds tracking authority, not grip. 0 disables.
     float maxLateralAccel{60.0f};
+
+    // How long the settle condition must hold, overriding
+    // ChassisConfig::settleTimeMs for this motion. 0 exits on the first sample.
+    //
+    // A debounce is there to stop a motion ending while it still carries
+    // velocity through the target. RAMSETE cannot do that: the profile has
+    // already driven its reference speed to 0 by the last point. What it can do
+    // is need position AND heading inside tolerance at the same instant, which
+    // on a jittering pose estimate rarely holds for a fixed window -- a 110 ms
+    // hold turned a 3.2 s path into a 9 s timeout. So it defaults to 0 here.
+    uint32_t settleTimeMs{0};
 };
 
 }  // namespace riku

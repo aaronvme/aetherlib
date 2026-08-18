@@ -86,6 +86,12 @@ PID::PID(float kP,          // Proportional gain
         mFixedDt = seconds;
     }
 
+    void PID::setDerivativeFilter(float alpha) {
+        if (alpha < 0.01f) alpha = 0.01f;
+        if (alpha > 1.0f) alpha = 1.0f;
+        mDerivativeFilter = alpha;
+    }
+
     float PID::getWindupRange() const {
         return mWindupRange;
     }

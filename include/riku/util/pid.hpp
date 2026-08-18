@@ -29,6 +29,13 @@ public:
 
     void setFixedDt(float seconds);
 
+    /// Smoothing on the derivative term: 1 = raw, small = heavily damped. The
+    /// EMA's time constant is dt/alpha, so 0.1 at a 10 ms tick lags the true
+    /// derivative by ~100 ms -- long enough that kD cannot brake a fast turn
+    /// until it is already past the target.
+    void setDerivativeFilter(float alpha);
+    float derivativeFilter() const { return mDerivativeFilter; }
+
 private:
     PIDGains mGains;
     float mWindupRange;

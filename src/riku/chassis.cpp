@@ -26,6 +26,9 @@ Chassis::Chassis(Drivetrain& drivetrain, const OdomSensors& sensors,
       mThrottleCurve(config.throttleCurve),
       mSteerCurve(config.steerCurve)
 {
+    mLateralPID.setDerivativeFilter(config.lateralDerivativeFilter);
+    mAngularPID.setDerivativeFilter(config.angularDerivativeFilter);
+
     // Apply user-configured sensor mount offsets (robot-specific)
     mMcl.setSensorMounts(config.sensorMounts);
     mEkf.setSensorMounts(config.sensorMounts);
@@ -815,7 +818,10 @@ void Chassis::executeCurrentMotion() {
                 settleStarted = true;
                 settleStartElapsed = elapsed;
             }
-            if (elapsed - settleStartElapsed >= mConfig.settleTimeMs) break;
+            const uint32_t hold = (req.type == MotionType::RAMSETE)
+                                      ? req.ramseteParams.settleTimeMs
+                                      : mConfig.settleTimeMs;
+            if (elapsed - settleStartElapsed >= hold) break;
         } else {
             settleStarted = false;
         }
@@ -1073,6 +1079,23 @@ void Chassis::setThrottleCurve(const DriveCurve& curve) {
 
 void Chassis::setSteerCurve(const DriveCurve& curve) {
     mSteerCurve = curve;
+}
+
+void Chassis::setPidTuning(const ChassisConfig& config) {
+    mConfig.lateralGains = config.lateralGains;
+    mConfig.angularGains = config.angularGains;
+    mConfig.lateralWindupRange = config.lateralWindupRange;
+    mConfig.angularWindupRange = config.angularWindupRange;
+    mConfig.lateralDerivativeFilter = config.lateralDerivativeFilter;
+    mConfig.angularDerivativeFilter = config.angularDerivativeFilter;
+    mConfig.settleTimeMs = config.settleTimeMs;
+
+    mLateralPID.setGains(config.lateralGains);
+    mAngularPID.setGains(config.angularGains);
+    mLateralPID.setWindupRange(config.lateralWindupRange);
+    mAngularPID.setWindupRange(config.angularWindupRange);
+    mLateralPID.setDerivativeFilter(config.lateralDerivativeFilter);
+    mAngularPID.setDerivativeFilter(config.angularDerivativeFilter);
 }
 
 void Chassis::setBrakeMode(pros::motor_brake_mode_e mode) {

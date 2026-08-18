@@ -44,6 +44,12 @@ struct ChassisConfig {
     float angularWindupRange{0.0f};
     bool angularFlipReset{false};
 
+    // Derivative smoothing for each loop. See PID::setDerivativeFilter -- this
+    // is as much a damping control as kD is, because it decides how late kD
+    // arrives.
+    float lateralDerivativeFilter{0.1f};
+    float angularDerivativeFilter{0.1f};
+
     // Drive curves (driver control)
     DriveCurve throttleCurve;
     DriveCurve steerCurve;
@@ -208,6 +214,11 @@ public:
     // ========================================================================
     // Tuning
     // ========================================================================
+
+    /// Re-apply gains, derivative smoothing, windup limits and the settle
+    /// debounce from a config in one call. Tuning any of these separately from
+    /// the others is how a loop ends up damped for a gain it no longer has.
+    void setPidTuning(const ChassisConfig& config);
 
     void setLateralGains(const PIDGains& gains);
     void setAngularGains(const PIDGains& gains);
