@@ -14,7 +14,7 @@
   <aside id="left" class="panel">
 
     <div class="card">
-      <h3>Drivetrain <small>read from config.cpp</small></h3>
+      <h3>Drivetrain</h3>
       <div id="dt-facts" class="facts"></div>
     </div>
 
@@ -24,7 +24,7 @@
     </div>
 
     <div class="card">
-      <h3>Sensor error <small>what makes localization hard</small></h3>
+      <h3>Sensor error</h3>
       <div id="params-sensor"></div>
     </div>
 
@@ -34,12 +34,12 @@
     </div>
 
     <div class="card">
-      <h3>Device rates <small>real hardware is not instant</small></h3>
+      <h3>Device rates</h3>
       <div id="params-rate"></div>
     </div>
 
     <div class="card">
-      <h3>Sensor status <small>sim reading vs what each filter accepts</small></h3>
+      <h3>Sensor status</h3>
       <div id="sensor-diag" class="diag"></div>
     </div>
 
@@ -47,13 +47,18 @@
 
   <!-- ================= centre: field ================= -->
   <section id="stage">
-    <canvas id="field" width="900" height="900"></canvas>
+    <div id="stage-field">
+      <canvas id="field" width="900" height="900"></canvas>
+    </div>
 
     <div id="hud">
+      <button id="hud-toggle" title="collapse/expand">&minus;</button>
       <div class="row"><span>t</span><b id="hud-t">0.00 s</b></div>
       <div class="row"><span>true</span><b id="hud-true">—</b></div>
-      <div class="row"><span>odom</span><b id="hud-odom">—</b></div>
-      <div class="row"><span>mcl</span><b id="hud-mcl">—</b></div>
+      <div class="row"><span>pose</span><b id="hud-odom">—</b></div>
+      <div class="row"><span>mcl est</span><b id="hud-mcl">—</b></div>
+      <div class="row"><span>ekf est</span><b id="hud-ekf">—</b></div>
+      <div class="row"><span>ekf 1&sigma;</span><b id="hud-ekfsig">—</b></div>
       <div class="row"><span>error</span><b id="hud-err">—</b></div>
       <div class="row"><span>speed</span><b id="hud-speed">—</b></div>
       <div class="row"><span>sensors</span><b id="hud-sensors">—</b></div>
@@ -69,12 +74,22 @@
         <input id="speed" type="range" min="0.1" max="6" step="0.1" value="1">
         <output id="speed-val">1.0×</output>
       </label>
-      <select id="loc">
-        <option value="0">odometry only</option>
-        <option value="1">odom + MCL</option>
-        <option value="2">odom + RCL</option>
-        <option value="3">odom + MCL + RCL</option>
-      </select>
+      <!-- Pose source, as independent switches rather than one entry per
+           combination. With none of the correctors ticked this is dead
+           reckoning: the IMU and the drive motor encoders, because
+           riku::odomSensors carries no tracking wheels. Ticking "odom pods"
+           adds them, which is what makes it odometry proper. -->
+      <div id="loc" class="locbar">
+        <span id="loc-label" title="nothing ticked = IMU + motor encoders only">dead reckoning</span>
+        <label title="particle filter; can find the robot anywhere on the field">
+          <input id="loc-mcl" type="checkbox"> MCL</label>
+        <label title="closed-form wall ranging; one axis per orthogonal beam">
+          <input id="loc-rcl" type="checkbox"> RCL</label>
+        <label title="fuses MCL and the wall ranges into a smooth pose, and owns it">
+          <input id="loc-ekf" type="checkbox"> EKF</label>
+        <label title="dead-wheel tracking pods instead of the drive motor encoders">
+          <input id="loc-pods" type="checkbox"> odom pods</label>
+      </div>
     </div>
 
     <div id="stage-hint">drag the robot to kidnap it · WASD or arrows drive it</div>
@@ -140,6 +155,12 @@
       <div class="card">
         <h3>Layers</h3>
         <div id="layers" class="layers"></div>
+      </div>
+      <div class="card">
+        <h3>Physics</h3>
+        <div class="layers">
+          <label><input id="chk-collide" type="checkbox" checked> collide with posts</label>
+        </div>
       </div>
       <div class="card">
         <h3>Start pose</h3>

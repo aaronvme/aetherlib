@@ -70,6 +70,15 @@ struct RobotParams {
     /// V5 integrated encoder resolution in motor-shaft degrees.
     float encoderResolutionDeg{0.1f};
 
+    /// Angular apodisation of the cone, as a fraction of the full FOV. The
+    /// return is strongest on axis and falls off toward the cone edge; without
+    /// this a flat wall is measured at the cone edge rather than on axis, which
+    /// reads several inches short whenever the robot is not square to it.
+    float distConeSigmaFrac{0.25f};
+
+    /// Whether the robot collides with goal posts. The perimeter always stops it.
+    bool collideObstacles{true};
+
     // Robot footprint, used for collision and drawing.
     float robotLengthIn{15.0f};
     float robotWidthIn{15.0f};
@@ -110,7 +119,14 @@ public:
         bool  active{false};        // slot is populated in config
         float originX{0.0f}, originY{0.0f};
         float dirDeg{0.0f};         // world-frame ray heading
+        // Where the on-axis laser actually terminates. The reported range can
+        // come from an off-axis cone ray, so drawing the beam to rangeIn along
+        // the axis puts its end in empty space.
         float endX{0.0f}, endY{0.0f};
+        float axisRangeIn{0.0f};
+        // The return the sensor actually timed: the strongest ray in the cone.
+        float hitX{0.0f}, hitY{0.0f};
+        bool  hitIsObstacle{false};
         float rangeIn{0.0f};
         float fovDeg{25.0f};
         float incidenceDeg{0.0f};   // 0 = head-on
@@ -138,6 +154,11 @@ private:
     double mMotorDegLeft{0.0};
     double mMotorDegRight{0.0};
     double mImuRotationDeg{0.0};
+
+    // Dead-wheel travel, published to the rotation-sensor slots so the sim can
+    // run with tracking wheels as well as without.
+    double mPodVertIn{0.0};
+    double mPodHorizIn{0.0};
 
     // Device refresh accumulators (ms).
     double mDistAccum{0.0};

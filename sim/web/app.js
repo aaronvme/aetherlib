@@ -19,6 +19,8 @@ const api = {
   teleport:     w('sim_teleport', null, ['number', 'number', 'number']),
   setDrive:     w('sim_set_drive', null, ['number', 'number']),
   setLoc:       w('sim_set_localization', null, ['number']),
+  getParam:     w('sim_get_param', 'number', ['string']),
+  setOdomPods:  w('sim_set_odom_pods', null, ['number']),
   setParam:     w('sim_set_param', null, ['string', 'number']),
   stateJson:    w('sim_state_json', 'string', []),
   fieldJson:    w('sim_field_json', 'string', []),
@@ -61,12 +63,41 @@ let fieldGeom = JSON.parse(api.fieldJson());
 
 const canvas = document.getElementById('field');
 const ctx = canvas.getContext('2d');
-const SIZE = canvas.width;
-const MARGIN = 22;
-const SCALE = (SIZE - MARGIN * 2) / 144;
 
+// SIZE is the drawing side in CSS pixels and SCALE the inches-to-CSS-pixel
+// factor; both are recomputed by fitCanvas() whenever the stage resizes. The
+// backing store is sized in DEVICE pixels and the context pre-scaled by the
+// pixel ratio, so all drawing below stays in CSS pixels -- line widths and dot
+// radii keep their intended weight instead of thinning out on a HiDPI screen.
+// Sized to the element rather than fixed at 900, so the field is rendered at the
+// resolution it is displayed at rather than upscaled from a stale bitmap.
+let SIZE = canvas.width;
+const MARGIN_FRAC = 22 / 900;   // the old 22 px margin, as a share of the side
+let MARGIN = SIZE * MARGIN_FRAC;
+let SCALE = (SIZE - MARGIN * 2) / 144;
+
+function fitCanvas() {
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  const side = Math.max(1, Math.min(rect.width, rect.height));
+  const store = Math.round(side * dpr);
+  if (canvas.width !== store) { canvas.width = store; canvas.height = store; }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  SIZE = store / dpr;
+  MARGIN = SIZE * MARGIN_FRAC;
+  SCALE = (SIZE - MARGIN * 2) / 144;
+}
+
+// Arrow functions close over the bindings, not the values, so these follow
+// fitCanvas() without re-creation.
 const toPx = (x, y) => [SIZE / 2 + x * SCALE, SIZE / 2 - y * SCALE];
 const toIn = (px, py) => [(px - SIZE / 2) / SCALE, (SIZE / 2 - py) / SCALE];
+
+new ResizeObserver(fitCanvas).observe(canvas);
+// devicePixelRatio changes when the window moves between monitors or the page is
+// zoomed; neither fires a resize on the canvas itself.
+window.addEventListener('resize', fitCanvas);
+fitCanvas();
 
 // ============================================================================
 // Layers
@@ -105,29 +136,53 @@ for (const [key, label, on] of LAYERS) {
 function buildParams(hostId, defs) {
   const host = document.getElementById(hostId);
   for (const d of defs) {
+    // Start from what the library actually holds. The panel used to publish its
+    // own markup default on load, which overwrote the tuned gains in
+    // gamespecific/config.cpp the moment the page opened.
+    const live = api.getParam(d.key);
+    const value = Number.isFinite(live) ? live : d.value;
+
     const row = document.createElement('div');
     row.className = 'param';
     row.innerHTML =
       `<span title="${d.help || ''}">${d.label}</span>` +
-      `<input type="range" min="${d.min}" max="${d.max}" step="${d.step}" value="${d.value}">` +
-      `<output>${d.value}</output>`;
-    const input = row.querySelector('input');
-    const out = row.querySelector('output');
-    input.addEventListener('input', () => {
-      const v = parseFloat(input.value);
-      out.textContent = v;
+      `<input class="pslide" type="range" min="${d.min}" max="${d.max}" step="${d.step}" value="${value}">` +
+      `<input class="pnum" type="number" step="${d.step}" value="${+value.toFixed(4)}">`;
+    const slide = row.querySelector('.pslide');
+    const num = row.querySelector('.pnum');
+
+    // The box is authoritative and deliberately unclamped: a slider range is a
+    // convenience, not a limit, and typing 34 into a kP that sliders to 30 has to
+    // work. The slider just saturates.
+    const push = (v, from) => {
+      if (!Number.isFinite(v)) return;
+      if (from !== 'slide') slide.value = v;
+      if (from !== 'num') num.value = +v.toFixed(4);
       api.setParam(d.key, v);
-    });
+    };
+    slide.addEventListener('input', () => push(parseFloat(slide.value), 'slide'));
+    // 'change' not 'input', so a half-typed "0.0" is not pushed as 0 mid-edit.
+    num.addEventListener('change', () => push(parseFloat(num.value), 'num'));
+    num.addEventListener('keydown', e => { if (e.key === 'Enter') num.blur(); });
+
     host.appendChild(row);
-    api.setParam(d.key, d.value);
   }
 }
 
 buildParams('params-pid', [
-  { key: 'lateralKp', label: 'lateral kP', min: 0, max: 30,  step: 0.1, value: 5 },
-  { key: 'lateralKd', label: 'lateral kD', min: 0, max: 40,  step: 0.1, value: 5 },
-  { key: 'angularKp', label: 'angular kP', min: 0, max: 200, step: 1,   value: 50 },
-  { key: 'angularKd', label: 'angular kD', min: 0, max: 60,  step: 0.5, value: 6 },
+  { key: 'lateralKp', label: 'lateral kP', min: 0, max: 60,  step: 0.5, value: 34 },
+  { key: 'lateralKi', label: 'lateral kI', min: 0, max: 10,  step: 0.1, value: 0,
+    help: '0 is tuned; a little helps against static friction on a real robot' },
+  { key: 'lateralKd', label: 'lateral kD', min: 0, max: 20,  step: 0.1, value: 2 },
+  { key: 'angularKp', label: 'angular kP', min: 0, max: 260, step: 1,   value: 140,
+    help: 'angular error is in RADIANS, so 140 is a ~52 deg proportional band' },
+  { key: 'angularKi', label: 'angular kI', min: 0, max: 40,  step: 0.5, value: 0 },
+  { key: 'angularKd', label: 'angular kD', min: 0, max: 40,  step: 0.5, value: 8 },
+  { key: 'lateralDFilt', label: 'lateral D filter', min: 0.05, max: 1, step: 0.05, value: 0.6,
+    help: 'derivative smoothing; low values delay kD by dt/alpha and cost damping' },
+  { key: 'angularDFilt', label: 'angular D filter', min: 0.05, max: 1, step: 0.05, value: 0.5 },
+  { key: 'settleTimeMs', label: 'settle hold ms', min: 0, max: 400, step: 10, value: 110,
+    help: 'how long tolerance must hold; 0 exits while still carrying velocity' },
 ]);
 
 buildParams('params-sensor', [
@@ -298,8 +353,45 @@ const doReset = () => { api.reset(...readStart()); api.recClear(); };
 document.getElementById('btn-reset').addEventListener('click', doReset);
 document.getElementById('btn-place').addEventListener('click', doReset);
 
-document.getElementById('loc').addEventListener('change', e => {
-  api.setLoc(parseInt(e.target.value, 10));
+{
+  const hudEl = document.getElementById('hud');
+  const btn = document.getElementById('hud-toggle');
+  btn.addEventListener('click', () => {
+    const off = hudEl.classList.toggle('collapsed');
+    btn.innerHTML = off ? '+' : '&minus;';
+  });
+}
+
+document.getElementById('chk-collide').addEventListener('change', e => {
+  api.setParam('collideObstacles', e.target.checked ? 1 : 0);
+});
+// Localization is four independent switches. The bridge still takes a bitmask, so
+// it is assembled here rather than enumerated as one option per combination.
+const locBits = { 'loc-mcl': 1, 'loc-rcl': 2, 'loc-ekf': 4 };
+const locLabelEl = document.getElementById('loc-label');
+
+function applyLoc() {
+  let mode = 0;
+  for (const [id, bit] of Object.entries(locBits)) {
+    if (document.getElementById(id).checked) mode |= bit;
+  }
+  const names = [];
+  if (mode & 1) names.push('MCL');
+  if (mode & 2) names.push('RCL');
+  if (mode & 4) names.push('EKF');
+  locLabelEl.textContent = names.length ? names.join(' + ') : 'dead reckoning';
+  // The EKF owns the pose while it is up, so say that rather than implying the
+  // other two are still steering it.
+  locLabelEl.title = (mode & 4)
+    ? 'EKF owns the pose; MCL and RCL feed it'
+    : 'nothing ticked = IMU + motor encoders only';
+  api.setLoc(mode);
+}
+for (const id of Object.keys(locBits)) {
+  document.getElementById(id).addEventListener('change', applyLoc);
+}
+document.getElementById('loc-pods').addEventListener('change', e => {
+  api.setOdomPods(e.target.checked ? 1 : 0);
 });
 
 const speedInput = document.getElementById('speed');
@@ -465,10 +557,32 @@ for (const [key, label, , color, on] of SIGNALS) {
 const plotCanvas = document.getElementById('plot');
 const pctx = plotCanvas.getContext('2d');
 
+// The plot keeps a fixed logical coordinate system so the layout maths below is
+// unaffected; only the backing store follows the element's real size and pixel
+// ratio, which is what keeps 1 px gridlines and 10 px labels sharp at any width.
+const PW = 640, PH = 900;
+
+function fitPlot() {
+  const dpr = window.devicePixelRatio || 1;
+  const cssW = Math.max(1, plotCanvas.getBoundingClientRect().width);
+  const storeW = Math.round(cssW * dpr);
+  const storeH = Math.round(cssW * (PH / PW) * dpr);
+  if (plotCanvas.width !== storeW || plotCanvas.height !== storeH) {
+    plotCanvas.width = storeW;
+    plotCanvas.height = storeH;
+  }
+  const k = storeW / PW;
+  pctx.setTransform(k, 0, 0, k, 0, 0);
+}
+new ResizeObserver(fitPlot).observe(plotCanvas);
+window.addEventListener('resize', fitPlot);
+fitPlot();
+
 function drawPlots() {
   const n = api.recCount();
   const stride = api.recStride();
-  pctx.clearRect(0, 0, plotCanvas.width, plotCanvas.height);
+  fitPlot();
+  pctx.clearRect(0, 0, PW, PH);
   if (n < 2) return;
 
   const ptr = api.recPtr() >> 2;
@@ -477,8 +591,8 @@ function drawPlots() {
   const active = SIGNALS.filter(([k]) => sigOn[k]);
   if (!active.length) return;
 
-  const W = plotCanvas.width;
-  const rowH = plotCanvas.height / active.length;
+  const W = PW;
+  const rowH = PH / active.length;
   const t0 = buf[0], t1 = buf[(n - 1) * stride];
   const span = Math.max(t1 - t0, 1e-6);
 
@@ -599,8 +713,8 @@ plotCanvas.addEventListener('pointerdown', e => {
   const n = api.recCount();
   if (n < 2) return;
   const r = plotCanvas.getBoundingClientRect();
-  const x = (e.clientX - r.left) * (plotCanvas.width / r.width);
-  const frac = Math.max(0, Math.min(1, (x - 38) / (plotCanvas.width - 46)));
+  const x = (e.clientX - r.left) * (PW / r.width);
+  const frac = Math.max(0, Math.min(1, (x - 38) / (PW - 46)));
   replayOn.checked = true;
   running = false;
   btnPlay.textContent = 'Play';
@@ -697,9 +811,15 @@ function drawTrail(ptrFn, cntFn, color) {
   ctx.strokeStyle = color;
   ctx.lineWidth = 1.5;
   ctx.beginPath();
+  // A NaN pair is a break marker, pushed whenever the robot is repositioned
+  // rather than driven there. Without it the trail draws a straight line across
+  // the field from wherever the last run ended to the new start pose.
+  let pen = false;
   for (let i = 0; i < n; i++) {
-    const [px, py] = toPx(buf[i * 2], buf[i * 2 + 1]);
-    i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+    const x = buf[i * 2], y = buf[i * 2 + 1];
+    if (!Number.isFinite(x) || !Number.isFinite(y)) { pen = false; continue; }
+    const [px, py] = toPx(x, y);
+    if (!pen) { ctx.moveTo(px, py); pen = true; } else ctx.lineTo(px, py);
   }
   ctx.stroke();
 }
@@ -720,16 +840,29 @@ function drawBeams(s) {
       ctx.fill();
     }
 
+    // ex/ey is where the on-axis laser actually terminates. The reported range
+    // can come from an off-axis ray in the cone, so hx/hy is drawn separately --
+    // otherwise a post picked up off-axis makes the beam stop in empty space.
     const [ex, ey] = toPx(b.ex, b.ey);
-    // Alpha tracks reported confidence, so a low-confidence grazing hit looks
-    // faint exactly as MCL will treat it.
     const a = b.hit ? 0.25 + 0.6 * (b.conf / 63) : 0.12;
     ctx.strokeStyle = `rgba(125,211,252,${a})`;
     ctx.lineWidth = 1.2;
     ctx.beginPath(); ctx.moveTo(ox, oy); ctx.lineTo(ex, ey); ctx.stroke();
-    if (b.hit) {
+
+    const [hx, hy] = toPx(b.hx, b.hy);
+    if (b.hit && b.obs) {
+      // A post owns this return, so every filter should be discarding it. Drawn
+      // as a cross at the real intersection, not as a range dot.
+      ctx.strokeStyle = '#f87171';
+      ctx.lineWidth = 1.6;
+      const k = 4;
+      ctx.beginPath();
+      ctx.moveTo(hx - k, hy - k); ctx.lineTo(hx + k, hy + k);
+      ctx.moveTo(hx + k, hy - k); ctx.lineTo(hx - k, hy + k);
+      ctx.stroke();
+    } else if (b.hit) {
       ctx.fillStyle = '#7dd3fc';
-      ctx.beginPath(); ctx.arc(ex, ey, 2.5, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(hx, hy, 2.5, 0, Math.PI * 2); ctx.fill();
     }
   }
 }
@@ -869,7 +1002,8 @@ function render(s) {
 // ============================================================================
 
 const hud = Object.fromEntries(
-  ['t', 'true', 'odom', 'mcl', 'err', 'speed', 'sensors', 'neff', 'tasks']
+  ['t', 'true', 'odom', 'mcl', 'ekf', 'ekfsig', 'err', 'speed', 'sensors',
+   'neff', 'tasks']
     .map(k => [k, document.getElementById('hud-' + k)]));
 
 const diagEl = document.getElementById('sensor-diag');
@@ -908,12 +1042,22 @@ function updateHud(s) {
   hud.true.textContent = fmtPose(s.true);
   hud.odom.textContent = fmtPose(s.odom);
   hud.mcl.textContent = (s.locMode & 1) ? fmtPose(s.mcl) : '—';
+  hud.ekf.textContent = (s.locMode & 4) ? fmtPose(s.ekf) : '—';
+  hud.ekfsig.textContent = (s.locMode & 4)
+    ? `${s.ekf.sx.toFixed(2)} / ${s.ekf.sy.toFixed(2)} in  ${s.ekf.st.toFixed(2)}°`
+      + `  ${s.ekf.beams} beam${s.ekf.beams === 1 ? '' : 's'}`
+      + (s.ekf.reloc > 0 ? `  ${s.ekf.reloc} reloc` : '')
+    : '—';
   hud.err.textContent = `${s.err.dist.toFixed(2)} in / ${s.err.heading.toFixed(1)}°`;
   hud.speed.textContent = `${s.vel.lin.toFixed(1)} in/s  ${s.vel.ang.toFixed(0)} °/s`;
   const valid = s.beams.filter(b => b.hit).length;
   hud.sensors.textContent = `${valid}/${s.beams.length} valid`;
+  // Injection above zero means the beam likelihoods stopped fitting -- the
+  // cloud is being redrawn across the field to find the robot again.
   hud.neff.textContent = (s.locMode & 1)
-    ? `${s.mcl.nEff.toFixed(0)} / 1024` : '—';
+    ? `${s.mcl.nEff.toFixed(0)} / 1024`
+      + (s.mclInject > 0.001 ? `  inject ${(s.mclInject * 100).toFixed(0)}%` : '')
+    : '—';
   const ri = api.routeIndex();
   hud.tasks.textContent = `${s.tasks} live` + (ri >= 0 ? ` · cmd ${ri}` : '');
   updateDiag(s);

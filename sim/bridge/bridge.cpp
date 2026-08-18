@@ -24,8 +24,12 @@
 namespace {
 
 // --- localization mode bits -------------------------------------------------
+//
+// Bit 0 clear means dead reckoning only: with no tracking wheels in
+// riku::odomSensors that is the IMU plus the drive motor encoders, nothing more.
 constexpr int kLocMcl = 1;
 constexpr int kLocRcl = 2;
+constexpr int kLocEkf = 4;
 
 int  gLocMode = 0;
 bool gStarted = false;
@@ -40,6 +44,19 @@ float gManualRight = 0.0f;
 bool  gManualActive = false;
 
 sim::TaskId gRouteTask = sim::kInvalidTask;
+
+// --- optional dead wheels ---------------------------------------------------
+//
+// The robot in gamespecific/config.cpp has no tracking wheels, so the library
+// falls back to the drive motor encoders. These let the sim show the other
+// configuration without changing the robot's own config: the pods live here, and
+// swapping them in goes through the same OdomTracking::setSensors() a real robot
+// would use. World publishes their travel on ports 11 and 12 either way.
+pros::Rotation gVertPod(11);
+pros::Rotation gHorizPod(12);
+riku::TrackingWheel gVertWheel(gVertPod, 2.75f, 0.0f);
+riku::TrackingWheel gHorizWheel(gHorizPod, 2.75f, 0.0f);
+bool gOdomPods = false;
 
 std::string gStateJson;
 std::vector<float> gParticleBuf(riku::MclTracking::PARTICLE_MAX * 4);
@@ -58,6 +75,15 @@ void pushTrail(Trail& t, float x, float y) {
     t.xy.push_back(y);
 }
 
+/// Mark a discontinuity in both trails. The renderer starts a new subpath at a
+/// non-finite point, so a reposition leaves a gap instead of a straight line
+/// drawn across the field from wherever the previous run ended.
+void breakTrails() {
+    const float nan = std::nanf("");
+    if (!gTrueTrail.xy.empty()) pushTrail(gTrueTrail, nan, nan);
+    if (!gOdomTrail.xy.empty()) pushTrail(gOdomTrail, nan, nan);
+}
+
 struct AutonEntry { const char* name; void (*fn)(); };
 const AutonEntry kAutons[] = {
     {"Example",   riku::autonExample},
@@ -66,6 +92,22 @@ const AutonEntry kAutons[] = {
     {"Skills",    riku::autonSkills},
 };
 constexpr int kAutonCount = static_cast<int>(sizeof(kAutons) / sizeof(kAutons[0]));
+
+/// Rebuild the odometry sensor set with or without the dead wheels.
+void applyOdomPods() {
+    riku::OdomSensors sensors = riku::odomSensors;
+    if (gOdomPods) {
+        sensors.vertWheelCollection = { &gVertWheel };
+        sensors.horizWheelCollection = { &gHorizWheel };
+    }
+    // reset() re-baselines against whichever sensors are now live -- required,
+    // or the first tick measures a delta against the other sensor set -- but it
+    // also zeroes the pose. Swapping pods in should not move the robot.
+    const riku::Pose held = riku::chassis.odom().getPose();
+    riku::chassis.odom().setSensors(sensors);
+    riku::chassis.odom().reset();
+    riku::chassis.odom().setPose(held);
+}
 
 void applyManualDrive() {
     if (!gManualActive) return;
@@ -163,6 +205,7 @@ void sim_reset(float x, float y, float thetaDeg) {
         sim::sched().kill(gRouteTask);
         gRouteTask = sim::kInvalidTask;
     }
+    riku::chassis.ekf().stopTracking();
     riku::chassis.mcl().stopTracking();
     riku::chassis.rcl().stopTracking();
     gLocMode = 0;
@@ -188,9 +231,11 @@ void sim_reset(float x, float y, float thetaDeg) {
     // sync cannot fake a rotation), which means the first tick after a reset
     // would otherwise measure dTheta against the previous run's final heading.
     // reset() is the call that re-reads the IMU and drops the stale delta.
+    applyOdomPods();
     riku::chassis.odom().reset();
     riku::chassis.setPose(p);
     riku::chassis.mcl().setPose(p);
+    riku::chassis.ekf().setPose(p);
 
     gTrueTrail.xy.clear();
     gOdomTrail.xy.clear();
@@ -206,6 +251,7 @@ void sim_reset(float x, float y, float thetaDeg) {
 EMSCRIPTEN_KEEPALIVE
 void sim_teleport(float x, float y, float thetaDeg) {
     // Kidnapped-robot test: ground truth moves, the estimator is not told.
+    breakTrails();
     sim::world().teleport({x, y, riku::vexToStdRad(thetaDeg)});
 }
 
@@ -250,6 +296,19 @@ void sim_set_localization(int mode) {
         riku::chassis.rcl().startTracking();
     } else if (!(mode & kLocRcl) && (gLocMode & kLocRcl)) {
         riku::chassis.rcl().stopTracking();
+    }
+
+    // Exactly one filter may write the pose back into odometry. With the EKF up
+    // it is the EKF, and the others become measurements or diagnostics. Two
+    // filters lerping the same pose toward different estimates undo each other:
+    // MCL+RCL together lap at an 11.96 in peak where MCL alone manages 1.08.
+    riku::chassis.mcl().setAutoSync(!(mode & kLocEkf));
+    riku::chassis.rcl().setAutoSync(!(mode & kLocEkf));
+    if ((mode & kLocEkf) && !(gLocMode & kLocEkf)) {
+        riku::chassis.ekf().setPose(riku::chassis.getPose());
+        riku::chassis.ekf().startTracking();
+    } else if (!(mode & kLocEkf) && (gLocMode & kLocEkf)) {
+        riku::chassis.ekf().stopTracking();
     }
     gLocMode = mode;
 }
@@ -386,6 +445,7 @@ void execRoute() {
         switch (c.op) {
             case OP_SET_POSE: {
                 const riku::Pose p{c.a, c.b, riku::vexToStdRad(c.c)};
+                breakTrails();
                 sim::world().resetTo(p);
                 riku::chassis.setPose(p);
                 riku::chassis.mcl().setPose(p);
@@ -577,6 +637,8 @@ void sim_set_param(const char* name, float value) {
     else if (k == "distFovDeg")        p.distFovDeg = value;
     else if (k == "distConeRays")      p.distConeRays = static_cast<int>(value);
     else if (k == "distMaxIncidenceDeg") p.distMaxIncidenceDeg = value;
+    else if (k == "distConeSigmaFrac") p.distConeSigmaFrac = value;
+    else if (k == "collideObstacles") p.collideObstacles = (value != 0.0f);
     else if (k == "imuPeriodMs")       p.imuPeriodMs = value;
     else if (k == "encoderPeriodMs")   p.encoderPeriodMs = value;
     else if (k == "encoderResolutionDeg") p.encoderResolutionDeg = value;
@@ -599,6 +661,62 @@ void sim_set_param(const char* name, float value) {
         if (k == "mclObsCone") c.obstacleConeFrac = value;
         else                   c.obstacleRangeTol = value;
         riku::chassis.mcl().setConfig(c);
+    } else if (k.rfind("ekf", 0) == 0) {
+        auto c = riku::chassis.ekf().config();
+        if      (k == "ekfMclSigmaScale") c.mclSigmaScale = value;
+        else if (k == "ekfMclSigmaFloor") c.mclSigmaFloor = value;
+        else if (k == "ekfRangeGate")     c.rangeGateChi2 = value;
+        else if (k == "ekfObsTol")        c.obstacleRangeTol = value;
+        else if (k == "ekfObsSigmaPad")   c.obstacleSigmaPad = value;
+        else if (k == "ekfSlipProp")      c.slipNoiseProp = value;
+        else if (k == "ekfVertProp")      c.vertNoiseProp = value;
+        else if (k == "ekfVertBias")      c.vertBiasProp = value;
+        else if (k == "ekfSlipBias")      c.slipBiasProp = value;
+        else if (k == "ekfBiasDecorr")    c.biasDecorrIn = value;
+        else if (k == "ekfRangeSigBase")  c.rangeSigmaBase = value;
+        else if (k == "ekfRangeSigProp")  c.rangeSigmaProp = value;
+        else if (k == "ekfMaxIncidence")  c.maxIncidenceRad = value;
+        else if (k == "ekfImuSigma")      c.imuSigmaRad = value;
+        else if (k == "ekfPosFloor")      c.posNoiseFloor = value;
+        else if (k == "ekfThetaPerInch")  c.thetaNoisePerInch = value;
+        else if (k == "ekfMclGate")       c.mclGateChi2 = value;
+        else if (k == "ekfUseRange")      c.useRangeUpdates = (value != 0.0f);
+        else if (k == "ekfResetCycles")   c.mclResetCycles = static_cast<int>(value);
+        riku::chassis.ekf().setConfig(c);
+    } else if (k == "lateralDFilt" || k == "angularDFilt" ||
+               k == "lateralWindup" || k == "angularWindup" || k == "settleTimeMs") {
+        if      (k == "lateralDFilt")  riku::chassisConfig.lateralDerivativeFilter = value;
+        else if (k == "angularDFilt")  riku::chassisConfig.angularDerivativeFilter = value;
+        else if (k == "lateralWindup") riku::chassisConfig.lateralWindupRange = value;
+        else if (k == "angularWindup") riku::chassisConfig.angularWindupRange = value;
+        else riku::chassisConfig.settleTimeMs = static_cast<std::uint32_t>(value);
+        riku::chassis.setPidTuning(riku::chassisConfig);
+    } else if (k.rfind("rcl", 0) == 0) {
+        auto c = riku::chassis.rcl().config();
+        if      (k == "rclHardSync")  c.hardSync = (value != 0.0f);
+        else if (k == "rclSyncProp")  c.syncProp = value;
+        else if (k == "rclSyncRate")  c.maxSyncRate = value;
+        else if (k == "rclObsTol")    c.obstacleRangeTol = value;
+        riku::chassis.rcl().setConfig(c);
+    } else if (k.rfind("mcl", 0) == 0) {
+        auto c = riku::chassis.mcl().config();
+        if      (k == "mclShortWeight")   c.shortWeight = value;
+        else if (k == "mclShortDecay")    c.shortDecaySigmas = value;
+        else if (k == "mclRandWeight")    c.randWeight = value;
+        else if (k == "mclMaxRandomFrac") c.maxRandomFrac = value;
+        else if (k == "mclDeadzoneLikelihood") c.deadzoneLikelihood = value;
+        else if (k == "mclResampleVar")   c.distResampleVariance = value;
+        else if (k == "mclThetaResampleVar") c.thetaResampleVariance = value;
+        else if (k == "mclResampleThresh") c.resampleThreshold = static_cast<int>(value);
+        else if (k == "mclImeVariance")   c.imeVariance = value;
+        else if (k == "mclHorizProp")     c.horizDependentVarianceProp = value;
+        else if (k == "mclHorizConst")    c.horizConstantNoise = value;
+        else if (k == "mclImuVariance")   c.imuVariance = value;
+        else if (k == "mclMaxThetaDev")   c.maxThetaDeviation = value;
+        else if (k == "mclObsConeFrac")   c.obstacleConeFrac = value;
+        else if (k == "mclObsRangeTol")   c.obstacleRangeTol = value;
+        else if (k == "mclSyncProp")      c.distSyncProp = value;
+        riku::chassis.mcl().setConfig(c);
     } else if (k == "ramseteB")           { gRamsete.b = value;
     } else if (k == "ramseteZeta")        { gRamsete.zeta = value;
     } else if (k == "ramseteMinSpeed")    { gRamsete.minSpeed = value;
@@ -620,9 +738,78 @@ void sim_set_param(const char* name, float value) {
     }
 }
 
+/// Read back a tunable. The browser's sliders used to publish their own markup
+/// defaults on load, which silently overwrote whatever gamespecific/config.cpp
+/// had been tuned to -- the panel has to ask what the value IS, not assert one.
+/// Returns NaN for an unknown key so the caller can fall back.
+EMSCRIPTEN_KEEPALIVE
+float sim_get_param(const char* name) {
+    const auto& p = sim::world().params();
+    const std::string k(name);
+
+    if      (k == "responseTauMs")     return p.responseTauMs;
+    else if (k == "leftScale")         return p.leftScale;
+    else if (k == "rightScale")        return p.rightScale;
+    else if (k == "encoderSlip")       return p.encoderSlip;
+    else if (k == "imuUnderReport")    return p.imuUnderReport;
+    else if (k == "imuDriftDegPerSec") return p.imuDriftDegPerSec;
+    else if (k == "imuNoiseDeg")       return p.imuNoiseDeg;
+    else if (k == "distNoiseMm")       return p.distNoiseMm;
+    else if (k == "distMaxRangeMm")    return p.distMaxRangeMm;
+    else if (k == "distMinRangeMm")    return p.distMinRangeMm;
+    else if (k == "distPeriodMs")      return p.distPeriodMs;
+    else if (k == "distFovDeg")        return p.distFovDeg;
+    else if (k == "distConeRays")      return static_cast<float>(p.distConeRays);
+    else if (k == "distMaxIncidenceDeg") return p.distMaxIncidenceDeg;
+    else if (k == "distConeSigmaFrac") return p.distConeSigmaFrac;
+    else if (k == "collideObstacles")  return p.collideObstacles ? 1.0f : 0.0f;
+    else if (k == "imuPeriodMs")       return p.imuPeriodMs;
+    else if (k == "encoderPeriodMs")   return p.encoderPeriodMs;
+    else if (k == "encoderResolutionDeg") return p.encoderResolutionDeg;
+
+    const auto& cc = riku::chassisConfig;
+    if      (k == "lateralKp")     return cc.lateralGains.kP;
+    else if (k == "lateralKi")     return cc.lateralGains.kI;
+    else if (k == "lateralKd")     return cc.lateralGains.kD;
+    else if (k == "angularKp")     return cc.angularGains.kP;
+    else if (k == "angularKi")     return cc.angularGains.kI;
+    else if (k == "angularKd")     return cc.angularGains.kD;
+    else if (k == "lateralDFilt")  return cc.lateralDerivativeFilter;
+    else if (k == "angularDFilt")  return cc.angularDerivativeFilter;
+    else if (k == "lateralWindup") return cc.lateralWindupRange;
+    else if (k == "angularWindup") return cc.angularWindupRange;
+    else if (k == "settleTimeMs")  return static_cast<float>(cc.settleTimeMs);
+
+    else if (k == "ramseteB")          return gRamsete.b;
+    else if (k == "ramseteZeta")       return gRamsete.zeta;
+    else if (k == "ramseteMinSpeed")   return gRamsete.minSpeed;
+    else if (k == "ramseteMaxAccel")   return gRamsete.maxAccel;
+    else if (k == "ramseteTolerance")  return gRamsete.targetTolerance;
+    else if (k == "ramseteHeadingTol") return gRamsete.headingTolerance;
+
+    const auto mc = riku::chassis.mcl().config();
+    if      (k == "mclObsCone")  return mc.obstacleConeFrac;
+    else if (k == "mclObsTol")   return mc.obstacleRangeTol;
+    else if (k == "mclSyncProp") return mc.distSyncProp;
+
+    return std::nanf("");
+}
+
 // ============================================================================
 // Field editing
 // ============================================================================
+
+/// Swap the dead wheels in or out. 0 = motor encoders and IMU only.
+EMSCRIPTEN_KEEPALIVE
+void sim_set_odom_pods(int on) {
+    const bool want = (on != 0);
+    if (want == gOdomPods) return;
+    gOdomPods = want;
+    applyOdomPods();
+}
+
+EMSCRIPTEN_KEEPALIVE
+int sim_odom_pods() { return gOdomPods ? 1 : 0; }
 
 EMSCRIPTEN_KEEPALIVE
 void sim_field_clear() { sim::field().clear(); }
@@ -706,6 +893,9 @@ const char* sim_state_json() {
     const float nEff = (gLocMode & kLocMcl)
         ? riku::chassis.mcl().getEstimate().second : 0.0f;
     const riku::Pose rcl = riku::chassis.rcl().latestEstimate();
+    const riku::Pose ekf = riku::chassis.ekf().getEstimate();
+    const auto ekfSigma = riku::chassis.ekf().uncertainty();
+    const float mclInject = riku::chassis.mcl().randomInjectFraction();
 
     char buf[8192];
     int n = std::snprintf(buf, sizeof(buf),
@@ -714,6 +904,9 @@ const char* sim_state_json() {
         "\"odom\":{\"x\":%.3f,\"y\":%.3f,\"h\":%.2f},"
         "\"mcl\":{\"x\":%.3f,\"y\":%.3f,\"h\":%.2f,\"nEff\":%.1f},"
         "\"rcl\":{\"x\":%.3f,\"y\":%.3f,\"h\":%.2f},"
+        "\"ekf\":{\"x\":%.3f,\"y\":%.3f,\"h\":%.2f,\"sx\":%.3f,\"sy\":%.3f,"
+            "\"st\":%.3f,\"beams\":%d,\"reloc\":%d},"
+        "\"mclInject\":%.3f,"
         "\"err\":{\"dist\":%.3f,\"heading\":%.2f},"
         "\"vel\":{\"lin\":%.2f,\"ang\":%.2f,\"left\":%.2f,\"right\":%.2f},"
         "\"colliding\":%s,\"routeRunning\":%s,\"settled\":%s,"
@@ -723,6 +916,11 @@ const char* sim_state_json() {
         odom.x, odom.y, riku::stdRadToVexDeg(odom.theta),
         mclRaw.x, mclRaw.y, riku::stdRadToVexDeg(mclRaw.theta), nEff,
         rcl.x, rcl.y, riku::stdRadToVexDeg(rcl.theta),
+        ekf.x, ekf.y, riku::stdRadToVexDeg(ekf.theta),
+        ekfSigma.sigmaX, ekfSigma.sigmaY,
+        ekfSigma.sigmaTheta * riku::RAD_TO_DEG,
+        riku::chassis.ekf().beamsUsed(), riku::chassis.ekf().relocateCount(),
+        mclInject,
         errDist, errHeadingDeg,
         t.vLinIn, t.vAngRad * riku::RAD_TO_DEG, t.leftVelIn, t.rightVelIn,
         t.colliding ? "true" : "false",
@@ -737,10 +935,12 @@ const char* sim_state_json() {
         n += std::snprintf(buf + n, sizeof(buf) - n,
             "%s{\"i\":%d,\"ox\":%.2f,\"oy\":%.2f,\"ex\":%.2f,\"ey\":%.2f,"
             "\"r\":%.2f,\"hit\":%s,\"dir\":%.2f,\"fov\":%.1f,"
-            "\"conf\":%d,\"inc\":%.1f}",
+            "\"conf\":%d,\"inc\":%.1f,"
+            "\"hx\":%.2f,\"hy\":%.2f,\"obs\":%s,\"ar\":%.2f}",
             first ? "" : ",", i, b.originX, b.originY, b.endX, b.endY,
             b.rangeIn, b.inRange ? "true" : "false",
-            b.dirDeg, b.fovDeg, b.confidence, b.incidenceDeg);
+            b.dirDeg, b.fovDeg, b.confidence, b.incidenceDeg,
+            b.hitX, b.hitY, b.hitIsObstacle ? "true" : "false", b.axisRangeIn);
         first = false;
     }
 

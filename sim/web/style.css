@@ -1,4 +1,18 @@
 :root {
+  /* One fluid knob drives the whole UI: every size below is in em or a vw
+     clamp, so the layout scales with the window instead of snapping between
+     breakpoints. rem stays fixed to the clamp so nesting cannot compound it. */
+  font-size: clamp(10.5px, 0.55vw + 6.4px, 14px);
+
+  /* Native scrollbars, dropdown popups and range tracks all follow this. It is
+     what stops the browser drawing light-grey scrollbars over a dark UI. */
+  color-scheme: dark;
+
+  --left-w:  clamp(184px, 16.5vw, 300px);
+  --right-w: clamp(240px, 21.5vw, 380px);
+  --scroll:       #39404e;
+  --scroll-hover: #4c5566;
+
   --bg:      #14161a;
   --panel:   #1b1e24;
   --card:    #22262e;
@@ -20,23 +34,48 @@ html, body {
   overflow: hidden;
   background: var(--bg);
   color: var(--text);
-  font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 1rem;
+  line-height: 1.45;
+}
+
+/* ---------------- scrollbars ----------------
+   Overlay-style: transparent track, thumb only, so a scrolling panel does not
+   grow a light gutter down its edge. */
+
+* { scrollbar-width: thin; scrollbar-color: var(--scroll) transparent; }
+
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--scroll);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  border-radius: 6px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scroll-hover);
+  background-clip: padding-box;
 }
 
 #app {
   display: grid;
-  grid-template-columns: 300px minmax(0, 1fr) 380px;
+  grid-template-columns: var(--left-w) minmax(0, 1fr) var(--right-w);
   height: 100%;
+  min-height: 0;
 }
 
 .panel {
   background: var(--panel);
-  padding: 12px;
+  padding: 0.86em;
   overflow-y: auto;
+  overflow-x: hidden;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 0.72em;
   min-height: 0;
+  min-width: 0;
 }
 #left  { border-right: 1px solid var(--line); }
 #right { border-left: 1px solid var(--line); }
@@ -46,17 +85,39 @@ html, body {
 #stage {
   position: relative;
   display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.55em;
+  padding: 0.9em;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* The field's own area. The transport is a sibling below it rather than an
+   overlay, so it cannot cover the field at any window size, and the field is
+   measured against what is actually left rather than a guessed padding lane. */
+#stage-field {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
   align-items: center;
   justify-content: center;
-  padding: 12px;
-  min-width: 0;
+  container-type: size;
 }
 
 #field {
-  width: min(100%, calc(100vh - 90px));
+  /* Largest square that fits the stage on BOTH axes. The old
+     min(100%, 100vh - 90px) budgeted for the surrounding chrome in pixels, so it
+     left a gap on a wide window and overflowed a short one.
+     Constraining width alone is deliberate: give a box a definite width AND a
+     max-height and CSS drops aspect-ratio, so the field would stretch. */
+  width: min(100%, 82vh);              /* engines without container units */
+  width: min(100cqw, 100cqh);
   height: auto;
   aspect-ratio: 1;
-  border-radius: 8px;
+  border-radius: 0.5em;
   background: #0f1115;
   cursor: grab;
 }
@@ -64,42 +125,67 @@ html, body {
 
 #hud {
   position: absolute;
-  top: 22px;
-  left: 22px;
-  padding: 9px 11px;
+  top: 1em;
+  left: 1em;
+  padding: 0.36em 1.6em 0.36em 0.5em;
   background: rgba(16, 18, 22, 0.88);
   border: 1px solid var(--line);
   border-radius: 6px;
   pointer-events: none;
-  min-width: 220px;
+  min-width: 12.6em;
+  max-width: calc(100% - 2em);
+  font-size: 0.87em;
+  line-height: 1.32;
 }
-#hud .row { display: flex; justify-content: space-between; gap: 14px; }
+#hud .row { display: flex; justify-content: space-between; gap: 0.8em; }
 #hud span { color: var(--dim); }
 #hud b { font-weight: 500; }
 
-#transport {
+/* Collapsed keeps the clock visible and gives the field back. */
+#hud.collapsed .row:not(:first-of-type) { display: none; }
+#hud.collapsed { min-width: 0; }
+
+#hud-toggle {
   position: absolute;
-  bottom: 18px;
-  left: 50%;
-  transform: translateX(-50%);
+  top: 0.15em;
+  right: 0.15em;
+  width: 1.35em;
+  height: 1.35em;
+  padding: 0;
+  line-height: 1.2;
+  text-align: center;
+  font-size: 1em;
+  background: transparent;
+  color: var(--dim);
+  border: 0;
+  border-radius: 0.2em;
+  cursor: pointer;
+  pointer-events: auto;
+}
+#hud-toggle:hover { color: #e5e7eb; background: rgba(255,255,255,0.08); }
+
+#transport {
+  flex: 0 0 auto;
   display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
   align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
-  background: rgba(16, 18, 22, 0.92);
+  gap: 0.5em;
+  padding: 0.5em 0.7em;
+  background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 8px;
-  white-space: nowrap;
+  border-radius: 0.45em;
 }
 #transport .slider { margin: 0; }
 #transport select { width: auto; }
 
 #stage-hint {
   position: absolute;
-  top: 22px;
-  right: 22px;
+  top: 1.1em;
+  right: 1.1em;
+  max-width: 40%;
   color: var(--dim);
-  font-size: 11px;
+  font-size: 0.9em;
   text-align: right;
 }
 
@@ -108,14 +194,15 @@ html, body {
 .card {
   background: var(--card);
   border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 11px;
+  border-radius: 0.45em;
+  padding: 0.8em;
+  min-width: 0;
 }
 .card.grow { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 
 .card h3 {
-  margin: 0 0 9px;
-  font-size: 10px;
+  margin: 0 0 0.7em;
+  font-size: 0.83em;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.08em;
@@ -127,7 +214,7 @@ html, body {
   letter-spacing: 0;
   font-weight: 400;
   color: #6b7280;
-  margin-top: 2px;
+  margin-top: 0.15em;
 }
 
 /* ---------------- controls ---------------- */
@@ -136,74 +223,79 @@ button {
   background: #2c313b;
   color: var(--text);
   border: 1px solid var(--line);
-  border-radius: 4px;
-  padding: 6px 11px;
+  border-radius: 0.3em;
+  padding: 0.45em 0.8em;
   font: inherit;
   cursor: pointer;
 }
 button:hover { background: #353b47; }
 button.primary { background: var(--accent); border-color: var(--accent); color: #08131f; font-weight: 600; }
 button.primary:hover { filter: brightness(1.1); }
-button.wide { width: 100%; margin-top: 6px; }
+button.wide { width: 100%; margin-top: 0.45em; }
 
-.btnrow { display: flex; gap: 6px; }
-.btnrow button { flex: 1; }
+.btnrow { display: flex; flex-wrap: wrap; gap: 0.45em; }
+.btnrow button { flex: 1 1 6em; }
 
-.row2 { display: flex; gap: 6px; }
+.row2 { display: flex; gap: 0.45em; }
 .row2 select, .row2 input { flex: 1; min-width: 0; }
 
-.row3 { display: flex; gap: 6px; }
-.row3 label { flex: 1; display: flex; flex-direction: column; gap: 3px; color: var(--dim); font-size: 10px; }
+.row3 { display: flex; gap: 0.45em; }
+.row3 label { flex: 1; min-width: 0; display: flex; flex-direction: column;
+              gap: 0.2em; color: var(--dim); font-size: 0.85em; }
 
 select, input[type="number"], input[type="text"] {
   background: #171a20;
   color: var(--text);
   border: 1px solid var(--line);
-  border-radius: 4px;
-  padding: 5px 7px;
+  border-radius: 0.3em;
+  padding: 0.35em 0.5em;
   font: inherit;
   width: 100%;
+  min-width: 0;
 }
-input[type="text"] { margin-top: 6px; }
+input[type="text"] { margin-top: 0.45em; }
 
 label.slider {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 0.5em;
   color: var(--dim);
-  font-size: 11px;
+  font-size: 0.9em;
+  min-width: 0;
 }
-label.slider input { flex: 1; width: 90px; }
-label.slider output { min-width: 38px; text-align: right; color: var(--text); }
+label.slider input { flex: 1 1 5em; width: auto; min-width: 3.5em; }
+label.slider output { min-width: 3em; text-align: right; color: var(--text); }
 
 input[type="range"] { accent-color: var(--accent); }
 
 /* ---------------- tabs ---------------- */
 
-.tabs { display: flex; gap: 4px; }
+.tabs { display: flex; gap: 0.3em; }
 .tab {
   flex: 1;
-  border-radius: 4px 4px 0 0;
+  border-radius: 0.3em 0.3em 0 0;
   border-bottom-color: transparent;
   color: var(--dim);
 }
 .tab.active { background: var(--card); color: var(--text); border-color: var(--line); }
 
-.tabpane { display: none; flex-direction: column; gap: 10px; flex: 1; min-height: 0; }
+.tabpane { display: none; flex-direction: column; gap: 0.72em; flex: 1; min-height: 0; min-width: 0; }
 .tabpane.active { display: flex; }
 
 /* ---------------- editor ---------------- */
 
 #editor {
   flex: 1;
-  min-height: 240px;
+  /* Relative, so a short window shrinks the editor instead of overflowing the
+     panel and pushing the run buttons off screen. */
+  min-height: 8em;
   resize: none;
   background: #12151a;
   color: #cfd6e4;
   border: 1px solid var(--line);
-  border-radius: 4px;
-  padding: 9px;
-  font: 12px/1.6 ui-monospace, Consolas, monospace;
+  border-radius: 0.3em;
+  padding: 0.65em;
+  font: 1em/1.6 ui-monospace, Consolas, monospace;
   tab-size: 2;
   white-space: pre;
   overflow: auto;
@@ -214,43 +306,60 @@ input[type="range"] { accent-color: var(--accent); }
   background: #12151a;
   color: #cfd6e4;
   border: 1px solid var(--line);
-  border-radius: 4px;
-  padding: 8px;
-  font: 11px/1.5 ui-monospace, Consolas, monospace;
-  margin-top: 6px;
+  border-radius: 0.3em;
+  padding: 0.6em;
+  font: 0.9em/1.5 ui-monospace, Consolas, monospace;
+  margin-top: 0.45em;
 }
 
-.status { margin-top: 7px; font-size: 11px; min-height: 16px; color: var(--dim); }
+.status { margin-top: 0.5em; font-size: 0.9em; min-height: 1.3em; color: var(--dim); }
 .status.err { color: #f87171; }
 .status.ok  { color: var(--true); }
 
 /* ---------------- misc ---------------- */
 
-.layers { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 10px; }
-.layers label { display: flex; align-items: center; gap: 5px; font-size: 11px; cursor: pointer; }
+/* auto-fit rather than a fixed pair: the same list reflows to one column in a
+   narrow panel and to three in a wide one. */
+.layers { display: grid; grid-template-columns: repeat(auto-fit, minmax(7.6em, 1fr)); gap: 0.3em 0.7em; }
+.layers label { display: flex; align-items: center; gap: 0.35em; font-size: 0.9em; cursor: pointer; }
 .layers input { accent-color: var(--accent); margin: 0; }
 
-.facts { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; font-size: 11px; }
+.facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0.15em 0.7em; font-size: 0.9em; }
 .facts .k { color: var(--dim); }
 .facts .v { text-align: right; }
 
 .param {
   display: grid;
-  grid-template-columns: 1fr 76px 46px;
+  grid-template-columns: minmax(0, 1fr) minmax(2.6em, 0.8fr) 4.4em;
   align-items: center;
-  gap: 7px;
-  margin-bottom: 6px;
-  font-size: 11px;
+  gap: 0.5em;
+  margin-bottom: 0.45em;
+  font-size: 0.9em;
 }
 .param span { color: var(--dim); }
-.param output { text-align: right; }
-.param input[type="range"] { width: 100%; }
+.param input[type="range"] { width: 100%; min-width: 0; }
 
-#plot { width: 100%; height: auto; display: block; }
+/* Typing an exact value beats nudging a slider to it, so the box is the real
+   control and the slider is for feel. */
+.param .pnum {
+  width: 100%;
+  min-width: 0;
+  padding: 0.15em 0.3em;
+  text-align: right;
+  font: inherit;
+  border-radius: 0.25em;
+}
+/* The spinners eat most of a 4.4em box; the arrow keys still step the value. */
+.param .pnum::-webkit-inner-spin-button,
+.param .pnum::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+.param .pnum { -moz-appearance: textfield; appearance: textfield; }
+.param .pnum:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+
+#plot { width: 100%; height: auto; display: block; min-width: 0; aspect-ratio: 640 / 900; }
 
 /* ---------------- diagnostics ---------------- */
 
-.diag { display: grid; grid-template-columns: auto 1fr auto auto; gap: 3px 8px; font-size: 11px; }
+.diag { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; gap: 0.22em 0.6em; font-size: 0.9em; }
 .diag .s  { color: var(--dim); }
 .diag .r  { text-align: right; }
 .diag .ok   { color: var(--true); }
@@ -258,9 +367,48 @@ input[type="range"] { accent-color: var(--accent); }
 /* beam deadzoned for part of the cloud: ignored by some hypotheses */
 .diag .warn { color: #e2b341; }
 .diag .off  { color: #4b5563; }
-.diag .hdr  { color: #6b7280; font-size: 10px; text-transform: uppercase; letter-spacing: .06em; }
+.diag .hdr  { color: #6b7280; font-size: 0.85em; text-transform: uppercase; letter-spacing: .06em; }
 
 .dimtext { color: var(--dim); margin-left: auto; }
-#replay-pos { width: 100%; margin-top: 6px; }
+#replay-pos { width: 100%; margin-top: 0.45em; }
 
-label.inline input[type="checkbox"] { accent-color: var(--accent); margin: 0 4px 0 0; }
+label.inline input[type="checkbox"] { accent-color: var(--accent); margin: 0 0.3em 0 0; }
+
+/* Pose-source switches. Independent toggles, not one entry per combination --
+   MCL/RCL/EKF/pods is 16 states and a dropdown listing them is unreadable. */
+.locbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.3em 0.75em;
+  padding: 0.25em 0.65em;
+  background: #14161b;
+  border: 1px solid var(--line);
+  border-radius: 0.35em;
+  font-size: 0.9em;
+}
+.locbar label { display: flex; align-items: center; gap: 0.3em; cursor: pointer; white-space: nowrap; }
+.locbar input { margin: 0; cursor: pointer; }
+#loc-label {
+  min-width: 7.5em;
+  padding-right: 0.6em;
+  border-right: 1px solid var(--line);
+  color: #7dd3fc;
+}
+
+/* ---------------- narrow and short windows ---------------- */
+
+/* Below this the three columns are each too thin to read, so the side panels
+   move under the field and the page scrolls as one instead. */
+@media (max-width: 900px) {
+  html, body { overflow: auto; }
+  #app { grid-template-columns: minmax(0, 1fr); height: auto; min-height: 100%; }
+  #stage { order: -1; height: 82vh; }
+  .panel { overflow: visible; }
+  #left, #right { border: 0; border-top: 1px solid var(--line); }
+}
+
+/* Laptop screens: the field keeps its size and the editor gives up its floor. */
+@media (max-height: 620px) {
+  #editor { min-height: 5em; }
+}

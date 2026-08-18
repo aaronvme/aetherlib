@@ -65,6 +65,7 @@ void World::resetTo(const riku::Pose& pose) {
     mLeftCmdIn = mRightCmdIn = 0.0f;
     mMotorDegLeft = mMotorDegRight = 0.0;
     mDistAccum = mImuAccum = mEncAccum = 0.0;
+    mPodVertIn = mPodHorizIn = 0.0;
 
     // The IMU reads a heading, not a pose, so seed it from the start heading in
     // VEX convention (0 = forward, clockwise positive).
@@ -80,8 +81,13 @@ void World::resetTo(const riku::Pose& pose) {
         bus().motors[i].positionDeg = 0.0;
         bus().motors[i].velocityRpm = 0.0;
         bus().motors[i].commandedMv = 0.0;
+        bus().rotations[i].positionCentideg = 0;
     }
     publishImu();
+    // Pods must be on the bus before anything baselines against them. Left to
+    // the next encoder tick, OdomTracking::reset() would sample the previous
+    // run's travel and then see it jump to zero as a real delta.
+    publishEncoders();
     updateDistanceSensors();
 }
 
@@ -166,7 +172,8 @@ void World::updateDrive(double dtSec) {
     // Walls and posts are solid: stop translation on contact but let the robot
     // keep rotating, otherwise it can wedge permanently.
     const float radius = 0.5f * std::hypot(mParams.robotLengthIn, mParams.robotWidthIn);
-    if (!field().collides(static_cast<float>(nx), static_cast<float>(ny), radius * 0.5f)) {
+    if (!field().collides(static_cast<float>(nx), static_cast<float>(ny), radius * 0.5f,
+                          mParams.collideObstacles)) {
         mTruth.x = static_cast<float>(nx);
         mTruth.y = static_cast<float>(ny);
         mTruth.colliding = false;
@@ -177,6 +184,12 @@ void World::updateDrive(double dtSec) {
 
     accumulateEncoders(mLeftCmdIn * dtSec, mRightCmdIn * dtSec);
     accumulateImu(dTheta, dtSec);
+
+    // Dead wheels roll on the floor rather than being driven, so they see the
+    // travel the drive wheels only claim to have made: no encoderSlip term.
+    // Both pods sit at the tracking centre, so rotation contributes nothing.
+    mPodVertIn += dDist;
+
 }
 
 // ============================================================================
@@ -196,7 +209,26 @@ void World::accumulateEncoders(double leftTravelIn, double rightTravelIn) {
     mMotorDegRight += (rightTravelIn * seen / circumference) / extRatio * 360.0;
 }
 
+namespace {
+/// Inches of pod travel -> rotation-sensor centidegrees.
+std::int32_t podCentideg(double travelIn, double wheelDiamIn) {
+    const double circumference = riku::PI * wheelDiamIn;
+    if (circumference <= 0.0) return 0;
+    return static_cast<std::int32_t>(travelIn / circumference * 36000.0);
+}
+constexpr double kPodWheelDiamIn = 2.75;
+constexpr int kVertPodPort = 11;
+constexpr int kHorizPodPort = 12;
+}  // namespace
+
 void World::publishEncoders() {
+    // Always published, whether or not the library is configured to read them.
+    // Enabling pods mid-run then has a live baseline instead of a jump.
+    bus().rotations[kVertPodPort].positionCentideg =
+        podCentideg(mPodVertIn, kPodWheelDiamIn);
+    bus().rotations[kHorizPodPort].positionCentideg =
+        podCentideg(mPodHorizIn, kPodWheelDiamIn);
+
     const double circumference = riku::PI * mParams.wheelDiameterIn;
     const double extRatio = riku::drivetrain.externalGearRatio();
     if (circumference <= 0.0 || extRatio <= 0.0) return;
@@ -271,18 +303,47 @@ void World::updateDistanceSensors() {
         const float sy = mTruth.y + (mount.x * st + mount.y * ct);
         const float axis = mTruth.theta + mount.theta;
 
-        // Sweep the cone and keep the nearest return. This is why a 4 in goal
-        // post is visible from off-axis, and why a reading can come from
-        // something the centre ray misses entirely.
+        // Sweep the cone and keep the STRONGEST return, not the nearest.
+        //
+        // Nearest is wrong for a flat surface: a wall fills the whole cone, so
+        // the closest ray in it is always the one at the cone edge, and taking
+        // that reads short by d*(1 - cos(alpha)/cos(alpha - fov/2)) -- several
+        // inches once the robot is off square. A real sensor times the return
+        // with the most energy coming back, which for a wall is the on-axis one.
+        //
+        // Strength falls as 1/d^2, with incidence, and with angle off the axis.
+        // Keeping the 1/d^2 term is what still lets a nearby 4 in goal post beat
+        // the wall behind it from off-axis, which was the point of the sweep.
+        const float apodSigma = std::max(mParams.distConeSigmaFrac, 0.02f);
         RayHit best;
         best.dist = maxRangeIn;
         bool any = false;
+        float bestStrength = -1.0f;
+        float axisRange = maxRangeIn;
+
         for (int r = 0; r < rays; r++) {
             const float frac = (rays == 1) ? 0.0f
                              : (static_cast<float>(r) / (rays - 1)) - 0.5f;
             const float a = axis + frac * fov;
-            const RayHit h = field().cast(sx, sy, std::cos(a), std::sin(a), maxRangeIn);
-            if (h.hit && (!any || h.dist < best.dist)) { best = h; any = true; }
+            const float ca = std::cos(a), sa = std::sin(a);
+            const RayHit h = field().cast(sx, sy, ca, sa, maxRangeIn);
+            if (std::fabs(frac) < 1e-6f && h.hit) axisRange = h.dist;
+            if (!h.hit || h.dist < 1e-3f) continue;
+
+            const float cosInc = -(ca * h.nx + sa * h.ny);
+            if (cosInc <= 0.0f) continue;
+
+            const float apod = std::exp(-0.5f * (frac / apodSigma) * (frac / apodSigma));
+            const float strength = apod * cosInc / (h.dist * h.dist);
+            if (strength > bestStrength) {
+                bestStrength = strength;
+                best = h;
+                best.dist = h.dist;
+                any = true;
+                mBeams[i].hitX = sx + ca * h.dist;
+                mBeams[i].hitY = sy + sa * h.dist;
+                mBeams[i].hitIsObstacle = h.isCircle;
+            }
         }
 
         auto& beam = mBeams[i];
@@ -292,8 +353,12 @@ void World::updateDistanceSensors() {
         beam.dirDeg = axis * riku::RAD_TO_DEG;
         beam.fovDeg = mParams.distFovDeg;
         beam.rangeIn = any ? best.dist : maxRangeIn;
-        beam.endX = sx + std::cos(axis) * beam.rangeIn;
-        beam.endY = sy + std::sin(axis) * beam.rangeIn;
+        // Drawn along the axis to whatever the axis ray hit, so the laser is
+        // shown pointing where it really points. The timed return is hitX/hitY.
+        beam.axisRangeIn = axisRange;
+        beam.endX = sx + std::cos(axis) * axisRange;
+        beam.endY = sy + std::sin(axis) * axisRange;
+        if (!any) { beam.hitX = beam.endX; beam.hitY = beam.endY; beam.hitIsObstacle = false; }
 
         auto& slot = bus().distances[dev->get_port()];
 

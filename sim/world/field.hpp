@@ -34,6 +34,10 @@ struct RayHit {
     bool  hit{false};
     float dist{0.0f};
     float nx{0.0f}, ny{0.0f};   // unit surface normal, facing the ray origin
+    /// True when the hit was a circle -- a goal post rather than a wall. The
+    /// filters treat posts as deadzones, so the UI has to be able to say which
+    /// returns came from one.
+    bool  isCircle{false};
 };
 
 class Field {
@@ -57,8 +61,10 @@ public:
     /// Distance only -- kept for callers that do not care about the normal.
     float raycast(float ox, float oy, float dc, float ds, float maxRange) const;
 
-    /// True when the point is inside any circle or outside the perimeter.
-    bool collides(float x, float y, float radius) const;
+    /// True when the point is outside the perimeter, or inside any circle when
+    /// `includeCircles`. Driving through posts is sometimes what you want while
+    /// testing a route, so it is switchable.
+    bool collides(float x, float y, float radius, bool includeCircles = true) const;
 
     const std::vector<Segment>& segments() const { return mSegments; }
     const std::vector<Circle>&  circles()  const { return mCircles; }

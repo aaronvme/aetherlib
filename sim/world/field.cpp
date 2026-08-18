@@ -146,8 +146,8 @@ RayHit Field::cast(float ox, float oy, float dc, float ds, float maxRange) const
         if (h.hit && h.dist < best.dist) best = h;
     }
     for (const auto& c : mCircles) {
-        const RayHit h = rayCircle(ox, oy, dc, ds, c, best.dist);
-        if (h.hit && h.dist < best.dist) best = h;
+        RayHit h = rayCircle(ox, oy, dc, ds, c, best.dist);
+        if (h.hit && h.dist < best.dist) { h.isCircle = true; best = h; }
     }
     return best;
 }
@@ -157,8 +157,9 @@ float Field::raycast(float ox, float oy, float dc, float ds, float maxRange) con
     return h.hit ? h.dist : maxRange;
 }
 
-bool Field::collides(float x, float y, float radius) const {
+bool Field::collides(float x, float y, float radius, bool includeCircles) const {
     if (std::fabs(x) > kHalf - radius || std::fabs(y) > kHalf - radius) return true;
+    if (!includeCircles) return false;
     for (const auto& c : mCircles) {
         const float dx = x - c.x;
         const float dy = y - c.y;
