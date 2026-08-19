@@ -25,12 +25,16 @@ struct MoveToPointParams {
     float earlyExitRange{0.0f};
     float lead{0.0f};               // carrot-point lead for curved approaches
 
-    // Inside this radius the bearing stops being recomputed and the last one is
-    // held: atan2 over a shrinking offset is dominated by whatever noise the
+    // Steering stops recomputing the bearing inside this radius and holds the
+    // last one: atan2 over a shrinking offset is dominated by whatever noise the
     // pose carries, so under MCL a tuned angular loop chases it at 591 deg/s.
-    // The sweep flattens at 6 in -- 29 deg/s against a 24 deg/s floor -- and
-    // costs 0.05 in of endpoint accuracy. 0 disables the hold.
-    float bearingHoldDist{6.0f};    // inches
+    // Only steering is frozen -- the along-track term stays live, or a stale
+    // bearing would strand the robot on a line past the target.
+    //
+    // Bigger is not better. 1.5 in cuts peak rotation to 82 deg/s for nothing;
+    // past it the held bearing goes stale while it still matters and arrivals
+    // from a bad angle stop converging, 3 of 15 at 1.5 in against 12 of 15 at 6.
+    float bearingHoldDist{1.5f};    // inches
 };
 
 }  // namespace riku

@@ -454,28 +454,35 @@ void Chassis::executeCurrentMotion() {
         }
         case MotionType::Point: {
             latLimit = req.movePointParams.maxSpeed;
-            float distErr = distanceToPoint(pose, req.targetX, req.targetY);
-            lateralOut = mLateralPID.update(distErr);
+            const float distErr = distanceToPoint(pose, req.targetX, req.targetY);
+            const float liveBearing = bearingToPoint(pose, req.targetX, req.targetY);
 
-            float targetBearingRad;
+            // Along-track error, signed: it goes negative the moment the target
+            // is behind the robot, which is the only thing that lets the loop
+            // reverse. Fed the raw distance it could only ever grow, so an
+            // overshoot drove away from the target rather than back to it. The
+            // projection is also well conditioned where the bearing is not --
+            // distance goes to zero with it, so angle noise cannot blow it up.
+            const float along =
+                distErr * std::cos(angleDiffRad(pose.theta, liveBearing));
+            lateralOut = mLateralPID.update(along);
+
+            // Steering holds the last well-conditioned bearing near the target;
+            // the along-track term above keeps the live sign either way.
+            float steerBearing = liveBearing;
             if (bearingHeld) {
-                targetBearingRad = heldBearing;
-            } else {
-                targetBearingRad = bearingToPoint(pose, req.targetX, req.targetY);
-                if (distErr < req.movePointParams.bearingHoldDist) {
-                    heldBearing = targetBearingRad;
-                    bearingHeld = true;
-                }
+                steerBearing = heldBearing;
+            } else if (distErr < req.movePointParams.bearingHoldDist) {
+                heldBearing = liveBearing;
+                bearingHeld = true;
+                steerBearing = heldBearing;
             }
+            // Backward: point away from the target. The along-track sign already
+            // sends the robot the right way, so lateralOut is not negated.
             if (!req.movePointParams.forwards) {
-                // Backward: face AWAY from target + negate lateral, so the
-                // robot's back moves toward the target while the robot
-                // looks the other way.
-                targetBearingRad = wrapRad(targetBearingRad + PI);
-                lateralOut = -lateralOut;
+                steerBearing = wrapRad(steerBearing + PI);
             }
-            float headingErrRad = angleDiffRad(pose.theta, targetBearingRad);
-            angularOut = mAngularPID.update(headingErrRad);
+            angularOut = mAngularPID.update(angleDiffRad(pose.theta, steerBearing));
             settled = distErr < req.movePointParams.targetTolerance;
             break;
         }
