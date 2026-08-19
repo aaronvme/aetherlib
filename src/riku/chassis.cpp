@@ -404,6 +404,9 @@ void Chassis::executeCurrentMotion() {
     bool settleStarted = false;
     uint32_t settleStartElapsed = 0;
 
+    bool bearingHeld = false;
+    float heldBearing = 0.0f;
+
     uint32_t prevTick = pros::millis();
 
     while (mMotionRunning && !mMotionCancelled) {
@@ -454,7 +457,16 @@ void Chassis::executeCurrentMotion() {
             float distErr = distanceToPoint(pose, req.targetX, req.targetY);
             lateralOut = mLateralPID.update(distErr);
 
-            float targetBearingRad = bearingToPoint(pose, req.targetX, req.targetY);
+            float targetBearingRad;
+            if (bearingHeld) {
+                targetBearingRad = heldBearing;
+            } else {
+                targetBearingRad = bearingToPoint(pose, req.targetX, req.targetY);
+                if (distErr < req.movePointParams.bearingHoldDist) {
+                    heldBearing = targetBearingRad;
+                    bearingHeld = true;
+                }
+            }
             if (!req.movePointParams.forwards) {
                 // Backward: face AWAY from target + negate lateral, so the
                 // robot's back moves toward the target while the robot

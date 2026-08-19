@@ -392,6 +392,7 @@ float gRouteMaxSpeed = 127.0f;
 
 // RAMSETE gains, tunable from the browser via sim_set_param.
 riku::RAMSETEParams gRamsete;
+riku::MoveToPointParams gMoveToPoint;
 
 // Sampled trajectory points, pushed by the browser before a run. An
 // OP_FOLLOW_PATH command names a [start, count) slice of this buffer, so one
@@ -462,7 +463,7 @@ void execRoute() {
                 break;
             }
             case OP_MOVE_TO: {
-                riku::MoveToPointParams params;
+                riku::MoveToPointParams params = gMoveToPoint;
                 params.forwards = (c.c >= 0.0f);
                 params.maxSpeed = gRouteMaxSpeed;
                 riku::chassis.moveToPoint(c.a, c.b, timeout, params);
@@ -792,6 +793,8 @@ void sim_set_param(const char* name, float value) {
     } else if (k == "ramseteFfKs")        { gRamsete.ffGains.ksStraight = value;
     } else if (k == "ramseteFfKp")        { gRamsete.ffGains.kP = value;
     } else if (k == "ramseteFfKi")        { gRamsete.ffGains.kI = value;
+    } else if (k == "mtpBearingHold")  { gMoveToPoint.bearingHoldDist = value;
+    } else if (k == "mtpTolerance")    { gMoveToPoint.targetTolerance = value;
     } else if (k == "mclDistSyncProp") {
         riku::chassis.mcl().setDistSyncProp(value);
     } else if (k == "seed") {
