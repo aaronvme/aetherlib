@@ -102,6 +102,12 @@ public:
         // right one and the cloud migrates to a false mode. Together these bottom
         // out near 1e-3, matching the penalty the plain Gaussian used to apply,
         // while keeping a slope out to ~5 sigma where the old model had a cliff.
+        // Beam sigma. Close readings carry roughly fixed noise, far ones scale
+        // with the reading. Measure both with Characterizer::measureRangeNoise()
+        // rather than trusting these: they came off one set of sensors.
+        float rangeSigmaCloseIn = 0.787f;   // used at or below 200 mm
+        float rangeSigmaProp = 0.05f;       // fraction of the reading beyond that
+
         float hitWeight = 1.0f;          // weight on the Gaussian
         float shortWeight = 0.50f;       // weight on the unexpected-obstacle tail
         float shortDecaySigmas = 1.2f;   // decay of that tail, in sigmas

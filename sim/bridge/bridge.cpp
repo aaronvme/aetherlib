@@ -760,7 +760,9 @@ void sim_set_param(const char* name, float value) {
         riku::chassis.rcl().setConfig(c);
     } else if (k.rfind("mcl", 0) == 0) {
         auto c = riku::chassis.mcl().config();
-        if      (k == "mclShortWeight")   c.shortWeight = value;
+        if      (k == "mclRangeSigClose") c.rangeSigmaCloseIn = value;
+        else if (k == "mclRangeSigProp")  c.rangeSigmaProp = value;
+        else if (k == "mclShortWeight")   c.shortWeight = value;
         else if (k == "mclShortDecay")    c.shortDecaySigmas = value;
         else if (k == "mclRandWeight")    c.randWeight = value;
         else if (k == "mclMaxRandomFrac") c.maxRandomFrac = value;

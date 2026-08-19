@@ -495,10 +495,9 @@ void MclTracking::updateWeights() {
         }
         float angleMultiplier = 1.0f + angleOffset * (2.0f / PI * 1.2f);
 
-        // Base sigma: close readings have fixed noise, far readings have proportional noise
         float sigma = (mSensorReadingsMm[i] <= 200)
-            ? 0.787f   // ~20mm for close readings
-            : mSensorReadingsInch[i] * 0.05f;  // 5% of reading for far readings
+            ? mConfig.rangeSigmaCloseIn
+            : mSensorReadingsInch[i] * mConfig.rangeSigmaProp;
 
         // Apply angle-dependent scaling (sensors are less accurate at glancing angles)
         sigma *= angleMultiplier;
