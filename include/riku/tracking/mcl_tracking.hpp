@@ -40,6 +40,11 @@ public:
         int particleCount = 1024;
         int resampleThreshold = 512;      // N_eff below this triggers resample
         float maxSensorRange = 100.0f;     // inches
+        // Do not lower this to tighten the estimate. It is what lets the cloud
+        // explore, and it is the difference between recovering from a kidnap and
+        // not: at 1.5 recovery lands 3 runs in 4, and at 1.0, 0.6 and 0.3 it
+        // never recovers at all, while every smoothness metric improves. The
+        // tempting direction is the broken one.
         float distResampleVariance = 1.5f; // inches, jitter added during resample
         float thetaResampleVariance = 0.01f;  // radians
         float maxThetaDeviation = 0.08f;   // radians, clamp particle theta vs IMU
@@ -62,7 +67,11 @@ public:
         float horizDependentVarianceProp = 0.03f;  // multiplied by |dVert|
         float horizConstantNoise = 0.03f;          // inches/update baseline
 
-        float distSyncProp = 0.10f;        // lerp factor for syncing to chassis
+        // Trades kidnap latency for smoothness, and only applies when the EKF is
+        // off -- with it on, it owns the writeback and this is inert. 0.06 is
+        // 1.75x smoother than 0.10 for 0.3 s more recovery; 0.03 is 3.1x for
+        // 1.1 s. Raise it back toward 0.10 if recovery speed matters more.
+        float distSyncProp = 0.06f;        // lerp factor for syncing to chassis
         float thetaSyncProp = 0.001f;
         float updatePeriodMs = 25.0f;      // background task interval
         int confidenceThreshold = 10;      // min sensor confidence
