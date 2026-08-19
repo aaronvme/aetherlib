@@ -108,6 +108,11 @@ public:
 
         // --- output ---------------------------------------------------------
         bool  autoSync{true};             // write the fused pose into odometry
+        // Fraction of the correction applied per update. A hard write steps the
+        // pose every cycle and every controller downstream differentiates it;
+        // the filter's own state stays exact either way. Relocation bypasses it.
+        float syncProp{0.12f};
+        float thetaSyncProp{0.20f};
         float updatePeriodMs{10.0f};
     };
 
@@ -247,6 +252,7 @@ private:
     int mBeamsUsed{0};
     int mMclRejectStreak{0};
     int mRelocateCount{0};
+    bool mSnapNextSync{false};   // relocation: land the whole correction at once
 
     // Guards mState/mP: the background task writes them while getEstimate()
     // and uncertainty() are called from motion code on another task.

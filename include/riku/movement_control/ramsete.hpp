@@ -40,6 +40,8 @@ struct RAMSETEParams {
     // Floor on the profiled reference speed, motor units. Must stay above 0 or
     // the motion cannot start; binds within ~minSpeed²/(2·maxAccel) of the start.
     float minSpeed{12.0f};
+    // Must exceed the localization error or the motion never exits: under MCL,
+    // 1 in against a 1.5 in estimate error timed out 3/3, and 3 in passed.
     float targetTolerance{1.0f};       // inches
     // Curved paths finish 5-12 deg off the final tangent and the law has no
     // authority left to fix it (every term scales with v_d, which the profile
