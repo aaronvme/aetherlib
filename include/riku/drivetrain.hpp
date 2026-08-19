@@ -38,6 +38,11 @@ public:
     float leftVelocityInPerSec() const;
     float rightVelocityInPerSec() const;
 
+    /// Per-side wheel travel (inches), signed. Characterisation needs the sides
+    /// apart: their difference over a known rotation is the track width.
+    float leftPositionIn() const;
+    float rightPositionIn() const;
+
     /// Average motor position (degrees). Ignores PROS_ERR from dead motors.
     float averagePositionDeg() const;
 
@@ -48,6 +53,7 @@ public:
 private:
     float groupVelocityInPerSec(const pros::MotorGroup* a,
                                 const pros::MotorGroup* b) const;
+    float groupPositionDeg(const pros::MotorGroup* g) const;
 
     mutable float mExtGearRatio{0.0f};   // 0 = unresolved
 };

@@ -106,6 +106,28 @@ float Drivetrain::averagePositionDeg() const {
     return (count > 0) ? static_cast<float>(sum / count) : 0.0f;
 }
 
+float Drivetrain::groupPositionDeg(const pros::MotorGroup* g) const {
+    if (g == nullptr) return 0.0f;
+    double sum = 0.0;
+    int count = 0;
+    for (double pos : g->get_position_all()) {
+        if (!std::isfinite(pos) || std::fabs(pos) >= 2147483647.0) continue;
+        sum += pos;
+        count++;
+    }
+    return (count > 0) ? static_cast<float>(sum / count) : 0.0f;
+}
+
+float Drivetrain::leftPositionIn() const {
+    return groupPositionDeg(leftMotors) / 360.0f * externalGearRatio() *
+           3.14159265358979f * wheelDiameter;
+}
+
+float Drivetrain::rightPositionIn() const {
+    return groupPositionDeg(rightMotors) / 360.0f * externalGearRatio() *
+           3.14159265358979f * wheelDiameter;
+}
+
 float Drivetrain::externalGearRatio() const {
     if (mExtGearRatio > 0.0f) return mExtGearRatio;   // cached
 
