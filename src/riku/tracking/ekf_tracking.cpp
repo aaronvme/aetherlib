@@ -494,6 +494,7 @@ void EkfTracking::updateMcl() {
             symmetrize3(mP);
             mMclRejectStreak = 0;
             mRelocateCount++;
+            mSnapNextSync = true;
         }
         return;
     }
@@ -554,7 +555,20 @@ Pose EkfTracking::update() {
     // Written outside the lock: OdomTracking takes its own mutex, and holding
     // both in one order here while getPose() callers take them in the other is
     // how a deadlock gets built.
-    if (mConfig.autoSync) mOdom.setPose(fused);
+    if (mConfig.autoSync) {
+        const Pose odomPose = mOdom.getPose();
+        if (mSnapNextSync) {
+            mOdom.setPose(fused);
+            mSnapNextSync = false;
+        } else {
+            const float k = clamp(mConfig.syncProp, 0.0f, 1.0f);
+            const float kt = clamp(mConfig.thetaSyncProp, 0.0f, 1.0f);
+            const float dTheta = angleDiffRad(odomPose.theta, fused.theta);
+            mOdom.setPose({odomPose.x + k * (fused.x - odomPose.x),
+                           odomPose.y + k * (fused.y - odomPose.y),
+                           wrapRad(odomPose.theta + kt * dTheta)});
+        }
+    }
     return fused;
 }
 

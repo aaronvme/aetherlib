@@ -739,6 +739,8 @@ void sim_set_param(const char* name, float value) {
         else if (k == "ekfMclGate")       c.mclGateChi2 = value;
         else if (k == "ekfUseRange")      c.useRangeUpdates = (value != 0.0f);
         else if (k == "ekfResetCycles")   c.mclResetCycles = static_cast<int>(value);
+        else if (k == "ekfSyncProp")      c.syncProp = value;
+        else if (k == "ekfThetaSyncProp") c.thetaSyncProp = value;
         riku::chassis.ekf().setConfig(c);
     } else if (k == "lateralDFilt" || k == "angularDFilt" ||
                k == "lateralWindup" || k == "angularWindup" || k == "settleTimeMs") {
@@ -815,6 +817,8 @@ float sim_get_param(const char* name) {
     if      (k == "responseTauMs")     return p.responseTauMs;
     else if (k == "leftScale")         return p.leftScale;
     else if (k == "rightScale")        return p.rightScale;
+    else if (k == "ekfSyncProp")       return riku::chassis.ekf().config().syncProp;
+    else if (k == "ekfThetaSyncProp")  return riku::chassis.ekf().config().thetaSyncProp;
     else if (k == "encoderSlip")       return p.encoderSlip;
     else if (k == "imuUnderReport")    return p.imuUnderReport;
     else if (k == "imuDriftDegPerSec") return p.imuDriftDegPerSec;
