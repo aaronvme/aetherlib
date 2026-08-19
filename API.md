@@ -1,7 +1,7 @@
 # riku API reference
 
-Everything public, by module. `#include "riku/api.hpp"` pulls in all of it;
-`#include "gamespecific/gamespecific_api.hpp"` adds the robot-specific layer.
+Use `#include "riku/api.hpp"`, `#include "gamespecific/gamespecific_api.hpp"` to include riku library.
+
 
 - [Conventions](#conventions)
 - [Chassis](#chassis) — the main API
@@ -9,9 +9,11 @@ Everything public, by module. `#include "riku/api.hpp"` pulls in all of it;
 - [Pose and math](#pose-and-math)
 - [PID and exit conditions](#pid-and-exit-conditions)
 - [Drivetrain](#drivetrain)
-- [Tracking](#tracking) — odometry, RCL, MCL
+- [Tracking](#tracking) — odometry, RCL, MCL, EKF
 - [Auton selector](#auton-selector)
 - [PID auto-tuner](#pid-auto-tuner)
+- [Characterisation](#characterisation)
+- [Simulator and sweeps](#simulator-and-sweeps)
 - [Logging](#logging)
 - [Jam detection](#jam-detection)
 - [Controller warnings](#controller-warnings)
@@ -21,12 +23,12 @@ Everything public, by module. `#include "riku/api.hpp"` pulls in all of it;
 - [Velocity profiles](#velocity-profiles)
 - [FastTrig](#fasttrig)
 - [Game-specific layer](#game-specific-layer)
+- [Numbers that bite](#numbers-that-bite)
 
 ---
 
 ## Conventions
 
-Getting these wrong is the most common source of confusion, so they're up front.
 
 **Two angle conventions coexist.** Every `Chassis` method and every `*Params`
 tolerance takes **VEX degrees** — 0 = forward, clockwise positive, `[0, 360)`.
@@ -44,7 +46,7 @@ in the units they were fitted in. `Drivetrain::setVoltage()` takes **-127..127**
 
 ## Chassis
 
-`riku/chassis.hpp` — composes tracking, motion and driver control.
+`riku/chassis.hpp`
 
 ```cpp
 Chassis(Drivetrain& drivetrain, const OdomSensors& sensors,
@@ -71,7 +73,7 @@ void curvature(float throttle, float steer);
 
 ### Autonomous movement
 
-Blocking unless `async = true`. All headings in VEX degrees.
+Blocking unless `async = true`, VEX degrees.
 
 ```cpp
 void moveDistance(float target, float timeout = 0,
@@ -128,8 +130,7 @@ void setDistanceSensors(const std::array<pros::Distance*, MAX_DISTANCE_SENSORS>&
 
 ### Dry run
 
-Movement commands record a path without driving motors — used for selector path
-preview.
+Used for selector path preview.
 
 ```cpp
 void setDryRun(bool enabled);
@@ -154,7 +155,7 @@ struct ChassisSample {
 };
 ```
 
-Set it before starting a motion — the motion task reads it each tick. Empty by
+Set it before starting a motion, motion task reads each tick. Empty by
 default.
 
 ### ChassisConfig
@@ -584,9 +585,11 @@ void setDistSyncProp(float);
 | `trackingWheelVariance` | `0.08` | dead wheels |
 | `imeVariance` | `0.12` | motor encoders — more slip |
 | `imuVariance` | `0.005` | |
+| `rangeSigmaCloseIn` | `0.787` | beam sigma at or below 200 mm |
+| `rangeSigmaProp` | `0.05` | fraction of the reading beyond that |
 | `horizDependentVarianceProp` | `0.03` | × \|dVert\|, lateral slip |
 | `horizConstantNoise` | `0.03` | inches/update baseline |
-| `distSyncProp` / `thetaSyncProp` | `0.10` / `0.001` | Lerp toward chassis |
+| `distSyncProp` / `thetaSyncProp` | `0.06` / `0.001` | Lerp toward chassis; inert when the EKF is on |
 | `updatePeriodMs` | `25.0` | |
 | `confidenceThreshold` | `10` | |
 | `minSensorRange` | `1.0` | mm; raise for recessed sensors |
@@ -595,6 +598,78 @@ void setDistSyncProp(float);
 Season-specific field targets are `static constexpr` arrays inside
 `mcl_tracking.hpp` (`kFieldTargets`, `kFieldCircles`, `kDisablingLines`) and are
 currently empty — fill them in per game. `kFieldWalls` never changes.
+
+### EkfTracking
+
+`riku/tracking/ekf_tracking.hpp` — EKF over SE(2). State is `[x, y, theta]` with
+a full 3x3 covariance; odometry predicts, and three families correct: a distance
+reading against a known wall, IMU heading, and MCL position.
+
+Unimodal, so it cannot represent "in one of two places" and cannot recover from a
+kidnap alone. MCL can, and is wired in as a measurement to supply exactly that.
+Run them together.
+
+```cpp
+EkfTracking(OdomTracking&, std::array<pros::Distance*, SENSOR_COUNT>,
+            const Pose& startPose, const Config&);
+
+void startTracking();
+void stopTracking();
+Pose update();                  // one full predict-then-correct cycle
+Pose getEstimate() const;
+Uncertainty uncertainty() const;   // sigmaX, sigmaY, sigmaTheta
+void setPose(const Pose&);
+void setPose(const Pose&, float posSigma, float thetaSigma);
+void attachMcl(MclTracking*);
+int  beamsUsed() const;
+int  mclRejectStreak() const;
+int  relocateCount() const;
+const std::array<BeamState, SENSOR_COUNT>& beamStates() const;
+```
+
+`BeamState` per beam: `Absent`, `NoReturn`, `Deadzone`, `Grazing`, `Rejected`,
+`Used`.
+
+| `Config` field | Default | |
+|---|---|---|
+| `vertNoiseProp` | `0.045` | sigma per inch of along-track travel |
+| `horizNoiseProp` | `0.045` | per inch of cross-track |
+| `slipNoiseProp` | `0.035` | lateral sigma per inch driven |
+| `slipNoiseFloor` | `0.010` | lateral sigma per update |
+| `vertBiasProp` | `0.06` | systematic along-track scale error |
+| `slipBiasProp` | `0.05` | systematic cross-track error |
+| `biasDecorrIn` | `40.0` | inches over which that bias renews |
+| `thetaNoiseProp` | `0.020` | sigma per radian turned |
+| `thetaNoisePerInch` | `0.0015` | heading sigma per inch driven |
+| `posNoiseFloor` | `0.015` | inches per update |
+| `thetaNoiseFloor` | `0.0004` | radians per update |
+| `useRangeUpdates` | `true` | |
+| `rangeSigmaBase` | `0.60` | inches, fixed part |
+| `rangeSigmaProp` | `0.030` | fraction of the reading |
+| `rangeGateChi2` | `9.0` | 1 dof, 3 sigma |
+| `maxIncidenceRad` | `1.15` | past 66 deg off normal a ToF return is junk |
+| `maxRangeIn` | `100.0` | |
+| `obstacleConeFrac` | `0.22` | tan(12.5 deg), the V5 half-cone |
+| `obstacleRangeTol` | `6.0` | inches |
+| `obstacleSigmaPad` | `2.0` | extra tolerance, in position sigmas |
+| `useImuHeading` | `true` | |
+| `imuSigmaRad` | `0.006` | |
+| `useMclUpdates` | `true` | |
+| `mclSigmaScale` | `1.6` | the cloud understates its own error |
+| `mclSigmaFloor` | `1.2` | inches |
+| `mclGateChi2` | `11.8` | 2 dof, 3 sigma |
+| `mclResetCycles` | `10` | consecutive gate failures before relocating |
+| `mclMinNeffFrac` | `0.20` | cloud health required to be believed |
+| `autoSync` | `true` | write the fused pose into odometry |
+| `syncProp` | `0.12` | fraction of the correction applied per update |
+| `thetaSyncProp` | `0.20` | |
+| `updatePeriodMs` | `10.0` | |
+
+`syncProp` below 1 is what keeps the pose continuous. A hard write steps the
+pose every cycle and every motion controller downstream differentiates it; the
+filter's own state is exact either way. A relocation bypasses it and lands in
+one write. Measure the noise it is smoothing with
+`Characterizer::localizationNoise()`.
 
 ---
 
@@ -684,6 +759,205 @@ struct StepMetrics {
     bool  valid;      // false for empty, <4 samples, mismatched lengths, step <= 0
 };
 ```
+
+---
+
+## Characterisation
+
+`riku/util/characterize.hpp` — measures constants of this robot from quantities
+it can observe itself. Run before `PidAutoTuner`; a feedforward that matches the
+drivetrain leaves the PID less to do.
+
+```cpp
+struct CharacterizeConfig {
+    float rampVoltsPerSec{0.6f};   // quasistatic ramp, kV/kS
+    float maxVolts{9.0f};
+    float stepVolts{7.0f};         // separate step, kA
+    float stepMs{700.0f};
+    float sampleMs{10.0f};
+    float minSpeedInPerSec{3.0f};  // below this the fit reads stiction as slope
+    int   spinRotations{6};
+    float parkSeconds{6.0f};
+    std::function<void(const char* stage, const char* detail)> onProgress;
+};
+
+struct FeedforwardFit {
+    float kV, kS, kA;   // volts per m/s, volts, volts per m/s^2
+    float r2;           // under 0.9 is unusable
+    int   samples;
+    bool  valid;
+};
+
+struct NoiseFit {
+    float sigmaIn, sigmaThetaDeg, peakIn;
+    int   samples;
+    float suggestTolerance;    // targetTolerance
+    float suggestBearingHold;  // MoveToPointParams::bearingHoldDist
+};
+
+struct OdomDriftFit {
+    float alongPerIn, lateralPerIn;   // residual error per inch driven
+    float thetaPerRad;
+    float distanceIn;
+    int   reps;
+    bool  valid;
+};
+
+struct RangeNoiseFit {
+    float sigmaIn[MAX_DISTANCE_SENSORS];
+    float meanIn[MAX_DISTANCE_SENSORS];
+    int   samples[MAX_DISTANCE_SENSORS];
+    float worstSigmaIn;
+};
+
+class Characterizer {
+public:
+    Characterizer(Chassis&, Drivetrain&, const CharacterizeConfig& = {});
+    FeedforwardFit feedforward(bool spinInPlace = false);
+    float trackWidth();
+    float measureScale(float trueDistanceIn, float commandDistanceIn = 24.0f);
+    NoiseFit localizationNoise();
+    OdomDriftFit measureOdomDrift(float legIn = 36.0f, int reps = 3);
+    RangeNoiseFit measureRangeNoise(
+        const std::array<pros::Distance*, MAX_DISTANCE_SENSORS>& sensors);
+};
+```
+
+The robot drives itself. `feedforward(false)` shuttles back and forth over
+`maxTravelIn` (60 in by default) rather than driving one way: reaching
+`maxVolts` at `rampVoltsPerSec` takes about 36 ft of travel, and a field is 12.
+`measureScale()` and `measureOdomDrift()` need a clear lane of 24 and 36 in
+respectively. The rest spin on the spot.
+
+```cpp
+riku::tuning::CharacterizeConfig cfg;
+cfg.onProgress = [](const char* stage, const char* detail) {
+    printf("[%s] %s\n", stage, detail);
+};
+riku::tuning::Characterizer ch(chassis, drivetrain, cfg);
+
+float width = ch.trackWidth();          // spins ~6 turns
+auto  ff    = ch.feedforward(false);    // straight-line kV/kS/kA
+auto  turn  = ch.feedforward(true);     // turning friction
+auto  noise = ch.localizationNoise();   // parked, with your race config
+
+drivetrain.trackWidth = width;
+
+riku::RAMSETEParams p;
+p.useVelocityController = true;
+p.ffGains.kV            = ff.kV;
+p.ffGains.ksStraight    = ff.kS;
+p.ffGains.kaStraight    = ff.kA;
+p.ffGains.ksTurn        = turn.kS;
+p.ffGains.kP            = 12.0f;    // then sweep in the sim
+p.ffGains.integralClamp = 2.0f;
+p.targetTolerance       = noise.suggestTolerance;
+```
+
+`measureScale()` needs a tape measure; it returns the factor to multiply
+`Drivetrain::wheelDiameter` by.
+
+```cpp
+drivetrain.wheelDiameter *= ch.measureScale(24.5f, 24.0f);  // true, commanded
+```
+
+`trackWidth()` divides the wheels' differential travel by the heading the IMU
+reports turning through, so it is independent of wheel diameter.
+`localizationNoise()` measures scatter while parked, which is noise by
+definition; accuracy is a different question and needs a known field position.
+
+### Filter noise
+
+Most of what looks like MCL tuning is characterisation. These two measure the
+physical quantities the filters model, so the numbers go straight into config
+rather than being searched for.
+
+```cpp
+auto drift = ch.measureOdomDrift(36.0f, 3);            // out and back, 3 reps
+auto beams = ch.measureRangeNoise(config.distanceSensors);  // parked at a wall
+```
+
+`measureOdomDrift()` drives out and back, so the physical start and end are the
+same point and whatever odometry reports instead is its own error, split along
+and across the starting heading. Run it with localization off.
+
+```cpp
+config.mclConfig.imeVariance                = drift.alongPerIn;
+config.mclConfig.horizConstantNoise         = drift.lateralPerIn;
+config.mclConfig.rangeSigmaCloseIn          = beams.worstSigmaIn;
+config.ekfConfig.vertNoiseProp              = drift.alongPerIn;
+config.ekfConfig.slipNoiseProp              = drift.lateralPerIn;
+config.ekfConfig.rangeSigmaBase             = beams.worstSigmaIn;
+```
+
+What is left over genuinely cannot be measured on a robot, because scoring it
+needs a known true pose: `distResampleVariance`, `distSyncProp`, the gate
+thresholds. Those are what `sim/test/autotune.mjs` searches.
+
+---
+
+## Simulator and sweeps
+
+```sh
+export EMSDK="$HOME/emsdk"; source "$EMSDK/emsdk_env.sh"
+./sim/build.sh
+python -m http.server -d sim/web 8000    # localhost:8000
+```
+
+```sh
+bash sim/test/run.sh          # smoke: tracking, sensors, determinism
+node sim/test/tune.mjs        # sweeps below
+node sim/test/mpc.mjs         # experimental branch only
+```
+
+Gains that need a known true pose cannot be scored on hardware, so they are
+swept here.
+
+```sh
+node sim/test/tune.mjs             # all sections
+node sim/test/tune.mjs ramsete     # b / zeta
+node sim/test/tune.mjs mcl         # filter noise vs kidnap recovery
+node sim/test/tune.mjs tolerance   # settle tolerance vs localization error
+```
+
+### Searching, not sweeping
+
+`tune.mjs` prints tables for you to read. `autotune.mjs` searches.
+
+```sh
+node sim/test/autotune.mjs                        # 2 passes, 3 seeds
+node sim/test/autotune.mjs --passes 3 --seeds 4
+```
+
+Coordinate descent over ten MCL/EKF parameters, minimising a weighted sum of
+estimate error and jerk. Kidnap recovery is a hard constraint rather than a cost
+term: every parameter that tightens the estimate also narrows the cloud's
+search, so a plain weighted sum walks to a configuration that tracks well and
+can never relocate. Candidates that recover less often than the baseline are
+rejected outright.
+
+It searches on one set of seeds and revalidates the winner on a disjoint set,
+then prints `[HOLDS]` or `[DOES NOT HOLD]`. A result that only appears on the
+seeds it was chosen against is the search fitting noise, and the paste-ready
+config is withheld in that case.
+
+Each row prints cross-track, peak, jerk, time, endpoint error and kidnap
+recovery. Read all of them; two knobs improve the tracking columns while
+breaking something else, and the tool flags where.
+
+First output is a control: the same config twice, which must match.
+`sim_reset` does not restore filter or motion config, so every trial rewrites
+every key. If the control fails, ignore everything below it.
+
+`sim/web/riku_sim.mjs` and `.wasm` are untracked build output and survive a
+branch switch. Rebuild after every checkout or you are running the previous
+branch's binary.
+
+No traction, torque, current limit or voltage sag. Exact differential-drive
+kinematics, so the robot cannot slide and `maxLateralAccel` is a profile-speed
+knob, not a grip limit. Odometry error comes from sensor staleness, not slip.
+`encoderSlip`, `imuDriftDegPerSec` and `imuNoiseDeg` default to zero — turn them
+on or dead reckoning is ground truth and localization comparisons mean nothing.
 
 ---
 
@@ -1073,3 +1347,40 @@ Gravity feedforward is available but **disabled** — `kG` is `0.0` in
 `lift.cpp`, alongside `MOTOR_DEG_PER_ARM_DEG` and `HORIZONTAL_MOTOR_DEG`. Set all
 three to enable it; `logLift()` logs the PID and gravity terms separately so
 you can see what `kG` is contributing.
+
+---
+
+## Numbers that bite
+
+`targetTolerance` must exceed localization error, or settle never fires and the
+motion times out. Under MCL: 1 in against 1.5 in error failed 3/3, 3 in passed.
+Pick it with `localizationNoise()`.
+
+`bearingHoldDist` stays small. `atan2` to a target at shrinking range is mostly
+noise, which a tuned angular loop chases at 591 deg/s. Holding the last good
+bearing fixes that, but too large a radius holds a stale one: 3 failures in 15
+at 1.5 in, 12 in 15 at 6 in.
+
+`distResampleVariance` is not a smoothness knob. Lowering it improves every
+tracking number and removes kidnap recovery entirely — 3 recoveries in 4 at the
+default 1.5, 0 in 4 at 1.0 and below.
+
+`ffGains.kP` corrects actuator lag, so it depends on your motors. A lag sweep
+put 12 as the only value stable from 20 to 200 ms. Below 4 the path times out.
+
+`integralClamp` defaults to 0, meaning disabled. Set it whenever you set `kI`,
+or a drivetrain held short of its target winds up without bound.
+
+Angular `kP` near 100 is normal here. It does not cause endpoint spin; bearing
+geometry did.
+
+Run MCL and the EKF together, not MCL alone. Hairpin, realistic odometry error:
+
+| mode | estimate error | pose jerk | kidnap recovery |
+|---|---|---|---|
+| dead reckoning | 4.38 in | 0.0069 | never |
+| MCL only | 5.84 in | 0.4602 | 2.4 s |
+| MCL + EKF | 2.17 in | 0.0109 | 1.7 s |
+
+Dead reckoning is smoother than either filter alone and never recovers from
+displacement.
