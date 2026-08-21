@@ -12,11 +12,12 @@ namespace riku::tuning {
 // needs a known field position, except measureScale(). Run before PidAutoTuner.
 
 struct CharacterizeConfig {
-    // Slow enough that acceleration is negligible.
-    float rampVoltsPerSec{0.6f};
+    // The fit carries an acceleration term, so the ramp need not be quasistatic.
+    // That assumption used to cost 36 ft of travel and a separate step for kA.
+    float rampVoltsPerSec{2.0f};
     float maxVolts{9.0f};
 
-    float stepVolts{7.0f};   // separate faster step, for kA
+    float stepVolts{7.0f};   // unused now; kA comes out of the ramp fit
     float stepMs{700.0f};
 
     float sampleMs{10.0f};
@@ -24,11 +25,9 @@ struct CharacterizeConfig {
     // Below this the fit reads stiction as slope.
     float minSpeedInPerSec{3.0f};
 
-    // The straight ramp needs roughly 36 ft of travel to reach maxVolts at
-    // rampVoltsPerSec, and a VEX field is 12. It shuttles instead: on passing
-    // this it reverses and carries on, which the fit does not mind because the
-    // commanded voltage reverses with it.
-    float maxTravelIn{60.0f};
+    // The ramp shuttles, reversing past this. Samples around a reversal are
+    // discarded, so a shorter span just wastes more of them.
+    float maxTravelIn{30.0f};
 
     int spinRotations{6};
     float parkSeconds{6.0f};
@@ -36,7 +35,7 @@ struct CharacterizeConfig {
     std::function<void(const char* stage, const char* detail)> onProgress;
 };
 
-// Units FeedforwardGains expects. r2 under about 0.9 means the ramp outran the
+// Units FeedforwardGains expects. r2 under ~0.9 means the ramp outran the
 // drivetrain, the surface changed, or a motor is not pulling.
 struct FeedforwardFit {
     float kV{0.0f};
@@ -47,8 +46,8 @@ struct FeedforwardFit {
     bool valid{false};
 };
 
-// Odometry error per inch, from an out-and-back: the robot ends where it began,
-// so whatever odometry reports instead is its own error.
+// Odometry error per inch: the robot ends where it began, so whatever odometry
+// reports instead is its own.
 struct OdomDriftFit {
     float alongPerIn{0.0f};    // residual along-track error per inch driven
     float lateralPerIn{0.0f};  // residual cross-track error per inch driven
@@ -86,8 +85,8 @@ public:
     Characterizer(Chassis& chassis, Drivetrain& drivetrain,
                   const CharacterizeConfig& config = {});
 
-    /// Ramp for kV/kS, then a step for kA. spinInPlace fits turning friction
-    /// instead of straight-line, and needs no room.
+    /// One ramp, fitting kS, kV and kA together. spinInPlace fits turning
+    /// friction and inertia instead of straight-line, and needs no room.
     FeedforwardFit feedforward(bool spinInPlace = false);
 
     /// Differential wheel travel over the heading the IMU turned through.
@@ -98,12 +97,15 @@ public:
     /// Drivetrain::wheelDiameter by.
     float measureScale(float trueDistanceIn, float commandDistanceIn = 24.0f);
 
+    /// Volts at which the robot first moves, which is kS. Costs a couple of
+    /// inches, for when there is no room to ramp.
+    float breakawayVolts(bool spinInPlace = false);
+
     /// Parked scatter of Chassis::getPose(). Run with the localization you race.
     NoiseFit localizationNoise();
 
-    /// Drives out and back `reps` times. Odometry should report returning to
-    /// where it started; whatever it reports instead is its drift. Localization
-    /// off, so this measures odometry alone.
+    /// Out and back `reps` times; whatever odometry reports as displacement is
+    /// its drift. Run with localization off.
     OdomDriftFit measureOdomDrift(float legIn = 36.0f, int reps = 3);
 
     /// Parked square to a wall. Sigma per sensor over parkSeconds.

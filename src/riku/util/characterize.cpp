@@ -17,6 +17,55 @@ struct Sample {
     float speed;   // in/s
 };
 
+// Least squares on volts = kS + kV*speed + kA*accel. Fitting acceleration rather
+// than assuming it away is what lets the ramp be fast, and yields kA for free.
+struct Dyn { float speed, accel, volts; };
+
+bool fitDynamic(const std::vector<Dyn>& s, float& kv, float& ks, float& ka,
+                float& r2) {
+    if (s.size() < 16) return false;
+    // Normal equations for [1, speed, accel].
+    double A[3][4] = {};
+    double sy = 0.0;
+    for (const Dyn& p : s) {
+        const double x[3] = {1.0, p.speed, p.accel};
+        for (int i = 0; i < 3; i++) {
+            for (int j = 0; j < 3; j++) A[i][j] += x[i] * x[j];
+            A[i][3] += x[i] * p.volts;
+        }
+        sy += p.volts;
+    }
+    // Gauss-Jordan with partial pivoting.
+    for (int c = 0; c < 3; c++) {
+        int piv = c;
+        for (int r = c + 1; r < 3; r++) {
+            if (std::fabs(A[r][c]) > std::fabs(A[piv][c])) piv = r;
+        }
+        if (std::fabs(A[piv][c]) < 1e-12) return false;
+        if (piv != c) for (int k = 0; k < 4; k++) std::swap(A[c][k], A[piv][k]);
+        const double d = A[c][c];
+        for (int k = 0; k < 4; k++) A[c][k] /= d;
+        for (int r = 0; r < 3; r++) {
+            if (r == c) continue;
+            const double f = A[r][c];
+            for (int k = 0; k < 4; k++) A[r][k] -= f * A[c][k];
+        }
+    }
+    ks = static_cast<float>(A[0][3]);
+    kv = static_cast<float>(A[1][3]);
+    ka = static_cast<float>(A[2][3]);
+
+    const double mean = sy / static_cast<double>(s.size());
+    double ssRes = 0.0, ssTot = 0.0;
+    for (const Dyn& p : s) {
+        const double pred = ks + kv * p.speed + ka * p.accel;
+        ssRes += (p.volts - pred) * (p.volts - pred);
+        ssTot += (p.volts - mean) * (p.volts - mean);
+    }
+    r2 = ssTot > 0.0 ? static_cast<float>(1.0 - ssRes / ssTot) : 0.0f;
+    return true;
+}
+
 // Least squares on volts = kS + kV * speed.
 bool fitLine(const std::vector<Sample>& s, float& slope, float& intercept,
              float& r2) {
@@ -63,7 +112,7 @@ void Characterizer::drive(float volts, bool spin) {
 
 FeedforwardFit Characterizer::feedforward(bool spinInPlace) {
     FeedforwardFit fit;
-    std::vector<Sample> samples;
+    std::vector<Dyn> samples;
     char msg[96];
 
     report("feedforward", spinInPlace ? "ramping (spin)" : "ramping (straight)");
@@ -74,6 +123,11 @@ FeedforwardFit Characterizer::feedforward(bool spinInPlace) {
     const float degPerIn = 360.0f /
         (mDrivetrain.externalGearRatio() * PI * mDrivetrain.wheelDiameter);
 
+    // Velocity is quantised, so consecutive differences are mostly noise.
+    constexpr int kAccelSpan = 5;
+    std::vector<float> speedHist;
+    int skipAfterReversal = 0;
+
     for (float v = 0.0f; v <= mConfig.maxVolts; v += mConfig.rampVoltsPerSec * dt) {
         drive(v * dir, spinInPlace);
         pros::delay(static_cast<uint32_t>(mConfig.sampleMs));
@@ -83,72 +137,49 @@ FeedforwardFit Characterizer::feedforward(bool spinInPlace) {
         // the fit needs. The chassis speed is 0.
         const float speed = spinInPlace ? 0.5f * (std::fabs(l) + std::fabs(r))
                                         : dir * 0.5f * (l + r);
-        if (speed > mConfig.minSpeedInPerSec) samples.push_back({v, speed});
+        speedHist.push_back(speed);
+
+        if (skipAfterReversal > 0) {
+            --skipAfterReversal;
+        } else if (static_cast<int>(speedHist.size()) > kAccelSpan &&
+                   speed > mConfig.minSpeedInPerSec) {
+            const float prev = speedHist[speedHist.size() - 1 - kAccelSpan];
+            const float accel = (speed - prev) / (dt * kAccelSpan);
+            samples.push_back({speed, accel, v});
+        }
 
         if (!spinInPlace) {
             const float travelIn =
                 std::fabs(mDrivetrain.averagePositionDeg() - legStart) / degPerIn;
             if (travelIn > mConfig.maxTravelIn) {
-                // Stop before turning around, or the reversal is a step the
-                // quasistatic assumption does not survive.
                 mDrivetrain.setVoltage(0.0f, 0.0f);
                 pros::delay(350);
                 dir = -dir;
                 legStart = mDrivetrain.averagePositionDeg();
+                // A step in every quantity being fitted.
+                skipAfterReversal = 2 * kAccelSpan;
+                speedHist.clear();
             }
         }
     }
     drive(0.0f, spinInPlace);
     pros::delay(400);
 
-    float slopePerIn = 0.0f, intercept = 0.0f, r2 = 0.0f;
-    if (!fitLine(samples, slopePerIn, intercept, r2)) {
+    float kvPerIn = 0.0f, ks = 0.0f, kaPerIn = 0.0f, r2 = 0.0f;
+    if (!fitDynamic(samples, kvPerIn, ks, kaPerIn, r2)) {
         report("feedforward", "not enough motion to fit -- raise maxVolts");
         return fit;
     }
-    // Volts per in/s to volts per m/s divides by INCH_TO_METER, not multiplies.
-    fit.kV = slopePerIn / INCH_TO_METER;
-    fit.kS = intercept;
+    // Per in/s to per m/s divides by INCH_TO_METER; same for in/s^2.
+    fit.kV = kvPerIn / INCH_TO_METER;
+    fit.kA = kaPerIn / INCH_TO_METER;
+    fit.kS = ks;
     fit.r2 = r2;
     fit.samples = static_cast<int>(samples.size());
-
-    std::snprintf(msg, sizeof(msg), "kV %.3f  kS %.3f  r2 %.3f  n=%d",
-                  fit.kV, fit.kS, fit.r2, fit.samples);
-    report("feedforward", msg);
-
-    // kA is whatever the step spends beyond friction and speed.
-    report("feedforward", "step for kA");
-    const uint32_t start = pros::millis();
-    float prevSpeed = 0.0f;
-    double accSum = 0.0;
-    int accCount = 0;
-    bool first = true;
-    while (pros::millis() - start < static_cast<uint32_t>(mConfig.stepMs)) {
-        drive(mConfig.stepVolts, spinInPlace);
-        pros::delay(static_cast<uint32_t>(mConfig.sampleMs));
-        const float l = mDrivetrain.leftVelocityInPerSec();
-        const float r = mDrivetrain.rightVelocityInPerSec();
-        const float speed = spinInPlace ? 0.5f * (std::fabs(l) + std::fabs(r))
-                                        : 0.5f * (l + r);
-        if (!first) {
-            const float accel = (speed - prevSpeed) / dt;   // in/s^2
-            if (accel > 1.0f) {
-                const float residual =
-                    mConfig.stepVolts - fit.kS - slopePerIn * speed;
-                accSum += residual / (accel / INCH_TO_METER);
-                accCount++;
-            }
-        }
-        prevSpeed = speed;
-        first = false;
-    }
-    drive(0.0f, spinInPlace);
-    mDrivetrain.setVoltage(0.0f, 0.0f);
-
-    if (accCount > 0) fit.kA = static_cast<float>(accSum / accCount);
     fit.valid = fit.kV > 0.0f && fit.r2 > 0.5f;
 
-    std::snprintf(msg, sizeof(msg), "kA %.4f from %d samples", fit.kA, accCount);
+    std::snprintf(msg, sizeof(msg), "kV %.3f kS %.3f kA %.4f r2 %.3f n=%d",
+                  fit.kV, fit.kS, fit.kA, fit.r2, fit.samples);
     report("feedforward", msg);
     return fit;
 }
@@ -336,6 +367,40 @@ RangeNoiseFit Characterizer::measureRangeNoise(
         report("rangeNoise", msg);
     }
     return fit;
+}
+
+float Characterizer::breakawayVolts(bool spinInPlace) {
+    char msg[96];
+
+    // From rest means from rest: a coasting drivetrain reads as motion at 0 V.
+    report("breakaway", "waiting for rest");
+    mDrivetrain.setVoltage(0.0f, 0.0f);
+    for (int i = 0; i < 300; ++i) {
+        pros::delay(10);
+        if (std::fabs(mDrivetrain.leftVelocityInPerSec()) < 0.5f &&
+            std::fabs(mDrivetrain.rightVelocityInPerSec()) < 0.5f) {
+            break;
+        }
+    }
+
+    report("breakaway", "ramping from rest");
+    const float dt = mConfig.sampleMs / 1000.0f;
+    float volts = 0.0f;
+    for (float v = 0.0f; v <= mConfig.maxVolts; v += mConfig.rampVoltsPerSec * dt) {
+        drive(v, spinInPlace);
+        pros::delay(static_cast<uint32_t>(mConfig.sampleMs));
+        const float l = mDrivetrain.leftVelocityInPerSec();
+        const float r = mDrivetrain.rightVelocityInPerSec();
+        const float speed = spinInPlace ? 0.5f * (std::fabs(l) + std::fabs(r))
+                                        : std::fabs(0.5f * (l + r));
+        // Not minSpeedInPerSec -- stiction is the thing being measured.
+        if (v > 0.0f && speed > 1.0f) { volts = v; break; }
+    }
+    mDrivetrain.setVoltage(0.0f, 0.0f);
+
+    std::snprintf(msg, sizeof(msg), "%.3f V", volts);
+    report("breakaway", msg);
+    return volts;
 }
 
 }  // namespace riku::tuning
