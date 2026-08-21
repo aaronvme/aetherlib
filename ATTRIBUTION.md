@@ -1,9 +1,9 @@
 # Attribution
 
-riku is assembled from three existing VEX V5 codebases. This file records
+chad is assembled from three existing VEX V5 codebases. This file records
 where each part came from and under what terms.
 
-riku as a whole is distributed under **GPL-3.0-or-later** (see `LICENSE`),
+chad as a whole is distributed under **GPL-3.0-or-later** (see `LICENSE`),
 because it incorporates GPL-3.0-or-later code from 1516X. Individual files
 keep the SPDX headers and copyright notices of their origin.
 
@@ -28,7 +28,7 @@ keep the SPDX headers and copyright notices of their origin.
   does not place a license on FBLib itself, so anyone redistributing this
   repository should seek their own.
 - Files ported from FBLib are noted as such in their header comment. The FBLib
-  namespace `FBLIB` is translated to `riku` and paths `FBLib/` to `riku/`;
+  namespace `FBLIB` is translated to `chad` and paths `FBLib/` to `chad/`;
   the code is otherwise line-for-line comparable to upstream.
 
 ### LemLib — https://github.com/LemLib/LemLib
@@ -39,7 +39,7 @@ keep the SPDX headers and copyright notices of their origin.
 - Only available locally as a prebuilt `LemLib.a` plus headers, so this piece is
   ported rather than linked. Ported files carry a LemLib MIT notice.
 
-## Toolchain dependencies (unmodified, not vendored into riku)
+## Toolchain dependencies (unmodified, not vendored into chad)
 
 - **PROS kernel** 4.2.2 — MPL-2.0, Copyright (c) Purdue University ACM SIGBots.
 - **LVGL** (`liblvgl` 9.2.0) — MIT.

@@ -13,9 +13,9 @@
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 const here = dirname(fileURLToPath(import.meta.url));
-const createRikuSim = (await import('file://' + join(here, '..', 'web', 'riku_sim.mjs'))).default;
+const createChadSim = (await import('file://' + join(here, '..', 'web', 'chad_sim.mjs'))).default;
 
-const M = await createRikuSim();
+const M = await createChadSim();
 const c = (n, r, a) => M.cwrap(n, r, a);
 const api = {
   init: c('sim_init', null, []), reset: c('sim_reset', null, ['number','number','number']),

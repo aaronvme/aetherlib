@@ -2,7 +2,7 @@
 
 #include "config.hpp"
 
-namespace riku {
+namespace chad {
 
 void autonExample();
 
@@ -18,4 +18,4 @@ void autonSkills();
 void autonRedLeft();
 void autonBlueLeft();
 
-}  // namespace riku
+}  // namespace chad

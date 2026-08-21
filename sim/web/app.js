@@ -1,11 +1,11 @@
-// riku-sim — browser front end.
+// chad-sim — browser front end.
 //
 // All simulation and every algorithm under test live in the WASM module; this
 // file only drives the clock, renders state, and marshals control input.
-import createRikuSim from './riku_sim.mjs';
+import createChadSim from './chad_sim.mjs';
 import { parseRoute, moveWaypoint, buildPath, DEFAULT_ROUTE } from './route_dsl.js';
 
-const M = await createRikuSim();
+const M = await createChadSim();
 
 // ============================================================================
 // WASM API
@@ -219,7 +219,7 @@ buildParams('params-rate', [
 
 const editor = document.getElementById('editor');
 const routeStatus = document.getElementById('route-status');
-editor.value = localStorage.getItem('riku-sim.route') || DEFAULT_ROUTE;
+editor.value = localStorage.getItem('chad-sim.route') || DEFAULT_ROUTE;
 
 let plan = [];
 let sampledPaths = [];      // spline points, exactly what gets uploaded
@@ -241,7 +241,7 @@ function refreshPlan() {
 }
 
 editor.addEventListener('input', () => {
-  localStorage.setItem('riku-sim.route', editor.value);
+  localStorage.setItem('chad-sim.route', editor.value);
   refreshPlan();
 });
 refreshPlan();
@@ -284,7 +284,7 @@ document.getElementById('btn-run-route').addEventListener('click', () => {
 const savedSel = document.getElementById('saved');
 const routeName = document.getElementById('route-name');
 
-const loadSaved = () => JSON.parse(localStorage.getItem('riku-sim.saved') || '{}');
+const loadSaved = () => JSON.parse(localStorage.getItem('chad-sim.saved') || '{}');
 function refreshSaved() {
   const all = loadSaved();
   savedSel.innerHTML = '<option value="">— saved routes —</option>';
@@ -299,7 +299,7 @@ refreshSaved();
 document.getElementById('btn-save').addEventListener('click', () => {
   const all = loadSaved();
   all[routeName.value || 'untitled'] = editor.value;
-  localStorage.setItem('riku-sim.saved', JSON.stringify(all));
+  localStorage.setItem('chad-sim.saved', JSON.stringify(all));
   refreshSaved();
 });
 
@@ -307,7 +307,7 @@ savedSel.addEventListener('change', () => {
   if (!savedSel.value) return;
   editor.value = loadSaved()[savedSel.value];
   routeName.value = savedSel.value;
-  localStorage.setItem('riku-sim.route', editor.value);
+  localStorage.setItem('chad-sim.route', editor.value);
   refreshPlan();
 });
 
@@ -455,7 +455,7 @@ canvas.addEventListener('pointerdown', e => {
   if (e.shiftKey) {
     const line = `moveTo(x: ${x.toFixed(1)}, y: ${y.toFixed(1)});\n`;
     editor.value = editor.value.replace(/\s*$/, '\n') + line;
-    localStorage.setItem('riku-sim.route', editor.value);
+    localStorage.setItem('chad-sim.route', editor.value);
     refreshPlan();
     return;
   }
@@ -480,7 +480,7 @@ canvas.addEventListener('pointermove', e => {
     const wp = plan[dragWaypoint];
     if (!wp) return;
     editor.value = moveWaypoint(editor.value, wp, x, y);
-    localStorage.setItem('riku-sim.route', editor.value);
+    localStorage.setItem('chad-sim.route', editor.value);
     refreshPlan();          // re-parse so the ranges follow the new text
     return;
   }
@@ -741,7 +741,7 @@ document.getElementById('btn-export').addEventListener('click', () => {
   }
   const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
   const a = document.createElement('a');
-  a.href = url; a.download = 'riku-sim-run.csv'; a.click();
+  a.href = url; a.download = 'chad-sim-run.csv'; a.click();
   URL.revokeObjectURL(url);
 });
 

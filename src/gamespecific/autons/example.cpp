@@ -1,8 +1,8 @@
 #include "gamespecific/autons.hpp"
 
-#include "riku/api.hpp"
+#include "chad/api.hpp"
 
-namespace riku {
+namespace chad {
 
 void autonExample() {
     chassis.setPose({0.0f, 0.0f, 0.0f});
@@ -87,4 +87,4 @@ void autonExample() {
 
 }
 
-}  // namespace riku
+}  // namespace chad

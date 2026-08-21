@@ -3,12 +3,12 @@
 
 #include "gamespecific/lift.hpp"
 #include "gamespecific/config.hpp"
-#include "riku/util/exitcondition.hpp"
-#include "riku/util/logger.hpp"
-#include "riku/util/pid.hpp"
+#include "chad/util/exitcondition.hpp"
+#include "chad/util/logger.hpp"
+#include "chad/util/pid.hpp"
 #include "pros/rtos.hpp"
 
-using namespace riku;
+using namespace chad;
 
 // ── arm gains ────────────────────────────────────────────────
 // tune values =============================================================================

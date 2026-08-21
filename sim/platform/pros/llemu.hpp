@@ -1,4 +1,4 @@
-// riku-sim PROS shim — pros/llemu.hpp
+// chad-sim PROS shim — pros/llemu.hpp
 //
 // Brain-screen text is captured into a ring buffer the browser renders as a
 // fake V5 screen, so lcd::print debugging from library code stays visible.

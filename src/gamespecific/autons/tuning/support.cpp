@@ -6,9 +6,9 @@
 
 #include "liblvgl/lvgl.h"
 #include "pros/screen.hpp"
-#include "riku/api.hpp"
+#include "chad/api.hpp"
 
-namespace riku::autons {
+namespace chad::autons {
 
 Report::Report() {
     lv_obj_t* blank = lv_obj_create(nullptr);
@@ -150,4 +150,4 @@ tuning::Characterizer makeCharacterizer(Report& out) {
     return tuning::Characterizer(chassis, drivetrain, cfg);
 }
 
-}  // namespace riku::autons
+}  // namespace chad::autons

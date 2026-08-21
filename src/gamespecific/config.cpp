@@ -1,6 +1,6 @@
 #include "gamespecific/config.hpp"
 
-namespace riku {
+namespace chad {
 
 pros::Controller master(pros::E_CONTROLLER_MASTER);
 
@@ -199,4 +199,4 @@ AutonSelector selector;
 
 
 
-}  // namespace riku
+}  // namespace chad

@@ -5,9 +5,9 @@
 #include <functional>
 #include <vector>
 
-#include "riku/api.hpp"
+#include "chad/api.hpp"
 
-namespace riku {
+namespace chad {
 
 using namespace autons;
 
@@ -141,4 +141,4 @@ void autonTuneRamsete() {
     out.result("is no config default for b");
 }
 
-}  // namespace riku
+}  // namespace chad

@@ -1,4 +1,4 @@
-// riku-sim shim for the project's main.h.
+// chad-sim shim for the project's main.h.
 //
 // Mirrors include/main.h so gamespecific/ sources compile unchanged, but
 // without the LVGL pull-in. The competition entry points are declared the same

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the whole riku-sim test suite.
+# Run the whole chad-sim test suite.
 #
 #   ./sim/test/run.sh          test against the current build
 #   ./sim/test/run.sh --build  rebuild first
@@ -13,7 +13,7 @@ if [ "${1:-}" = "--build" ]; then
     echo
 fi
 
-if [ ! -f sim/web/riku_sim.mjs ]; then
+if [ ! -f sim/web/chad_sim.mjs ]; then
     echo "no build found -- run ./sim/build.sh first" >&2
     exit 1
 fi

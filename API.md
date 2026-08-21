@@ -1,6 +1,6 @@
-# riku API reference
+# chad API reference
 
-Use `#include "riku/api.hpp"`, `#include "gamespecific/gamespecific_api.hpp"` to include riku library.
+Use `#include "chad/api.hpp"`, `#include "gamespecific/gamespecific_api.hpp"` to include chad library.
 
 
 - [Conventions](#conventions)
@@ -46,7 +46,7 @@ in the units they were fitted in. `Drivetrain::setVoltage()` takes **-127..127**
 
 ## Chassis
 
-`riku/chassis.hpp`
+`chad/chassis.hpp`
 
 ```cpp
 Chassis(Drivetrain& drivetrain, const OdomSensors& sensors,
@@ -274,7 +274,7 @@ int lookaheadIndex(const std::vector<Pose>& path, const Pose&, float lookaheadDi
 
 ## Pose and math
 
-`riku/util/util.hpp` — header-only.
+`chad/util/util.hpp` — header-only.
 
 ```cpp
 struct Pose {
@@ -601,7 +601,7 @@ currently empty — fill them in per game. `kFieldWalls` never changes.
 
 ### EkfTracking
 
-`riku/tracking/ekf_tracking.hpp` — EKF over SE(2). State is `[x, y, theta]` with
+`chad/tracking/ekf_tracking.hpp` — EKF over SE(2). State is `[x, y, theta]` with
 a full 3x3 covariance; odometry predicts, and three families correct: a distance
 reading against a known wall, IMU heading, and MCL position.
 
@@ -695,7 +695,7 @@ class AutonSelector {
 
 ## PID auto-tuner
 
-`riku/util/autotune.hpp`. Drives repeated step responses and fits gains from the
+`chad/util/autotune.hpp`. Drives repeated step responses and fits gains from the
 traces. **The robot moves on its own — give it clear space.**
 
 ```cpp
@@ -738,7 +738,7 @@ Budget roughly 3.5 minutes per axis at defaults.
 
 ### Step-response analysis
 
-`riku/util/step_response.hpp` — pure, no PROS, unit-testable on the host.
+`chad/util/step_response.hpp` — pure, no PROS, unit-testable on the host.
 
 ```cpp
 StepMetrics analyseStep(const std::vector<float>& t,
@@ -764,7 +764,7 @@ struct StepMetrics {
 
 ## Characterisation
 
-`riku/util/characterize.hpp` — measures constants of this robot from quantities
+`chad/util/characterize.hpp` — measures constants of this robot from quantities
 it can observe itself. Run before `PidAutoTuner`; a feedforward that matches the
 drivetrain leaves the PID less to do.
 
@@ -830,11 +830,11 @@ The robot drives itself. `feedforward(false)` shuttles back and forth over
 respectively. The rest spin on the spot.
 
 ```cpp
-riku::tuning::CharacterizeConfig cfg;
+chad::tuning::CharacterizeConfig cfg;
 cfg.onProgress = [](const char* stage, const char* detail) {
     printf("[%s] %s\n", stage, detail);
 };
-riku::tuning::Characterizer ch(chassis, drivetrain, cfg);
+chad::tuning::Characterizer ch(chassis, drivetrain, cfg);
 
 float width = ch.trackWidth();          // spins ~6 turns
 auto  ff    = ch.feedforward(false);    // straight-line kV/kS/kA
@@ -843,7 +843,7 @@ auto  noise = ch.localizationNoise();   // parked, with your race config
 
 drivetrain.trackWidth = width;
 
-riku::RAMSETEParams p;
+chad::RAMSETEParams p;
 p.useVelocityController = true;
 p.ffGains.kV            = ff.kV;
 p.ffGains.ksStraight    = ff.kS;
@@ -963,7 +963,7 @@ First output is a control: the same config twice, which must match.
 `sim_reset` does not restore filter or motion config, so every trial rewrites
 every key. If the control fails, ignore everything below it.
 
-`sim/web/riku_sim.mjs` and `.wasm` are untracked build output and survive a
+`sim/web/chad_sim.mjs` and `.wasm` are untracked build output and survive a
 branch switch. Rebuild after every checkout or you are running the previous
 branch's binary.
 
@@ -977,7 +977,7 @@ on or dead reckoning is ground truth and localization comparisons mean nothing.
 
 ## Logging
 
-`riku/util/logger.hpp` — buffered CSV to the microSD card. `row()` never touches
+`chad/util/logger.hpp` — buffered CSV to the microSD card. `row()` never touches
 the card; a background task does the writes.
 
 ```cpp
@@ -1005,10 +1005,10 @@ Attach a logger to a subsystem's telemetry callback. All off by default, all
 no-ops without a card.
 
 ```cpp
-// riku/util/tuning.hpp
-riku::tuning::logChassis(Chassis&, bool enabled);                 // chas<n>.csv
-riku::tuning::logJamDetector(JamDetector&, bool enabled);         // jam<n>.csv
-riku::tuning::logFeedforward(FeedforwardController&, bool);       // ff<n>.csv
+// chad/util/tuning.hpp
+chad::tuning::logChassis(Chassis&, bool enabled);                 // chas<n>.csv
+chad::tuning::logJamDetector(JamDetector&, bool enabled);         // jam<n>.csv
+chad::tuning::logFeedforward(FeedforwardController&, bool);       // ff<n>.csv
 
 // gamespecific/tuning.hpp
 logLift(bool enabled);                                            // lift<n>.csv
@@ -1314,7 +1314,7 @@ float FastTrig::cos(float rad);
 
 ## Game-specific layer
 
-`include/gamespecific/` — the robot-specific half. Edit these freely; the `riku`
+`include/gamespecific/` — the robot-specific half. Edit these freely; the `chad`
 namespace below them doesn't depend on any of it.
 
 ### config.hpp

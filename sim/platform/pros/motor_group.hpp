@@ -1,4 +1,4 @@
-// riku-sim PROS shim — pros/motor_group.hpp
+// chad-sim PROS shim — pros/motor_group.hpp
 #pragma once
 
 #include <cstdint>

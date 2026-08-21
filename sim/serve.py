@@ -38,7 +38,7 @@ Handler.extensions_map.update({
 if __name__ == "__main__":
     socketserver.TCPServer.allow_reuse_address = True
     with socketserver.TCPServer(("", PORT), Handler) as httpd:
-        print(f"riku-sim  ->  http://localhost:{PORT}")
+        print(f"chad-sim  ->  http://localhost:{PORT}")
         print("Ctrl+C to stop")
         try:
             httpd.serve_forever()

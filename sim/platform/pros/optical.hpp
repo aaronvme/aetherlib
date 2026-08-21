@@ -1,4 +1,4 @@
-// riku-sim PROS shim — pros/optical.hpp
+// chad-sim PROS shim — pros/optical.hpp
 //
 // Colour sorting is not modelled; values are settable from the browser so
 // gamespecific logic that branches on hue can still be driven in the sim.

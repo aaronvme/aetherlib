@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build riku-sim to WebAssembly.
+# Build chad-sim to WebAssembly.
 #
 #   ./sim/build.sh            release build into sim/web/
 #   ./sim/build.sh debug      assertions + source maps
@@ -22,14 +22,14 @@ if ! command -v em++ >/dev/null 2>&1; then
 fi
 
 MODE="${1:-release}"
-OUT="sim/web/riku_sim.mjs"
+OUT="sim/web/chad_sim.mjs"
 
-# The whole riku library, plus the game-specific config and routines, so the
+# The whole chad library, plus the game-specific config and routines, so the
 # sim runs the same code that ships to the brain. autonselector.cpp is replaced
 # by a non-LVGL stub; main.cpp is excluded because the bridge owns the entry
 # points instead of the competition control system.
 SOURCES=(
-    $(find src/riku -name '*.cpp' -not -path '*auton_selector*')
+    $(find src/chad -name '*.cpp' -not -path '*auton_selector*')
     src/gamespecific/config.cpp
     src/gamespecific/autons.cpp
     src/gamespecific/lift.cpp
@@ -53,7 +53,7 @@ FLAGS=(
     -sALLOW_MEMORY_GROWTH=1
     -sINITIAL_MEMORY=67108864
     -sEXPORTED_RUNTIME_METHODS=['ccall','cwrap','UTF8ToString','HEAPF32','HEAP32']
-    -sEXPORT_NAME=createRikuSim
+    -sEXPORT_NAME=createChadSim
     -sMODULARIZE=1
     -sEXPORT_ES6=1
     -sENVIRONMENT=web,node
@@ -71,4 +71,4 @@ echo "building ${#SOURCES[@]} sources -> $OUT ($MODE)"
 em++ "${SOURCES[@]}" "${FLAGS[@]}" -o "$OUT"
 
 echo "done:"
-ls -lh sim/web/riku_sim.mjs sim/web/riku_sim.wasm | awk '{printf "  %-28s %s\n", $9, $5}'
+ls -lh sim/web/chad_sim.mjs sim/web/chad_sim.wasm | awk '{printf "  %-28s %s\n", $9, $5}'

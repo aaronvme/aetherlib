@@ -1,7 +1,7 @@
-// riku-sim PROS shim — pros/imu.hpp
+// chad-sim PROS shim — pros/imu.hpp
 //
 // The bus holds rotation as the PHYSICAL sensor reports it, already including
-// under-report error, drift and noise. riku::ScaledIMU derives from this class
+// under-report error, drift and noise. chad::ScaledIMU derives from this class
 // and overrides get_rotation()/get_heading() to apply its correction, so the
 // full calibration path is what runs under test.
 #pragma once

@@ -1,11 +1,11 @@
 #include "gamespecific/autons.hpp"
 #include "gamespecific/autons/tuning/support.hpp"
 
-#include "riku/api.hpp"
-#include "riku/util/autotune.hpp"
-#include "riku/util/relay_tune.hpp"
+#include "chad/api.hpp"
+#include "chad/util/autotune.hpp"
+#include "chad/util/relay_tune.hpp"
 
-namespace riku {
+namespace chad {
 
 using namespace autons;
 
@@ -100,4 +100,4 @@ void autonCharacterize2Pid() {
     out.result("relay gave kP %.0f/%.0f", ang.kP, lat.kP);
 }
 
-}  // namespace riku
+}  // namespace chad

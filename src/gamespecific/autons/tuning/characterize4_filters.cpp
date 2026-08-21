@@ -1,9 +1,9 @@
 #include "gamespecific/autons.hpp"
 #include "gamespecific/autons/tuning/support.hpp"
 
-#include "riku/api.hpp"
+#include "chad/api.hpp"
 
-namespace riku {
+namespace chad {
 
 using namespace autons;
 
@@ -62,4 +62,4 @@ void autonCharacterize4Filters() {
     out.result("pose sigma %.2fin pk %.2fin", noise.sigmaIn, noise.peakIn);
 }
 
-}  // namespace riku
+}  // namespace chad

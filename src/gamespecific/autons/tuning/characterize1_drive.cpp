@@ -1,10 +1,10 @@
 #include "gamespecific/autons.hpp"
 #include "gamespecific/autons/tuning/support.hpp"
 
-#include "riku/api.hpp"
-#include "riku/util/characterize.hpp"
+#include "chad/api.hpp"
+#include "chad/util/characterize.hpp"
 
-namespace riku {
+namespace chad {
 
 using namespace autons;
 
@@ -52,4 +52,4 @@ void autonCharacterize1Drive() {
     }
 }
 
-}  // namespace riku
+}  // namespace chad

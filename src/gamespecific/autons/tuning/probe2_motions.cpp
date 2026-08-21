@@ -3,9 +3,9 @@
 
 #include <cmath>
 
-#include "riku/api.hpp"
+#include "chad/api.hpp"
 
-namespace riku {
+namespace chad {
 
 using namespace autons;
 
@@ -54,4 +54,4 @@ void autonProbe2Motions() {
     out.result("2000ms = never settled");
 }
 
-}  // namespace riku
+}  // namespace chad

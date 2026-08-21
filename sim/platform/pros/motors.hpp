@@ -1,4 +1,4 @@
-// riku-sim PROS shim — pros/motors.hpp
+// chad-sim PROS shim — pros/motors.hpp
 #pragma once
 
 #include <cmath>

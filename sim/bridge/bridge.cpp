@@ -1,7 +1,7 @@
-// riku-sim — C API surface consumed by the browser.
+// chad-sim — C API surface consumed by the browser.
 //
 // Everything here is a thin adapter. The algorithms under test are the real
-// riku objects declared in gamespecific/config.cpp; this file only starts
+// chad objects declared in gamespecific/config.cpp; this file only starts
 // them, advances virtual time, and marshals state out to JavaScript.
 #include <emscripten/emscripten.h>
 
@@ -17,8 +17,8 @@
 #include "../world/field.hpp"
 #include "../world/world.hpp"
 
-#include "riku/movement_control/ltv.hpp"
-#include "riku/movement_control/ltvlqr.hpp"
+#include "chad/movement_control/ltv.hpp"
+#include "chad/movement_control/ltvlqr.hpp"
 
 #include "gamespecific/autons.hpp"
 #include "gamespecific/config.hpp"
@@ -28,7 +28,7 @@ namespace {
 // --- localization mode bits -------------------------------------------------
 //
 // Bit 0 clear means dead reckoning only: with no tracking wheels in
-// riku::odomSensors that is the IMU plus the drive motor encoders, nothing more.
+// chad::odomSensors that is the IMU plus the drive motor encoders, nothing more.
 constexpr int kLocMcl = 1;
 constexpr int kLocRcl = 2;
 constexpr int kLocEkf = 4;
@@ -56,12 +56,12 @@ sim::TaskId gRouteTask = sim::kInvalidTask;
 // would use. World publishes their travel on ports 11 and 12 either way.
 pros::Rotation gVertPod(11);
 pros::Rotation gHorizPod(12);
-riku::TrackingWheel gVertWheel(gVertPod, 2.75f, 0.0f);
-riku::TrackingWheel gHorizWheel(gHorizPod, 2.75f, 0.0f);
+chad::TrackingWheel gVertWheel(gVertPod, 2.75f, 0.0f);
+chad::TrackingWheel gHorizWheel(gHorizPod, 2.75f, 0.0f);
 bool gOdomPods = false;
 
 std::string gStateJson;
-std::vector<float> gParticleBuf(riku::MclTracking::PARTICLE_MAX * 4);
+std::vector<float> gParticleBuf(chad::MclTracking::PARTICLE_MAX * 4);
 int gParticleCount = 0;
 
 // Ground-truth and estimate history for the path overlays.
@@ -88,16 +88,16 @@ void breakTrails() {
 
 struct AutonEntry { const char* name; void (*fn)(); };
 const AutonEntry kAutons[] = {
-    {"Example",   riku::autonExample},
-    {"Red Left",  riku::autonRedLeft},
-    {"Blue Left", riku::autonBlueLeft},
-    {"Skills",    riku::autonSkills},
+    {"Example",   chad::autonExample},
+    {"Red Left",  chad::autonRedLeft},
+    {"Blue Left", chad::autonBlueLeft},
+    {"Skills",    chad::autonSkills},
 };
 constexpr int kAutonCount = static_cast<int>(sizeof(kAutons) / sizeof(kAutons[0]));
 
 /// Rebuild the odometry sensor set with or without the dead wheels.
 void applyOdomPods() {
-    riku::OdomSensors sensors = riku::odomSensors;
+    chad::OdomSensors sensors = chad::odomSensors;
     if (gOdomPods) {
         sensors.vertWheelCollection = { &gVertWheel };
         sensors.horizWheelCollection = { &gHorizWheel };
@@ -105,15 +105,15 @@ void applyOdomPods() {
     // reset() re-baselines against whichever sensors are now live -- required,
     // or the first tick measures a delta against the other sensor set -- but it
     // also zeroes the pose. Swapping pods in should not move the robot.
-    const riku::Pose held = riku::chassis.odom().getPose();
-    riku::chassis.odom().setSensors(sensors);
-    riku::chassis.odom().reset();
-    riku::chassis.odom().setPose(held);
+    const chad::Pose held = chad::chassis.odom().getPose();
+    chad::chassis.odom().setSensors(sensors);
+    chad::chassis.odom().reset();
+    chad::chassis.odom().setPose(held);
 }
 
 void applyManualDrive() {
     if (!gManualActive) return;
-    riku::drivetrain.setVoltage(gManualLeft / 12.0f * 127.0f,
+    chad::drivetrain.setVoltage(gManualLeft / 12.0f * 127.0f,
                                 gManualRight / 12.0f * 127.0f);
 }
 
@@ -141,8 +141,8 @@ void recordSample() {
     }
 
     const auto& t = sim::world().truth();
-    const riku::Pose odom = riku::chassis.getPose();
-    const riku::Pose mcl = riku::chassis.mcl().getRawEstimate();
+    const chad::Pose odom = chad::chassis.getPose();
+    const chad::Pose mcl = chad::chassis.mcl().getRawEstimate();
 
     const float ex = odom.x - t.x;
     const float ey = odom.y - t.y;
@@ -152,17 +152,17 @@ void recordSample() {
     gRecord.push_back(static_cast<float>(now / 1000.0));
     gRecord.push_back(t.x);
     gRecord.push_back(t.y);
-    gRecord.push_back(riku::stdRadToVexDeg(t.theta));
+    gRecord.push_back(chad::stdRadToVexDeg(t.theta));
     gRecord.push_back(odom.x);
     gRecord.push_back(odom.y);
-    gRecord.push_back(riku::stdRadToVexDeg(odom.theta));
+    gRecord.push_back(chad::stdRadToVexDeg(odom.theta));
     gRecord.push_back(mcl.x);
     gRecord.push_back(mcl.y);
-    gRecord.push_back(riku::stdRadToVexDeg(mcl.theta));
+    gRecord.push_back(chad::stdRadToVexDeg(mcl.theta));
     gRecord.push_back(std::sqrt(ex * ex + ey * ey));
-    gRecord.push_back(riku::angleDiffRad(t.theta, odom.theta) * riku::RAD_TO_DEG);
+    gRecord.push_back(chad::angleDiffRad(t.theta, odom.theta) * chad::RAD_TO_DEG);
     gRecord.push_back(t.vLinIn);
-    gRecord.push_back(t.vAngRad * riku::RAD_TO_DEG);
+    gRecord.push_back(t.vAngRad * chad::RAD_TO_DEG);
 }
 
 }  // namespace
@@ -183,33 +183,33 @@ void sim_init() {
 
     // Same registration order as src/main.cpp so indices line up with the
     // brain's auton selector.
-    for (const auto& a : kAutons) riku::selector.registerAuton(a.name, a.fn);
-    riku::selector.init();
+    for (const auto& a : kAutons) chad::selector.registerAuton(a.name, a.fn);
+    chad::selector.init();
 
-    riku::registerFieldObstacles();
+    chad::registerFieldObstacles();
 
     // Odometry only for now; MCL/RCL are opt-in from the UI.
-    riku::chassis.odom().startBackgroundOdom();
+    chad::chassis.odom().startBackgroundOdom();
 }
 
 EMSCRIPTEN_KEEPALIVE void sim_set_localization(int mode);
 
 EMSCRIPTEN_KEEPALIVE
 void sim_reset(float x, float y, float thetaDeg) {
-    const riku::Pose p{x, y, riku::vexToStdRad(thetaDeg)};
+    const chad::Pose p{x, y, chad::vexToStdRad(thetaDeg)};
     const int wasLoc = gLocMode;
 
     // Tear the run down through the library's own lifecycle calls so its
     // pros::Task pointers are released properly, rather than killing the
     // fibers out from under it.
-    riku::chassis.cancelMotion();
+    chad::chassis.cancelMotion();
     if (gRouteTask != sim::kInvalidTask) {
         sim::sched().kill(gRouteTask);
         gRouteTask = sim::kInvalidTask;
     }
-    riku::chassis.ekf().stopTracking();
-    riku::chassis.mcl().stopTracking();
-    riku::chassis.rcl().stopTracking();
+    chad::chassis.ekf().stopTracking();
+    chad::chassis.mcl().stopTracking();
+    chad::chassis.rcl().stopTracking();
     gLocMode = 0;
 
     // Rewind the clock and rephase every background loop so they all become due
@@ -224,7 +224,7 @@ void sim_reset(float x, float y, float thetaDeg) {
     sim::sched().resyncSleepers();
 
     sim::seedRng(gSeed);
-    riku::chassis.mcl().setSeed(gSeed);
+    chad::chassis.mcl().setSeed(gSeed);
 
     sim::world().resetTo(p);
 
@@ -234,10 +234,10 @@ void sim_reset(float x, float y, float thetaDeg) {
     // would otherwise measure dTheta against the previous run's final heading.
     // reset() is the call that re-reads the IMU and drops the stale delta.
     applyOdomPods();
-    riku::chassis.odom().reset();
-    riku::chassis.setPose(p);
-    riku::chassis.mcl().setPose(p);
-    riku::chassis.ekf().setPose(p);
+    chad::chassis.odom().reset();
+    chad::chassis.setPose(p);
+    chad::chassis.mcl().setPose(p);
+    chad::chassis.ekf().setPose(p);
 
     gTrueTrail.xy.clear();
     gOdomTrail.xy.clear();
@@ -246,7 +246,7 @@ void sim_reset(float x, float y, float thetaDeg) {
     gManualLeft = gManualRight = 0.0f;
 
     // Odometry's task was never stopped, so this only re-arms the enabled flag.
-    riku::chassis.odom().startBackgroundOdom();
+    chad::chassis.odom().startBackgroundOdom();
     if (wasLoc != 0) sim_set_localization(wasLoc);
 }
 
@@ -254,7 +254,7 @@ EMSCRIPTEN_KEEPALIVE
 void sim_teleport(float x, float y, float thetaDeg) {
     // Kidnapped-robot test: ground truth moves, the estimator is not told.
     breakTrails();
-    sim::world().teleport({x, y, riku::vexToStdRad(thetaDeg)});
+    sim::world().teleport({x, y, chad::vexToStdRad(thetaDeg)});
 }
 
 // ============================================================================
@@ -268,7 +268,7 @@ void sim_step(float ms) {
 
     const auto& t = sim::world().truth();
     pushTrail(gTrueTrail, t.x, t.y);
-    const riku::Pose op = riku::chassis.getPose();
+    const chad::Pose op = chad::chassis.getPose();
     pushTrail(gOdomTrail, op.x, op.y);
 
     recordSample();
@@ -288,29 +288,29 @@ void sim_set_drive(float leftVolts, float rightVolts) {
 EMSCRIPTEN_KEEPALIVE
 void sim_set_localization(int mode) {
     if ((mode & kLocMcl) && !(gLocMode & kLocMcl)) {
-        riku::chassis.mcl().setPose(riku::chassis.getPose());
-        riku::chassis.mcl().startTracking();
+        chad::chassis.mcl().setPose(chad::chassis.getPose());
+        chad::chassis.mcl().startTracking();
     } else if (!(mode & kLocMcl) && (gLocMode & kLocMcl)) {
-        riku::chassis.mcl().stopTracking();
+        chad::chassis.mcl().stopTracking();
     }
 
     if ((mode & kLocRcl) && !(gLocMode & kLocRcl)) {
-        riku::chassis.rcl().startTracking();
+        chad::chassis.rcl().startTracking();
     } else if (!(mode & kLocRcl) && (gLocMode & kLocRcl)) {
-        riku::chassis.rcl().stopTracking();
+        chad::chassis.rcl().stopTracking();
     }
 
     // Exactly one filter may write the pose back into odometry. With the EKF up
     // it is the EKF, and the others become measurements or diagnostics. Two
     // filters lerping the same pose toward different estimates undo each other:
     // MCL+RCL together lap at an 11.96 in peak where MCL alone manages 1.08.
-    riku::chassis.mcl().setAutoSync(!(mode & kLocEkf));
-    riku::chassis.rcl().setAutoSync(!(mode & kLocEkf));
+    chad::chassis.mcl().setAutoSync(!(mode & kLocEkf));
+    chad::chassis.rcl().setAutoSync(!(mode & kLocEkf));
     if ((mode & kLocEkf) && !(gLocMode & kLocEkf)) {
-        riku::chassis.ekf().setPose(riku::chassis.getPose());
-        riku::chassis.ekf().startTracking();
+        chad::chassis.ekf().setPose(chad::chassis.getPose());
+        chad::chassis.ekf().startTracking();
     } else if (!(mode & kLocEkf) && (gLocMode & kLocEkf)) {
-        riku::chassis.ekf().stopTracking();
+        chad::chassis.ekf().stopTracking();
     }
     gLocMode = mode;
 }
@@ -342,7 +342,7 @@ void sim_stop_auton() {
         sim::sched().kill(gRouteTask);
         gRouteTask = sim::kInvalidTask;
     }
-    riku::chassis.cancelMotion();
+    chad::chassis.cancelMotion();
     gManualActive = true;
     gManualLeft = gManualRight = 0.0f;
 }
@@ -391,13 +391,13 @@ int gRouteIndex = -1;
 float gRouteMaxSpeed = 127.0f;
 
 // RAMSETE gains, tunable from the browser via sim_set_param.
-riku::RAMSETEParams gRamsete;
-riku::MoveToPointParams gMoveToPoint;
+chad::RAMSETEParams gRamsete;
+chad::MoveToPointParams gMoveToPoint;
 
 // Sampled trajectory points, pushed by the browser before a run. An
 // OP_FOLLOW_PATH command names a [start, count) slice of this buffer, so one
 // route can follow several paths.
-std::vector<riku::Pose> gPath;
+std::vector<chad::Pose> gPath;
 
 // --- LTV / LQR follower -----------------------------------------------------
 //
@@ -407,15 +407,15 @@ std::vector<riku::Pose> gPath;
 // prepare_trajectory() parses on a robot -- positions in METRES, velocities in
 // m/s and rad/s, one sample per 10 ms tick.
 
-riku::LtvLqrFollower* gLqr = nullptr;
-riku::LtvLqrParams gLqrParams;
+chad::LtvLqrFollower* gLqr = nullptr;
+chad::LtvLqrParams gLqrParams;
 
-riku::LtvLqrFollower& lqr() {
-    if (gLqr == nullptr) gLqr = new riku::LtvLqrFollower(riku::chassis, riku::drivetrain);
+chad::LtvLqrFollower& lqr() {
+    if (gLqr == nullptr) gLqr = new chad::LtvLqrFollower(chad::chassis, chad::drivetrain);
     return *gLqr;
 }
 
-riku::LTVPathFollower* gLtv = nullptr;
+chad::LTVPathFollower* gLtv = nullptr;
 std::string gLtvPath;
 
 // Feedforward gains are settable so they can be tuned in the sim rather than
@@ -425,7 +425,7 @@ std::string gLtvPath;
 // 450 rpm on a 3.25 in wheel, i.e. ~1.95 m/s, so kV ~= 12 / 1.95 = 6.2 V per
 // m/s. Guessing low here shows up as a systematic along-track deficit, not as
 // a controller fault -- 0.9 leaves the path 9 in short, 6.2 lands within 0.5.
-riku::FeedforwardGains gLtvGains{
+chad::FeedforwardGains gLtvGains{
     .kV = 6.2f,
     .kaStraight = 0.0f,
     .kaTurn = 0.0f,
@@ -434,9 +434,9 @@ riku::FeedforwardGains gLtvGains{
     .kP = 2.0f,
 };
 
-riku::LTVPathFollower& ltv() {
+chad::LTVPathFollower& ltv() {
     if (gLtv == nullptr) {
-        gLtv = new riku::LTVPathFollower(riku::chassis, riku::drivetrain, gLtvGains);
+        gLtv = new chad::LTVPathFollower(chad::chassis, chad::drivetrain, gLtvGains);
     }
     return *gLtv;
 }
@@ -455,70 +455,70 @@ void execRoute() {
 
         switch (c.op) {
             case OP_SET_POSE: {
-                const riku::Pose p{c.a, c.b, riku::vexToStdRad(c.c)};
+                const chad::Pose p{c.a, c.b, chad::vexToStdRad(c.c)};
                 breakTrails();
                 sim::world().resetTo(p);
-                riku::chassis.setPose(p);
-                riku::chassis.mcl().setPose(p);
+                chad::chassis.setPose(p);
+                chad::chassis.mcl().setPose(p);
                 break;
             }
             case OP_MOVE_TO: {
-                riku::MoveToPointParams params = gMoveToPoint;
+                chad::MoveToPointParams params = gMoveToPoint;
                 params.forwards = (c.c >= 0.0f);
                 params.maxSpeed = gRouteMaxSpeed;
-                riku::chassis.moveToPoint(c.a, c.b, timeout, params);
+                chad::chassis.moveToPoint(c.a, c.b, timeout, params);
                 break;
             }
             case OP_TURN_TO_HEADING: {
-                riku::TurntoHeadingParams params;
+                chad::TurntoHeadingParams params;
                 params.maxSpeed = gRouteMaxSpeed;
-                riku::chassis.turnToHeading(c.a, timeout, params);
+                chad::chassis.turnToHeading(c.a, timeout, params);
                 break;
             }
             case OP_TURN_TO_POINT: {
-                riku::TurnToPointParams params;
+                chad::TurnToPointParams params;
                 params.maxSpeed = gRouteMaxSpeed;
-                riku::chassis.turnToPoint(c.a, c.b, timeout, params);
+                chad::chassis.turnToPoint(c.a, c.b, timeout, params);
                 break;
             }
             case OP_DRIVE: {
-                riku::MoveDistanceParams params;
+                chad::MoveDistanceParams params;
                 params.forwards = (c.a >= 0.0f);
                 params.maxSpeed = gRouteMaxSpeed;
-                riku::chassis.moveDistance(std::fabs(c.a), timeout, params);
+                chad::chassis.moveDistance(std::fabs(c.a), timeout, params);
                 break;
             }
             case OP_BOOMERANG: {
-                riku::BoomerangParams params;
+                chad::BoomerangParams params;
                 params.maxSpeed = gRouteMaxSpeed;
-                riku::chassis.moveBoomerang(c.a, c.b, c.c, timeout, params);
+                chad::chassis.moveBoomerang(c.a, c.b, c.c, timeout, params);
                 break;
             }
             case OP_ARC: {
-                riku::ArcParams params;
+                chad::ArcParams params;
                 params.maxSpeed = gRouteMaxSpeed;
-                riku::chassis.moveArc(c.a, c.b, c.c, timeout, params);
+                chad::chassis.moveArc(c.a, c.b, c.c, timeout, params);
                 break;
             }
             case OP_SWING: {
-                riku::SwingParams params;
+                chad::SwingParams params;
                 params.maxSpeed = gRouteMaxSpeed;
-                const auto side = (c.b >= 0.5f) ? riku::SwingSide::Right
-                                                : riku::SwingSide::Left;
-                riku::chassis.swingToHeading(c.a, side, timeout, params);
+                const auto side = (c.b >= 0.5f) ? chad::SwingSide::Right
+                                                : chad::SwingSide::Left;
+                chad::chassis.swingToHeading(c.a, side, timeout, params);
                 break;
             }
             case OP_DELAY:
                 pros::delay(static_cast<std::uint32_t>(c.a));
                 break;
             case OP_WAIT_SETTLED:
-                riku::chassis.waitUntilSettled();
+                chad::chassis.waitUntilSettled();
                 break;
             case OP_LATERAL_GAINS:
-                riku::chassis.setLateralGains({c.a, c.b, c.c});
+                chad::chassis.setLateralGains({c.a, c.b, c.c});
                 break;
             case OP_ANGULAR_GAINS:
-                riku::chassis.setAngularGains({c.a, c.b, c.c});
+                chad::chassis.setAngularGains({c.a, c.b, c.c});
                 break;
             case OP_MAX_SPEED:
                 gRouteMaxSpeed = c.a;
@@ -528,11 +528,11 @@ void execRoute() {
                 const int count = static_cast<int>(c.b);
                 if (start < 0 || count <= 0 ||
                     start + count > static_cast<int>(gPath.size())) break;
-                std::vector<riku::Pose> path(gPath.begin() + start,
+                std::vector<chad::Pose> path(gPath.begin() + start,
                                              gPath.begin() + start + count);
-                riku::RAMSETEParams params = gRamsete;
+                chad::RAMSETEParams params = gRamsete;
                 params.maxSpeed = std::min(gRouteMaxSpeed, gRamsete.maxSpeed);
-                riku::chassis.moveRAMSETE(path, timeout, params);
+                chad::chassis.moveRAMSETE(path, timeout, params);
                 break;
             }
             default:
@@ -559,7 +559,7 @@ void sim_path_clear() { gPath.clear(); }
 /// Append one sampled trajectory point. Heading is a VEX bearing in degrees.
 EMSCRIPTEN_KEEPALIVE
 void sim_path_push(float x, float y, float headingDeg) {
-    gPath.push_back({x, y, riku::vexToStdRad(headingDeg)});
+    gPath.push_back({x, y, chad::vexToStdRad(headingDeg)});
 }
 
 EMSCRIPTEN_KEEPALIVE
@@ -584,7 +584,7 @@ EMSCRIPTEN_KEEPALIVE
 void sim_ltv_run(int backwards, int endCorrection) {
     if (gLtvPath.empty()) return;
     gManualActive = false;
-    riku::LTVPathFollower::ltvConfig cfg;
+    chad::LTVPathFollower::ltvConfig cfg;
     cfg.backwards = (backwards != 0);
     cfg.end_correction = (endCorrection != 0);
     ltv().followPath(gLtvPath, cfg);
@@ -612,7 +612,7 @@ void sim_lqr_follow(int start, int count, float timeoutMs) {
     gManualActive = false;
     // Own fiber, so the browser keeps driving the clock and can sample the run
     // while it happens -- the same reason a route runs on one.
-    auto path = std::make_shared<std::vector<riku::Pose>>(
+    auto path = std::make_shared<std::vector<chad::Pose>>(
         gPath.begin() + start, gPath.begin() + start + count);
     gRouteTask = sim::sched().spawn([path, timeoutMs]() {
         lqr().followPath(*path, gLqrParams, timeoutMs);
@@ -701,26 +701,26 @@ void sim_set_param(const char* name, float value) {
     else if (k == "encoderPeriodMs")   p.encoderPeriodMs = value;
     else if (k == "encoderResolutionDeg") p.encoderResolutionDeg = value;
     else if (k == "lateralKp" || k == "lateralKi" || k == "lateralKd") {
-        riku::PIDGains g = riku::chassisConfig.lateralGains;
+        chad::PIDGains g = chad::chassisConfig.lateralGains;
         if (k == "lateralKp") g.kP = value;
         if (k == "lateralKi") g.kI = value;
         if (k == "lateralKd") g.kD = value;
-        riku::chassisConfig.lateralGains = g;
-        riku::chassis.setLateralGains(g);
+        chad::chassisConfig.lateralGains = g;
+        chad::chassis.setLateralGains(g);
     } else if (k == "angularKp" || k == "angularKi" || k == "angularKd") {
-        riku::PIDGains g = riku::chassisConfig.angularGains;
+        chad::PIDGains g = chad::chassisConfig.angularGains;
         if (k == "angularKp") g.kP = value;
         if (k == "angularKi") g.kI = value;
         if (k == "angularKd") g.kD = value;
-        riku::chassisConfig.angularGains = g;
-        riku::chassis.setAngularGains(g);
+        chad::chassisConfig.angularGains = g;
+        chad::chassis.setAngularGains(g);
     } else if (k == "mclObsCone" || k == "mclObsTol") {
-        auto c = riku::chassis.mcl().config();
+        auto c = chad::chassis.mcl().config();
         if (k == "mclObsCone") c.obstacleConeFrac = value;
         else                   c.obstacleRangeTol = value;
-        riku::chassis.mcl().setConfig(c);
+        chad::chassis.mcl().setConfig(c);
     } else if (k.rfind("ekf", 0) == 0) {
-        auto c = riku::chassis.ekf().config();
+        auto c = chad::chassis.ekf().config();
         if      (k == "ekfMclSigmaScale") c.mclSigmaScale = value;
         else if (k == "ekfMclSigmaFloor") c.mclSigmaFloor = value;
         else if (k == "ekfRangeGate")     c.rangeGateChi2 = value;
@@ -742,24 +742,24 @@ void sim_set_param(const char* name, float value) {
         else if (k == "ekfResetCycles")   c.mclResetCycles = static_cast<int>(value);
         else if (k == "ekfSyncProp")      c.syncProp = value;
         else if (k == "ekfThetaSyncProp") c.thetaSyncProp = value;
-        riku::chassis.ekf().setConfig(c);
+        chad::chassis.ekf().setConfig(c);
     } else if (k == "lateralDFilt" || k == "angularDFilt" ||
                k == "lateralWindup" || k == "angularWindup" || k == "settleTimeMs") {
-        if      (k == "lateralDFilt")  riku::chassisConfig.lateralDerivativeFilter = value;
-        else if (k == "angularDFilt")  riku::chassisConfig.angularDerivativeFilter = value;
-        else if (k == "lateralWindup") riku::chassisConfig.lateralWindupRange = value;
-        else if (k == "angularWindup") riku::chassisConfig.angularWindupRange = value;
-        else riku::chassisConfig.settleTimeMs = static_cast<std::uint32_t>(value);
-        riku::chassis.setPidTuning(riku::chassisConfig);
+        if      (k == "lateralDFilt")  chad::chassisConfig.lateralDerivativeFilter = value;
+        else if (k == "angularDFilt")  chad::chassisConfig.angularDerivativeFilter = value;
+        else if (k == "lateralWindup") chad::chassisConfig.lateralWindupRange = value;
+        else if (k == "angularWindup") chad::chassisConfig.angularWindupRange = value;
+        else chad::chassisConfig.settleTimeMs = static_cast<std::uint32_t>(value);
+        chad::chassis.setPidTuning(chad::chassisConfig);
     } else if (k.rfind("rcl", 0) == 0) {
-        auto c = riku::chassis.rcl().config();
+        auto c = chad::chassis.rcl().config();
         if      (k == "rclHardSync")  c.hardSync = (value != 0.0f);
         else if (k == "rclSyncProp")  c.syncProp = value;
         else if (k == "rclSyncRate")  c.maxSyncRate = value;
         else if (k == "rclObsTol")    c.obstacleRangeTol = value;
-        riku::chassis.rcl().setConfig(c);
+        chad::chassis.rcl().setConfig(c);
     } else if (k.rfind("mcl", 0) == 0) {
-        auto c = riku::chassis.mcl().config();
+        auto c = chad::chassis.mcl().config();
         if      (k == "mclRangeSigClose") c.rangeSigmaCloseIn = value;
         else if (k == "mclRangeSigProp")  c.rangeSigmaProp = value;
         else if (k == "mclShortWeight")   c.shortWeight = value;
@@ -778,7 +778,7 @@ void sim_set_param(const char* name, float value) {
         else if (k == "mclObsConeFrac")   c.obstacleConeFrac = value;
         else if (k == "mclObsRangeTol")   c.obstacleRangeTol = value;
         else if (k == "mclSyncProp")      c.distSyncProp = value;
-        riku::chassis.mcl().setConfig(c);
+        chad::chassis.mcl().setConfig(c);
     } else if (k == "ramseteB")           { gRamsete.b = value;
     } else if (k == "ramseteZeta")        { gRamsete.zeta = value;
     } else if (k == "ramseteMinSpeed")    { gRamsete.minSpeed = value;
@@ -798,15 +798,15 @@ void sim_set_param(const char* name, float value) {
     } else if (k == "mtpBearingHold")  { gMoveToPoint.bearingHoldDist = value;
     } else if (k == "mtpTolerance")    { gMoveToPoint.targetTolerance = value;
     } else if (k == "mclDistSyncProp") {
-        riku::chassis.mcl().setDistSyncProp(value);
+        chad::chassis.mcl().setDistSyncProp(value);
     } else if (k == "seed") {
         // Pin both RNGs: the world's noise and MCL's particle jitter. Without
         // the second, a run replays the same sensor stream but a different
         // particle cloud, which is not a reproducible test.
         gSeed = static_cast<std::uint32_t>(value);
         sim::seedRng(gSeed);
-        riku::chassis.mcl().setSeed(gSeed);
-        riku::chassis.mcl().setPose(riku::chassis.getPose());
+        chad::chassis.mcl().setSeed(gSeed);
+        chad::chassis.mcl().setPose(chad::chassis.getPose());
     }
 }
 
@@ -822,8 +822,8 @@ float sim_get_param(const char* name) {
     if      (k == "responseTauMs")     return p.responseTauMs;
     else if (k == "leftScale")         return p.leftScale;
     else if (k == "rightScale")        return p.rightScale;
-    else if (k == "ekfSyncProp")       return riku::chassis.ekf().config().syncProp;
-    else if (k == "ekfThetaSyncProp")  return riku::chassis.ekf().config().thetaSyncProp;
+    else if (k == "ekfSyncProp")       return chad::chassis.ekf().config().syncProp;
+    else if (k == "ekfThetaSyncProp")  return chad::chassis.ekf().config().thetaSyncProp;
     else if (k == "encoderSlip")       return p.encoderSlip;
     else if (k == "imuUnderReport")    return p.imuUnderReport;
     else if (k == "imuDriftDegPerSec") return p.imuDriftDegPerSec;
@@ -841,7 +841,7 @@ float sim_get_param(const char* name) {
     else if (k == "encoderPeriodMs")   return p.encoderPeriodMs;
     else if (k == "encoderResolutionDeg") return p.encoderResolutionDeg;
 
-    const auto& cc = riku::chassisConfig;
+    const auto& cc = chad::chassisConfig;
     if      (k == "lateralKp")     return cc.lateralGains.kP;
     else if (k == "lateralKi")     return cc.lateralGains.kI;
     else if (k == "lateralKd")     return cc.lateralGains.kD;
@@ -861,7 +861,7 @@ float sim_get_param(const char* name) {
     else if (k == "ramseteTolerance")  return gRamsete.targetTolerance;
     else if (k == "ramseteHeadingTol") return gRamsete.headingTolerance;
 
-    const auto mc = riku::chassis.mcl().config();
+    const auto mc = chad::chassis.mcl().config();
     if      (k == "mclObsCone")  return mc.obstacleConeFrac;
     else if (k == "mclObsTol")   return mc.obstacleRangeTol;
     else if (k == "mclSyncProp") return mc.distSyncProp;
@@ -913,8 +913,8 @@ float* sim_particles_ptr() { return gParticleBuf.data(); }
 EMSCRIPTEN_KEEPALIVE
 int sim_particle_count() {
     gParticleCount = (gLocMode & kLocMcl)
-        ? riku::chassis.mcl().snapshotParticles(gParticleBuf.data(),
-                                                riku::MclTracking::PARTICLE_MAX)
+        ? chad::chassis.mcl().snapshotParticles(gParticleBuf.data(),
+                                                chad::MclTracking::PARTICLE_MAX)
         : 0;
     return gParticleCount;
 }
@@ -952,24 +952,24 @@ int sim_trail_odom_count() { return static_cast<int>(gOdomTrail.xy.size() / 2); 
 EMSCRIPTEN_KEEPALIVE
 const char* sim_state_json() {
     const auto& t = sim::world().truth();
-    const riku::Pose odom = riku::chassis.getPose();
-    const riku::Pose mclRaw = riku::chassis.mcl().getRawEstimate();
+    const chad::Pose odom = chad::chassis.getPose();
+    const chad::Pose mclRaw = chad::chassis.mcl().getRawEstimate();
 
     const float errX = odom.x - t.x;
     const float errY = odom.y - t.y;
     const float errDist = std::sqrt(errX * errX + errY * errY);
     const float errHeadingDeg =
-        riku::angleDiffRad(t.theta, odom.theta) * riku::RAD_TO_DEG;
+        chad::angleDiffRad(t.theta, odom.theta) * chad::RAD_TO_DEG;
 
     // N_eff is the particle filter's own health metric: it collapses toward 1
     // when a handful of particles carry all the weight, which is what happens
     // just before MCL diverges.
     const float nEff = (gLocMode & kLocMcl)
-        ? riku::chassis.mcl().getEstimate().second : 0.0f;
-    const riku::Pose rcl = riku::chassis.rcl().latestEstimate();
-    const riku::Pose ekf = riku::chassis.ekf().getEstimate();
-    const auto ekfSigma = riku::chassis.ekf().uncertainty();
-    const float mclInject = riku::chassis.mcl().randomInjectFraction();
+        ? chad::chassis.mcl().getEstimate().second : 0.0f;
+    const chad::Pose rcl = chad::chassis.rcl().latestEstimate();
+    const chad::Pose ekf = chad::chassis.ekf().getEstimate();
+    const auto ekfSigma = chad::chassis.ekf().uncertainty();
+    const float mclInject = chad::chassis.mcl().randomInjectFraction();
 
     char buf[8192];
     int n = std::snprintf(buf, sizeof(buf),
@@ -986,24 +986,24 @@ const char* sim_state_json() {
         "\"colliding\":%s,\"routeRunning\":%s,\"settled\":%s,"
         "\"locMode\":%d,\"tasks\":%d,\"beams\":[",
         sim::preciseMillis() / 1000.0,
-        t.x, t.y, riku::stdRadToVexDeg(t.theta),
-        odom.x, odom.y, riku::stdRadToVexDeg(odom.theta),
-        mclRaw.x, mclRaw.y, riku::stdRadToVexDeg(mclRaw.theta), nEff,
-        rcl.x, rcl.y, riku::stdRadToVexDeg(rcl.theta),
-        ekf.x, ekf.y, riku::stdRadToVexDeg(ekf.theta),
+        t.x, t.y, chad::stdRadToVexDeg(t.theta),
+        odom.x, odom.y, chad::stdRadToVexDeg(odom.theta),
+        mclRaw.x, mclRaw.y, chad::stdRadToVexDeg(mclRaw.theta), nEff,
+        rcl.x, rcl.y, chad::stdRadToVexDeg(rcl.theta),
+        ekf.x, ekf.y, chad::stdRadToVexDeg(ekf.theta),
         ekfSigma.sigmaX, ekfSigma.sigmaY,
-        ekfSigma.sigmaTheta * riku::RAD_TO_DEG,
-        riku::chassis.ekf().beamsUsed(), riku::chassis.ekf().relocateCount(),
+        ekfSigma.sigmaTheta * chad::RAD_TO_DEG,
+        chad::chassis.ekf().beamsUsed(), chad::chassis.ekf().relocateCount(),
         mclInject,
         errDist, errHeadingDeg,
-        t.vLinIn, t.vAngRad * riku::RAD_TO_DEG, t.leftVelIn, t.rightVelIn,
+        t.vLinIn, t.vAngRad * chad::RAD_TO_DEG, t.leftVelIn, t.rightVelIn,
         t.colliding ? "true" : "false",
         sim_route_running() ? "true" : "false",
-        riku::chassis.isSettled() ? "true" : "false",
+        chad::chassis.isSettled() ? "true" : "false",
         gLocMode, sim::sched().liveTaskCount());
 
     bool first = true;
-    for (int i = 0; i < riku::MAX_DISTANCE_SENSORS; i++) {
+    for (int i = 0; i < chad::MAX_DISTANCE_SENSORS; i++) {
         const auto& b = sim::world().beam(i);
         if (!b.active) continue;
         n += std::snprintf(buf + n, sizeof(buf) - n,
@@ -1023,13 +1023,13 @@ const char* sim_state_json() {
     // a reading" against "MCL accepted it" is how a discarded-sensor bug becomes
     // visible instead of just showing up as drift.
     n += std::snprintf(buf + n, sizeof(buf) - n, "],\"filters\":[");
-    const auto& mclValid = riku::chassis.mcl().validSensors();
-    const auto& mclRead  = riku::chassis.mcl().sensorReadings();
-    const auto& mclDead  = riku::chassis.mcl().deadzoneFraction();
-    const auto& rclSensors = riku::chassis.rcl().sensors();
+    const auto& mclValid = chad::chassis.mcl().validSensors();
+    const auto& mclRead  = chad::chassis.mcl().sensorReadings();
+    const auto& mclDead  = chad::chassis.mcl().deadzoneFraction();
+    const auto& rclSensors = chad::chassis.rcl().sensors();
 
     first = true;
-    for (int i = 0; i < riku::MAX_DISTANCE_SENSORS; i++) {
+    for (int i = 0; i < chad::MAX_DISTANCE_SENSORS; i++) {
         if (!sim::world().beam(i).active) continue;
         const auto& rs = rclSensors[i];
         n += std::snprintf(buf + n, sizeof(buf) - n,

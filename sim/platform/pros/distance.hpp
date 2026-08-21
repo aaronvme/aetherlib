@@ -1,4 +1,4 @@
-// riku-sim PROS shim — pros/distance.hpp
+// chad-sim PROS shim — pros/distance.hpp
 //
 // Readings come from the raycaster in sim/world/field.cpp, so field geometry
 // genuinely occludes these sensors: a ray that hits a goal post reports the

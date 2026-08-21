@@ -1,6 +1,6 @@
-# riku-sim
+# chad-sim
 
-A browser simulator for testing the `riku` library off-robot.
+A browser simulator for testing the `chad` library off-robot.
 
 It compiles **your code** to WebAssembly and runs it against fake
 hardware. There is no second implementation of your algorithms, so a gain you
@@ -76,7 +76,7 @@ an algorithm behaves the way it will on a field:
   perimeter and every goal post and returns a surface normal, so a sensor aimed
   at a post reports the post rather than the wall behind it.
 
-Sensor mount offsets come straight from `riku::sensorMounts` in
+Sensor mount offsets come straight from `chad::sensorMounts` in
 `gamespecific/config.cpp`, using the same robot-frame convention the library
 hands to MCL (x forward, y left, theta pointing angle). The sim and the filter
 cannot disagree about where a sensor is.
@@ -91,7 +91,7 @@ sim/bridge/bridge.cpp        C API, state marshalling, route VM, recorder
 sim/world/                   ground truth + sensor synthesis
 sim/platform/                PROS shim + fiber scheduler + virtual clock
     |
-src/riku/, src/gamespecific/ THE CODE UNDER TEST — unmodified
+src/chad/, src/gamespecific/ THE CODE UNDER TEST — unmodified
 ```
 
 `-Isim/platform` precedes `-Iinclude`, so `#include "pros/imu.hpp"` resolves to
@@ -99,7 +99,7 @@ the shim instead of the real header. The library needs no `#ifdef`s.
 
 ### Tasks are real fibers
 
-riku runs odometry, MCL, RCL and the chassis motion queue in `pros::Task`
+chad runs odometry, MCL, RCL and the chassis motion queue in `pros::Task`
 background loops, and blocks the caller inside `waitUntilSettled()`. Those are
 genuinely concurrent stacks — you cannot drive them by calling `update()` in a
 loop. `sim/platform/sim_sched.cpp` gives each task an Emscripten Asyncify fiber
@@ -197,7 +197,7 @@ quantisation) and nothing interesting happens. The sliders are the point.
 
 **Obstacles invalidate sensors rather than being ray-cast targets — on purpose.**
 `kFieldTargets`, `kFieldCircles` and `kDisablingLines` in
-`include/riku/tracking/mcl_tracking.hpp` are empty, and the nine posts
+`include/chad/tracking/mcl_tracking.hpp` are empty, and the nine posts
 registered by `registerFieldObstacles()` go into `mCircleObstacles`, which
 `updateWeights()` uses only to mark a reading invalid.
 

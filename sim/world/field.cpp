@@ -5,7 +5,7 @@
 namespace sim {
 namespace {
 
-// Interior wall-to-wall, matching riku::Field::FIELD_HALF_WALL.
+// Interior wall-to-wall, matching chad::Field::FIELD_HALF_WALL.
 constexpr float kHalf = 70.2f;
 
 }  // namespace

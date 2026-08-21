@@ -5,9 +5,9 @@
 #include <vector>
 
 #include "gamespecific/config.hpp"
-#include "riku/util/characterize.hpp"
+#include "chad/util/characterize.hpp"
 
-namespace riku::autons {
+namespace chad::autons {
 
 class Report {
 public:
@@ -42,4 +42,4 @@ bool solvePark(const tuning::RangeNoiseFit& beams, float theta,
 
 tuning::Characterizer makeCharacterizer(Report& out);
 
-}  // namespace riku::autons
+}  // namespace chad::autons

@@ -1,4 +1,4 @@
-// riku-sim — ground truth robot state and sensor synthesis.
+// chad-sim — ground truth robot state and sensor synthesis.
 //
 // Motion is deliberately kinematic, not dynamic: commanded voltage maps to a
 // target wheel speed through a first-order lag, and differential-drive
@@ -18,18 +18,18 @@
 //     failure mode when a robot is near-parallel to a wall.
 //   * Encoders and the IMU are quantised to their real resolutions.
 //
-// Sensor mount offsets are read straight from riku::sensorMounts in
+// Sensor mount offsets are read straight from chad::sensorMounts in
 // gamespecific/config.cpp, using the same robot-frame convention the library
 // hands to MCL (x forward, y left, theta pointing angle), so the sim and the
 // filter can never disagree about where a sensor is.
 #pragma once
 
-#include "riku/util/util.hpp"
+#include "chad/util/util.hpp"
 
 namespace sim {
 
 struct RobotParams {
-    // Geometry is read from riku::drivetrain at init(); these mirror it.
+    // Geometry is read from chad::drivetrain at init(); these mirror it.
     float wheelDiameterIn{3.25f};
     float trackWidthIn{10.4f};
     float maxWheelRpm{450.0f};
@@ -103,10 +103,10 @@ public:
 
     /// Teleport ground truth (the "kidnapped robot" case) without touching the
     /// library's estimate -- the point of the test.
-    void teleport(const riku::Pose& pose);
+    void teleport(const chad::Pose& pose);
 
     /// Reset ground truth, encoders and the IMU together.
-    void resetTo(const riku::Pose& pose);
+    void resetTo(const chad::Pose& pose);
 
     void step(double dtMs);
 
@@ -165,7 +165,7 @@ private:
     double mImuAccum{0.0};
     double mEncAccum{0.0};
 
-    BeamInfo mBeams[riku::MAX_DISTANCE_SENSORS];
+    BeamInfo mBeams[chad::MAX_DISTANCE_SENSORS];
     bool mInitialised{false};
 };
 

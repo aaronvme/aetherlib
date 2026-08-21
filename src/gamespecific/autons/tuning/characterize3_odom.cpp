@@ -4,9 +4,9 @@
 #include <algorithm>
 #include <cmath>
 
-#include "riku/api.hpp"
+#include "chad/api.hpp"
 
-namespace riku {
+namespace chad {
 
 using namespace autons;
 
@@ -73,4 +73,4 @@ void autonCharacterize3Odom() {
     }
 }
 
-}  // namespace riku
+}  // namespace chad

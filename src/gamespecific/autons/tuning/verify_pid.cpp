@@ -1,10 +1,10 @@
 #include "gamespecific/autons.hpp"
 #include "gamespecific/autons/tuning/support.hpp"
 
-#include "riku/api.hpp"
-#include "riku/util/autotune.hpp"
+#include "chad/api.hpp"
+#include "chad/util/autotune.hpp"
 
-namespace riku {
+namespace chad {
 
 using namespace autons;
 
@@ -35,4 +35,4 @@ void autonVerifyPid() {
     out.result("e large and o low -> raise kP");
 }
 
-}  // namespace riku
+}  // namespace chad
