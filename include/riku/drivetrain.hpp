@@ -13,10 +13,18 @@ class Drivetrain {
 public:
     Drivetrain(pros::MotorGroup* leftMotors, pros::MotorGroup* rightMotors,
                float trackWidth, float wheelDiameter, float rpm = 450.0f,
-               float horizontalDrift = 2.0f);
+               float horizontalDrift = 2.0f,
+               pros::MotorGroup* leftSenseMotors = nullptr,
+               pros::MotorGroup* rightSenseMotors = nullptr);
 
     pros::MotorGroup* leftMotors{nullptr};
     pros::MotorGroup* rightMotors{nullptr};
+
+    // Encoder source. Every motor here must carry the SAME cartridge: one
+    // externalGearRatio() covers the whole group, so a mixed group would scale
+    // some motors' degrees wrongly. Null = sense from the command groups.
+    pros::MotorGroup* leftSenseMotors{nullptr};
+    pros::MotorGroup* rightSenseMotors{nullptr};
     float trackWidth;         // inches, center-to-center
     float wheelDiameter;      // inches
     float rpm;                // drive RPM (not cartridge RPM)
@@ -49,6 +57,13 @@ public:
     /// Wheel revs per motor rev (wheel RPM / cartridge RPM). Cached after the
     /// first valid read; returns 1.0 while the gearset is still unknown.
     float externalGearRatio() const;
+
+    pros::MotorGroup* leftSense() const {
+        return (leftSenseMotors != nullptr) ? leftSenseMotors : leftMotors;
+    }
+    pros::MotorGroup* rightSense() const {
+        return (rightSenseMotors != nullptr) ? rightSenseMotors : rightMotors;
+    }
 
 private:
     float groupVelocityInPerSec(const pros::MotorGroup* a,

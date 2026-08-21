@@ -10,9 +10,13 @@ namespace riku {
 
 Drivetrain::Drivetrain(pros::MotorGroup* leftMotors, pros::MotorGroup* rightMotors,
                        float trackWidth, float wheelDiameter, float rpm,
-                       float horizontalDrift)
+                       float horizontalDrift,
+                       pros::MotorGroup* leftSenseMotors,
+                       pros::MotorGroup* rightSenseMotors)
     : leftMotors(leftMotors),
       rightMotors(rightMotors),
+      leftSenseMotors(leftSenseMotors),
+      rightSenseMotors(rightSenseMotors),
       trackWidth(trackWidth),
       wheelDiameter(wheelDiameter),
       rpm(rpm),
@@ -20,11 +24,9 @@ Drivetrain::Drivetrain(pros::MotorGroup* leftMotors, pros::MotorGroup* rightMoto
     // Odometry's motor-encoder fallback assumes positions are in DEGREES.
     // Enforce it — a user who set rotations/counts elsewhere would silently
     // corrupt distance measurements by a factor of 360.
-    if (leftMotors != nullptr) {
-        leftMotors->set_encoder_units_all(pros::E_MOTOR_ENCODER_DEGREES);
-    }
-    if (rightMotors != nullptr) {
-        rightMotors->set_encoder_units_all(pros::E_MOTOR_ENCODER_DEGREES);
+    for (pros::MotorGroup* g : {leftMotors, rightMotors,
+                                leftSenseMotors, rightSenseMotors}) {
+        if (g != nullptr) g->set_encoder_units_all(pros::E_MOTOR_ENCODER_DEGREES);
     }
 }
 
@@ -73,19 +75,19 @@ float Drivetrain::groupVelocityInPerSec(const pros::MotorGroup* a,
 }
 
 float Drivetrain::averageVelocityInPerSec() const {
-    return groupVelocityInPerSec(leftMotors, rightMotors);
+    return groupVelocityInPerSec(leftSense(), rightSense());
 }
 
 float Drivetrain::leftVelocityInPerSec() const {
-    return groupVelocityInPerSec(leftMotors, nullptr);
+    return groupVelocityInPerSec(leftSense(), nullptr);
 }
 
 float Drivetrain::rightVelocityInPerSec() const {
-    return groupVelocityInPerSec(rightMotors, nullptr);
+    return groupVelocityInPerSec(rightSense(), nullptr);
 }
 
 float Drivetrain::averagePositionDeg() const {
-    if (leftMotors == nullptr && rightMotors == nullptr) return 0.0f;
+    if (leftSense() == nullptr && rightSense() == nullptr) return 0.0f;
 
     // A disconnected motor reports PROS_ERR (INT32_MAX ≈ 2.1e9 "degrees").
     // One bad reading would catapult the average — and odometry with it —
@@ -101,8 +103,8 @@ float Drivetrain::averagePositionDeg() const {
 
     double sum = 0.0;
     int count = 0;
-    if (leftMotors != nullptr)  accumulate(leftMotors->get_position_all(),  sum, count);
-    if (rightMotors != nullptr) accumulate(rightMotors->get_position_all(), sum, count);
+    if (leftSense() != nullptr)  accumulate(leftSense()->get_position_all(),  sum, count);
+    if (rightSense() != nullptr) accumulate(rightSense()->get_position_all(), sum, count);
     return (count > 0) ? static_cast<float>(sum / count) : 0.0f;
 }
 
@@ -119,12 +121,12 @@ float Drivetrain::groupPositionDeg(const pros::MotorGroup* g) const {
 }
 
 float Drivetrain::leftPositionIn() const {
-    return groupPositionDeg(leftMotors) / 360.0f * externalGearRatio() *
+    return groupPositionDeg(leftSense()) / 360.0f * externalGearRatio() *
            3.14159265358979f * wheelDiameter;
 }
 
 float Drivetrain::rightPositionIn() const {
-    return groupPositionDeg(rightMotors) / 360.0f * externalGearRatio() *
+    return groupPositionDeg(rightSense()) / 360.0f * externalGearRatio() *
            3.14159265358979f * wheelDiameter;
 }
 
@@ -134,7 +136,7 @@ float Drivetrain::externalGearRatio() const {
     // Resolve cartridge RPM from the configured gearset. get_gearing() can
     // return invalid before the motor responds (e.g. during boot) — in that
     // case return 1.0 WITHOUT caching so a later call can retry.
-    pros::MotorGroup* group = (leftMotors != nullptr) ? leftMotors : rightMotors;
+    pros::MotorGroup* group = (leftSense() != nullptr) ? leftSense() : rightSense();
     if (group == nullptr || rpm <= 0.0f) return 1.0f;
 
     float cartridgeRpm;
