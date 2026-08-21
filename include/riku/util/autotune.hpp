@@ -44,8 +44,13 @@ struct AutoTuneConfig {
 
     StepWeights weights;
 
+    /// Absolute chassis tilt in degrees, if you can supply it. A step trace
+    /// cannot see the robot come up on two wheels.
+    std::function<float()> tiltDeg;
+
     /// Called after each trial so progress is visible on a long run.
-    std::function<void(const char* stage, PIDGains gains, float cost)> onProgress;
+    std::function<void(const char* stage, PIDGains gains,
+                       const StepMetrics& metrics)> onProgress;
 };
 
 
@@ -69,6 +74,14 @@ public:
     /// Metrics for the winning gains of the last completed stage.
     const StepMetrics& lastMetrics() const { return mLast; }
 
+    /// Worst tilt during the last measureAt/evaluate. 0 without tiltDeg.
+    float lastPeakTilt() const { return mPeakTilt; }
+
+    /// One out-and-back at the gains already set, changing nothing. A drivetrain
+    /// is stiction-bound when small and saturated when large, so one amplitude
+    /// does not describe it.
+    StepMetrics measureAt(bool angular, float step);
+
 private:
     struct Trace {
         std::vector<float> t;
@@ -77,7 +90,10 @@ private:
 
     PIDGains tuneAxis(bool angular);
     StepMetrics evaluate(const PIDGains& gains, bool angular, float step);
-    StepMetrics runTrial(bool angular, float from, float to);
+    StepMetrics runSteps(bool angular, float step);
+    /// Steps `delta` from wherever the robot is. Has to be relative: setPose
+    /// cannot move theta, odometry takes it from the IMU.
+    StepMetrics runTrial(bool angular, float delta);
     void report(const char* stage, const PIDGains& gains, const StepMetrics& m);
 
     Chassis& mChassis;
@@ -87,7 +103,9 @@ private:
 
     Trace mTrace;
     pros::Mutex mTraceMutex;
+    float mPeakTilt{0.0f};
     float mTarget{0};
+    float mDelta{0};   // commanded step, signed
     Pose mStartPose;
 };
 

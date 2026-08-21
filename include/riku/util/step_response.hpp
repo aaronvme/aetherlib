@@ -17,6 +17,7 @@ struct StepWeights {
 };
 
 struct StepMetrics {
+    float initial{0};           // error at the first sample, signed
     float overshootPct{0};
     float steadyState{0};
     float settleMs{0};
@@ -34,6 +35,10 @@ inline StepMetrics analyseStep(const std::vector<float>& t,
     if (error.size() < 4 || t.size() != error.size() || step <= 0.0f) return m;
 
     const float initial = error.front();
+    m.initial = initial;   // set before the guard, so a rejection is explicable
+    // The trace must start near +/-step. One that does not is a trial that never
+    // ran, and scoring that as a flawless response is worse than refusing it.
+    if (std::fabs(initial) < 0.5f * step) return m;
     const float sign = (initial >= 0.0f) ? 1.0f : -1.0f;
 
     float worstPast = 0.0f;   // furthest swing past zero, opposite the initial sign
