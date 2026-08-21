@@ -10,7 +10,6 @@ namespace chad {
 
 Drivetrain::Drivetrain(pros::MotorGroup* leftMotors, pros::MotorGroup* rightMotors,
                        float trackWidth, float wheelDiameter, float rpm,
-                       float horizontalDrift,
                        pros::MotorGroup* leftSenseMotors,
                        pros::MotorGroup* rightSenseMotors)
     : leftMotors(leftMotors),
@@ -19,8 +18,7 @@ Drivetrain::Drivetrain(pros::MotorGroup* leftMotors, pros::MotorGroup* rightMoto
       rightSenseMotors(rightSenseMotors),
       trackWidth(trackWidth),
       wheelDiameter(wheelDiameter),
-      rpm(rpm),
-      horizontalDrift(horizontalDrift) {
+      rpm(rpm) {
     // Odometry's motor-encoder fallback assumes positions are in DEGREES.
     // Enforce it — a user who set rotations/counts elsewhere would silently
     // corrupt distance measurements by a factor of 360.

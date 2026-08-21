@@ -13,7 +13,6 @@ class Drivetrain {
 public:
     Drivetrain(pros::MotorGroup* leftMotors, pros::MotorGroup* rightMotors,
                float trackWidth, float wheelDiameter, float rpm = 450.0f,
-               float horizontalDrift = 2.0f,
                pros::MotorGroup* leftSenseMotors = nullptr,
                pros::MotorGroup* rightSenseMotors = nullptr);
 
@@ -28,7 +27,6 @@ public:
     float trackWidth;         // inches, center-to-center
     float wheelDiameter;      // inches
     float rpm;                // drive RPM (not cartridge RPM)
-    float horizontalDrift;
 
     // Voltage, -127 to 127
     void setLeftVoltage(float voltage);

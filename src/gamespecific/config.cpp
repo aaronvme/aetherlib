@@ -91,7 +91,6 @@ Drivetrain drivetrain(&leftMotors, &rightMotors,
                       11.918f,
                       2.6738f,
                       450.0f,
-                      0.0f,
                       &leftBlueMotors,
                       &rightBlueMotors);
 
