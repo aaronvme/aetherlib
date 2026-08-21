@@ -14,24 +14,28 @@ void initialize() {
     // selector.registerAuton("Blue Left", autonBlueLeft);
     // selector.registerAuton("Skills", autonSkills);
 
-    // Characterisation measures constants of this robot; PidAutoTuner and the
-    // sim sweeps search for gains. Run these one per attempt in order, pasting
-    // each printed block into config.cpp first: phase 3 drives on phase 2's
-    // PID, and phase 4 measures the filter phase 3 configures. Results print to
-    // the brain screen and, tethered, to `pros terminal`. Each phase applies its
-    // own values so the next one runs on them, but nothing survives a reboot.
-    // Sized to fit two tiles. See API.md.
+    // Tuning routines. One per attempt, in this order -- each measures
+    // something the next depends on. Results go to the brain screen; paste them
+    // into config.cpp, because nothing survives a reboot.
     //
-    //   1 drive    trackWidth, kV/kS/kA   spins, plus ~4 in for ksStraight
-    //   2 pid      angular + lateral      needs phase 1, 16 in lane
-    //   3 odom     scale, drift           needs phase 2, +-16 in, filters OFF
-    //   4 filters  sensor + pose noise    parked square to a wall
+    //   imu      IMU scale factor        parked, you spin it by hand
+    //   1 drive  trackWidth, kV/kS/kA    spins, then shuttles ~30 in
+    //   probe    are the motions sane    ~16 in
+    //   2 pid    angular + lateral       relay wants +-24 in
+    //   verify   steps on those gains    48 in lane
+    //   mounts   sensor y offsets        turns in place, 20-40 in off a wall
+    //   3 odom   wheel scale, drift      ~66 in ahead, filters OFF
+    //   4 filter sensor + pose noise     corner, plus ~16 in behind
+    //   ramsete  b and zeta              48 x 24 in, needs phase 1's ffGains
+    // selector.registerAuton("Imu scale", autonCalibrateImu);
     // selector.registerAuton("Char 1 drive", autonCharacterize1Drive);
     // selector.registerAuton("Probe 2 motions", autonProbe2Motions);
     // selector.registerAuton("Char 2 pid", autonCharacterize2Pid);
     // selector.registerAuton("Verify pid", autonVerifyPid);
+    // selector.registerAuton("Mounts", autonCalibrateMounts);
     // selector.registerAuton("Char 3 odom", autonCharacterize3Odom);
     // selector.registerAuton("Char 4 filters", autonCharacterize4Filters);
+    // selector.registerAuton("Tune ramsete", autonTuneRamsete);
     // selector.init();
 
     // startTempWarning(master, {&leftMotors, &rightMotors});
@@ -55,13 +59,15 @@ void opcontrol() {
     // registerAutonDisableLine();
     chassis.startTracking();
     // selector.runSelected();
-    autonCharacterize1Drive();
+    autonCalibrateImu();
+    // autonCharacterize/1Drive();
     // autonProbe2Motions();
     // autonCharacterize2Pid();
     // autonVerifyPid();
-    // autonTuneRamsete();
+    // autonCalibrateMounts();
     // autonCharacterize3Odom();
     // autonCharacterize4Filters();
+    // autonTuneRamsete();
     // chassis.setPose({0,0,0});
     // chassis.turnToHeading(90, 2000);
     // chassis.moveToPoint(0, 30, 2000, {.forwards=false});

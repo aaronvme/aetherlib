@@ -1,0 +1,83 @@
+#include "gamespecific/autons.hpp"
+#include "gamespecific/autons/tuning/support.hpp"
+
+#include <cmath>
+#include <string>
+#include <vector>
+
+#include "chad/api.hpp"
+#include "chad/util/sensor_calibrator.hpp"
+
+namespace chad {
+
+using namespace autons;
+
+void autonCalibrateMounts() {
+    Report out;
+    out("mounts: sensor y offsets");
+    if (!headingOk(out)) return;
+    out("square to a wall, 20-40 in");
+    out("it turns a full circle");
+    setFilters(false);
+
+    // A robot-frame beam angle is CCW positive and a VEX heading is CW, so a
+    // sensor at robot-frame theta aims where the robot started once the robot
+    // has turned to base + theta.
+    const float base = stdRadToVexDeg(chassis.getPose().theta);
+
+    std::vector<CalibrationConfig> cfgs;
+    std::vector<int> slots;
+    for (int i = 0; i < MAX_DISTANCE_SENSORS; ++i) {
+        if (distSensors[i] == nullptr) continue;
+        CalibrationConfig c;
+        c.name = std::to_string(i);
+        c.sensor = distSensors[i];
+        c.baseHeadingDeg =
+            std::fmod(base + radToDeg(sensorMounts[i].theta) + 360.0f, 360.0f);
+        cfgs.push_back(c);
+        slots.push_back(i);
+    }
+    if (cfgs.empty()) {
+        out.result("no distance sensors configured");
+        return;
+    }
+
+    // Symmetric in sin(theta), which is the regressor, and five angles leave a
+    // residual worth reading. The stock {0,30,35} does neither.
+    SensorCalibrator::Config scfg;
+    scfg.sweepAnglesDeg = {-30.0f, -15.0f, 0.0f, 15.0f, 30.0f};
+    scfg.verbose = false;
+    SensorCalibrator cal(chassis, scfg);
+
+    out("%d sensors, ~%d s", static_cast<int>(cfgs.size()),
+        static_cast<int>(cfgs.size() * 9));
+    const auto results = cal.calibrateAll(cfgs);
+
+    int applied = 0;
+    for (size_t k = 0; k < results.size(); ++k) {
+        const CalibrationResult& r = results[k];
+        const int i = slots[k];
+        if (!r.valid || r.samplesUsed < 3) {
+            out.result("s%d FAILED n=%d", i, r.samplesUsed);
+            continue;
+        }
+        out.result("s%d y %+.2f was %+.2f r%.2f", i, r.offsetIn,
+                   sensorMounts[i].y, r.confidence);
+        sensorMounts[i].y = r.offsetIn;
+        applied++;
+    }
+
+    if (applied == 0) {
+        out.result("nothing solved. is the wall");
+        out.result("flat and in range at +-30?");
+        return;
+    }
+    out.result("copy the y values into");
+    out.result("sensorMounts in config.cpp.");
+    // The filters copied sensorMounts at construction, so nothing running now
+    // sees the new values.
+    out.result("reboot for MCL to use them");
+    out.result("r under ~0.05 is a good fit");
+}
+
+}  // namespace chad
