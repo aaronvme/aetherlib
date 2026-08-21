@@ -162,7 +162,10 @@ float OdomTracking::currentHeadingRad() const {
         // PROS returns PROS_ERR_F (== INFINITY) on an IMU fault (disconnect,
         // transient error, mid-calibration). Feeding that downstream corrupts
         // the pose; hold the last good heading instead of integrating garbage.
-        if (!std::isfinite(rawHeading)) return mPrevHeadingRad;
+        if (!std::isfinite(rawHeading)) {
+            ++mImuFaults;
+            return mPrevHeadingRad;
+        }
         // Apply calibration scale factor to correct IMU under-reporting.
         // V5 IMUs typically read ~354.25° for a 360° physical turn.
         float scaledHeading = rawHeading * mSensors.imuScaleFactor;

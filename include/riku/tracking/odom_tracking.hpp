@@ -176,6 +176,9 @@ public:
     // Get the primary IMU heading (degrees, VEX convention: 0=forward, CW positive)
     float imuHeadingDeg() const;
 
+    /// Non-finite heading reads. Climbing means frozen, not steady.
+    uint32_t imuFaults() const { return mImuFaults; }
+
     // Get heading in standard math radians
     float imuHeadingRad() const;
 
@@ -193,6 +196,9 @@ private:
     float mPrevVertDist{0.0f};     // accumulated vertical distance last update
     float mPrevHorizDist{0.0f};    // accumulated horizontal distance last update
     float mPrevHeadingRad{0.0f};   // IMU heading last update
+    // A disconnected IMU holds the heading at its last good value, which looks
+    // exactly like a robot that is not turning.
+    mutable uint32_t mImuFaults{0};
     std::atomic<bool> mBackgroundUpdatesEnabled{false};
 
     // Most recent decomposed delta, stored for MCL per-axis noise.
