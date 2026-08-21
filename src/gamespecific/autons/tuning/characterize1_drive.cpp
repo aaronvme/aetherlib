@@ -46,6 +46,15 @@ void autonCharacterize1Drive() {
     out.result("ksStraight=%.4ff ksTurn=%.4ff", str.kS, turn.kS);
     out.result("kaTurn=%.4ff kP=%.2ff", ramseteFf.kaTurn, ramseteFf.kP);
     out.result("r2=%.3f tau=%.3fs", str.r2, tau);
+    // Free speed the fit implies, against the rpm the RAMSETE profile cruises at.
+    const float ffTop =
+        str.kV > 0.0f ? (12.0f - str.kS) / str.kV / INCH_TO_METER : 0.0f;
+    const float cfgTop = drivetrain.rpm / 60.0f * PI * drivetrain.wheelDiameter;
+    out.result("top ff %.0f cfg %.0f in/s", ffTop, cfgTop);
+    if (cfgTop > 1.0f && ffTop > 1.0f) {
+        out.result("rpm = %.0ff (is %.0f)", drivetrain.rpm * ffTop / cfgTop,
+                   drivetrain.rpm);
+    }
     if (tau < 0.05f) {
         out.result("tau under 50ms: kA looks");
         out.result("wrong, do not trust kP");
