@@ -118,13 +118,32 @@ std::array<Pose, MAX_DISTANCE_SENSORS> sensorMounts = {{
     {  1.0f,  -3.75f,  0.0f        },//done
     {  0.5f,  6.25f,  HALF_PI    },//done
     { -0.5f,  5.0f,  PI         },//done
-    {  -0.75f, -6.75f,  3.0f * HALF_PI },
+    {  -0.75f, -6.75f,  3.0f * HALF_PI },//done
 }};
 
 
+// Still on you. Nothing in the tuning autons measures any of this.
+//
+//   run a routine for it
+//     ScaledIMU actualReading   autonCalibrateImu, before anything else
+//     sensorMounts[i].y         autonCalibrateMounts
+//     drivetrain rpm            phase 1 prints the value its kV implies
+//
+//   came off simulator sweeps; the structure is sound, the number is a guess
+//     mcl.hitWeight 1.0   mcl.shortWeight 0.50   mcl.shortDecaySigmas 1.2
+//     mcl.randWeight 0.0008   ekf.mclSigmaScale 1.6   ekf.mclSigmaFloor 1.2
+//     settleTimeMs, and the two resample variances tagged [sim] below.
+//     distSyncProp and thetaSyncProp are inert while the EKF is on.
+//     For the two mclSigma* the check is phase 4's "gate streak / reloc" line.
+//
+//   no routine can measure it -- out-and-back cancels the effect by design
+//     ekf.vertBiasProp 0.06   ekf.slipBiasProp 0.05   ekf.biasDecorrIn 40
+//
+// Per-field tags for all 65 filter settings are in
+// chad/tracking/mcl_tracking.hpp and ekf_tracking.hpp.
 ChassisConfig chassisConfig = {
-    .lateralGains = { 9.012f, 0.0f, 1.15f },
-    .angularGains = { 176.607f, 0.0f, 9.933f },
+    .lateralGains = { 9.012f, 0.0f, 1.15f },      // phase 2
+    .angularGains = { 176.607f, 0.0f, 9.933f },   // phase 2
     .lateralWindupRange = 0.0f,
     .angularWindupRange = 0.0f,
     .lateralDerivativeFilter = 0.6f,
@@ -132,12 +151,12 @@ ChassisConfig chassisConfig = {
     .lateralSlewPerSec = 450.0f,   // 0 to full drive in ~280 ms
     // .throttleCurve = { .deadband = 10.0f, .minOutput = 15.0f, .curve = 1.2f },
     // .steerCurve = { .deadband = 10.0f, .minOutput = 10.0f, .curve = 1.3f },
-    .targetToleranceIn = 1.0f,
+    .targetToleranceIn = 1.0f,     // phase 4 floor, then your call
     .targetToleranceDeg = 1.5f,
-    .bearingHoldDist = 1.0f,
+    .bearingHoldDist = 1.0f,       // phase 4
     .distanceSensors = distSensors,
     .sensorMounts = sensorMounts,
-    .settleTimeMs = 110,
+    .settleTimeMs = 110,           // [sim]
     .useMclTracking = true,
     .useRclTracking = false,
     .useEkfTracking = true,
@@ -146,20 +165,21 @@ ChassisConfig chassisConfig = {
         .particleCount = 1024,
         .resampleThreshold = 512,
         .maxSensorRange = 140.0f,
-        .distResampleVariance = 1.5f,
-        .thetaResampleVariance = 0.01f,
+        .distResampleVariance = 1.5f,      // [sim]
+        .thetaResampleVariance = 0.01f,    // [sim]
         .maxThetaDeviation = 0.08f,
         .trackingWheelVariance = 0.08f,
-        .imeVariance = 0.0040f,
+        .imeVariance = 0.0040f,            // phase 3
         .imuVariance = 0.005f,
-        .horizDependentVarianceProp = 0.01f,
-        .horizConstantNoise = 0.0040f,
-        .distSyncProp = 0.10f,
-        .thetaSyncProp = 0.001f,
+        .horizDependentVarianceProp = 0.0040f,  // phase 3
+        .horizConstantNoise = 0.03f,       // [gap] per update, not per inch
+        .distSyncProp = 0.10f,             // [sim]
+        .thetaSyncProp = 0.001f,           // [sim]
         .updatePeriodMs = 25.0f,
         .confidenceThreshold = 10,
         .minSensorRange = 1.0f,
-        .rangeSigmaCloseIn = 0.0680f,
+        .rangeSigmaCloseIn = 0.0680f,      // phase 4
+        .rangeSigmaProp = 0.05f,           // phase 4 range sweep
         .autoSync = true,
     },
     // .rclConfig = {
@@ -173,9 +193,10 @@ ChassisConfig chassisConfig = {
     //     .useAccumulation = false,
     // },
     .ekfConfig = {
-        .vertNoiseProp = 0.0040f,
-        .slipNoiseProp = 0.0040f,
-        .rangeSigmaBase = 0.0680f,
+        .vertNoiseProp = 0.0040f,   // phase 3
+        .slipNoiseProp = 0.0040f,   // phase 3
+        .rangeSigmaBase = 0.0680f,  // phase 4 range sweep
+        .rangeSigmaProp = 0.030f,   // phase 4 range sweep
     },
 };
 
@@ -189,7 +210,7 @@ FeedforwardGains ramseteFf = {
     .kaTurn = 0.0202f,
     .ksStraight = 0.7020f,
     .ksTurn = 1.1607f,
-    .kP = 13.0f,
+    .kP = 13.0f,          // phase 1 derives this
     .integralClamp = 2.0f,
 };
 Chassis chassis(drivetrain, odomSensors, chassisConfig);
