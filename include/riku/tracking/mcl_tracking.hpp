@@ -37,17 +37,23 @@ public:
     // ========================================================================
 
     struct Config {
-        int particleCount = 1024;
-        int resampleThreshold = 512;      // N_eff below this triggers resample
-        float maxSensorRange = 100.0f;     // inches
+        // Tags: [robot] phase 3 or 4 measures it and prints it -- paste it in.
+        //       [yours] a fact about your hardware or CPU budget. Set it once.
+        //       [model] a modelling choice or a sensor/statistics standard, not a
+        //               property of your robot. Nothing to measure.
+        //       [sim]   the VALUE came off simulator sweeps. Structure is sound,
+        //               the number deserves checking on hardware.
+        int particleCount = 1024;   // [yours]
+        int resampleThreshold = 512;      // N_eff below this triggers resample [model]
+        float maxSensorRange = 100.0f;     // inches [yours]
         // Do not lower this to tighten the estimate. It is what lets the cloud
         // explore, and it is the difference between recovering from a kidnap and
         // not: at 1.5 recovery lands 3 runs in 4, and at 1.0, 0.6 and 0.3 it
         // never recovers at all, while every smoothness metric improves. The
         // tempting direction is the broken one.
-        float distResampleVariance = 1.5f; // inches, jitter added during resample
-        float thetaResampleVariance = 0.01f;  // radians
-        float maxThetaDeviation = 0.08f;   // radians, clamp particle theta vs IMU
+        float distResampleVariance = 1.5f; // inches, jitter added during resample [sim]
+        float thetaResampleVariance = 0.01f;  // radians [sim]
+        float maxThetaDeviation = 0.08f;   // radians, clamp particle theta vs IMU [model]
 
         // Per-sensor-type noise multipliers.
         // These scale the standard normal noise applied to each axis's motion delta.
@@ -55,27 +61,27 @@ public:
         //   - Tracking wheels: direct ground contact, low slip
         //   - IME (motor encoders): wheel slip, gear backlash → higher variance
         //   - No sensor: pure random walk, no measurement at all
-        float trackingWheelVariance = 0.08f;   // dedicated tracking (dead) wheels
-        float imeVariance = 0.12f;             // integrated motor encoders (more slip)
-        float imuVariance = 0.005f;
+        float trackingWheelVariance = 0.08f;   // dedicated tracking (dead) wheels [model]
+        float imeVariance = 0.12f;             // integrated motor encoders (more slip) [robot]
+        float imuVariance = 0.005f;   // [model]
 
         // Horizontal noise when no lateral sensor exists.
         // Without a horizontal tracking wheel, lateral position is unmeasured.
         // Two noise terms combine:
         //   1. Movement-proportional: lateral slip scales with forward travel
         //   2. Constant: baseline random walk each update
-        float horizDependentVarianceProp = 0.03f;  // multiplied by |dVert|
-        float horizConstantNoise = 0.03f;          // inches/update baseline
+        float horizDependentVarianceProp = 0.03f;  // multiplied by |dVert| [sim]
+        float horizConstantNoise = 0.03f;          // inches/update baseline [robot]
 
         // Trades kidnap latency for smoothness, and only applies when the EKF is
         // off -- with it on, it owns the writeback and this is inert. 0.06 is
         // 1.75x smoother than 0.10 for 0.3 s more recovery; 0.03 is 3.1x for
         // 1.1 s. Raise it back toward 0.10 if recovery speed matters more.
-        float distSyncProp = 0.06f;        // lerp factor for syncing to chassis
-        float thetaSyncProp = 0.001f;
-        float updatePeriodMs = 25.0f;      // background task interval
-        int confidenceThreshold = 10;      // min sensor confidence
-        float minSensorRange = 1.0f;       // mm — readings below this are invalid
+        float distSyncProp = 0.06f;        // lerp factor for syncing to chassis [sim]
+        float thetaSyncProp = 0.001f;   // [sim]
+        float updatePeriodMs = 25.0f;      // background task interval [yours]
+        int confidenceThreshold = 10;      // min sensor confidence [yours]
+        float minSensorRange = 1.0f;       // mm — readings below this are invalid [yours]
                                            //   (increase if sensors are recessed)
 
         // A beam is dropped when the obstacle is what it actually RANGED: inside
@@ -83,12 +89,12 @@ public:
         // and discards good wall readings; a pencil ray misses most real hits.
         // Judged per particle (see updateWeights) -- deciding once from the
         // estimate would use the pose to choose which readings may correct it.
-        float obstacleConeFrac = 0.22f;    // tan(12.5 deg), the V5 half-cone
-        float obstacleRangeTol = 8.0f;     // inches; reading vs obstacle surface
+        float obstacleConeFrac = 0.22f;    // tan(12.5 deg), the V5 half-cone [model]
+        float obstacleRangeTol = 8.0f;     // inches; reading vs obstacle surface [model]
 
         // Score for a beam blocked for this particle. Not 1.0, or particles would
         // win by hiding behind obstacles.
-        float deadzoneLikelihood = 0.25f;
+        float deadzoneLikelihood = 0.25f;   // [model]
 
         // Beam model mixture. A pure Gaussian says a reading 6 in short is
         // impossible, so one robot in the way annihilates the whole cloud; the
@@ -105,13 +111,13 @@ public:
         // Beam sigma. Close readings carry roughly fixed noise, far ones scale
         // with the reading. Measure both with Characterizer::measureRangeNoise()
         // rather than trusting these: they came off one set of sensors.
-        float rangeSigmaCloseIn = 0.787f;   // used at or below 200 mm
-        float rangeSigmaProp = 0.05f;       // fraction of the reading beyond that
+        float rangeSigmaCloseIn = 0.787f;   // used at or below 200 mm [robot]
+        float rangeSigmaProp = 0.05f;       // fraction of the reading beyond that [robot]
 
-        float hitWeight = 1.0f;          // weight on the Gaussian
-        float shortWeight = 0.50f;       // weight on the unexpected-obstacle tail
-        float shortDecaySigmas = 1.2f;   // decay of that tail, in sigmas
-        float randWeight = 0.0008f;      // floor; no single beam can zero a particle
+        float hitWeight = 1.0f;          // weight on the Gaussian [sim]
+        float shortWeight = 0.50f;       // weight on the unexpected-obstacle tail [sim]
+        float shortDecaySigmas = 1.2f;   // decay of that tail, in sigmas [sim]
+        float randWeight = 0.0008f;      // floor; no single beam can zero a particle [sim]
 
         // Augmented MCL recovery (Probabilistic Robotics 8.3, in logs). A
         // kidnapped robot makes every particle equally wrong, so N_eff stays
@@ -122,8 +128,8 @@ public:
         // not reach injectResampleFloor: forcing a resample every cycle adds
         // distResampleVariance of jitter every cycle, which is a random walk
         // that dwarfs the drift the filter exists to correct.
-        float alphaSlow = 0.005f;
-        float alphaFast = 0.10f;
+        float alphaSlow = 0.005f;   // [model]
+        float alphaFast = 0.10f;   // [model]
         //
         // OFF by default, and not yet safe to turn on. With injection enabled a
         // parked filter migrates to a false mode within ~1.5 s at poses where
@@ -134,10 +140,10 @@ public:
         // hiding behind an obstacle must not be cheaper than measuring a wall.
         // Set to 0.10 to exercise it: recovery from a 36 in displacement goes
         // from never to 0.2 in within 3 s.
-        float maxRandomFrac = 0.0f;      // cap on the share redrawn per resample
-        float injectResampleFloor = 0.03f;  // below this, do not force a resample
+        float maxRandomFrac = 0.0f;      // cap on the share redrawn per resample [model]
+        float injectResampleFloor = 0.03f;  // below this, do not force a resample [model]
 
-        bool autoSync = true;              // automatically sync pose to odometry
+        bool autoSync = true;              // automatically sync pose to odometry [model]
     };
 
     /// Pose estimate plus the cloud's own account of how sure it is.

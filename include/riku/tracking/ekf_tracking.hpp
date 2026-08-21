@@ -41,15 +41,22 @@ public:
     static constexpr int SENSOR_COUNT = MAX_DISTANCE_SENSORS;
 
     struct Config {
+        // Tags: [robot] phase 3 or 4 measures it and prints it -- paste it in.
+        //       [yours] a fact about your hardware or CPU budget. Set it once.
+        //       [model] a modelling choice or a sensor/statistics standard, not a
+        //               property of your robot. Nothing to measure.
+        //       [sim]   the VALUE came off simulator sweeps. Structure is sound,
+        //               the number deserves checking on hardware.
+        //       [gap]   nothing here measures it; see the bias comments.
         // --- process noise -------------------------------------------------
         // Odometry error grows with distance travelled, not with wall time, so
         // these are per-inch and per-radian rather than per-second. The floors
         // stop P collapsing to zero while parked, which would lock the filter
         // onto its own prediction and reject every real measurement.
-        float vertNoiseProp{0.045f};      // sigma per inch of |dVert|
-        float horizNoiseProp{0.045f};     // sigma per inch of |dHoriz|
-        float slipNoiseProp{0.035f};      // lateral sigma per inch driven
-        float slipNoiseFloor{0.010f};     // lateral sigma per update
+        float vertNoiseProp{0.045f};      // sigma per inch of |dVert| [robot]
+        float horizNoiseProp{0.045f};     // sigma per inch of |dHoriz| [model]
+        float slipNoiseProp{0.035f};      // lateral sigma per inch driven [robot]
+        float slipNoiseFloor{0.010f};     // lateral sigma per update [model]
 
         // Slip and a wrong wheel diameter are SYSTEMATIC: the error they leave
         // grows with distance driven, not with its square root. Charged per tick
@@ -58,62 +65,62 @@ public:
         // the filter turns overconfident, and the Mahalanobis gate starts
         // rejecting the correction it needs. These add a term that accumulates
         // linearly in L instead, as a bias decorrelating over biasDecorrIn.
-        float vertBiasProp{0.06f};        // systematic along-track scale error
-        float slipBiasProp{0.05f};        // systematic cross-track error
-        float biasDecorrIn{40.0f};        // inches over which that bias renews
-        float thetaNoiseProp{0.020f};     // sigma per radian of |dTheta|
-        float thetaNoisePerInch{0.0015f}; // heading sigma per inch driven
-        float posNoiseFloor{0.015f};      // inches per update
-        float thetaNoiseFloor{0.0004f};   // radians per update
+        float vertBiasProp{0.06f};        // systematic along-track scale error [gap]
+        float slipBiasProp{0.05f};        // systematic cross-track error [gap]
+        float biasDecorrIn{40.0f};        // inches over which that bias renews [gap]
+        float thetaNoiseProp{0.020f};     // sigma per radian of |dTheta| [model]
+        float thetaNoisePerInch{0.0015f}; // heading sigma per inch driven [model]
+        float posNoiseFloor{0.015f};      // inches per update [model]
+        float thetaNoiseFloor{0.0004f};   // radians per update [model]
 
         // --- range-to-wall measurements ------------------------------------
-        bool  useRangeUpdates{true};
-        float rangeSigmaBase{0.60f};      // inches, fixed part
-        float rangeSigmaProp{0.030f};     // fraction of the reading
-        float rangeGateChi2{9.0f};        // 1 dof; 9 == 3 sigma
+        bool  useRangeUpdates{true};   // [yours]
+        float rangeSigmaBase{0.60f};      // inches, fixed part [robot]
+        float rangeSigmaProp{0.030f};     // fraction of the reading [robot]
+        float rangeGateChi2{9.0f};        // 1 dof; 9 == 3 sigma [model]
         // Past this incidence a real ToF return is unreliable and the range
         // Jacobian blows up (1/cos), so the beam is worth more as noise than
         // as evidence.
-        float maxIncidenceRad{1.15f};     // 66 degrees off the wall normal
-        float maxRangeIn{100.0f};
-        float sentinelMm{9000.0f};        // at or above this, no return
-        float minRangeMm{20.0f};
-        int   minConfidence{10};
+        float maxIncidenceRad{1.15f};     // 66 degrees off the wall normal [model]
+        float maxRangeIn{100.0f};   // [yours]
+        float sentinelMm{9000.0f};        // at or above this, no return [yours]
+        float minRangeMm{20.0f};   // [yours]
+        int   minConfidence{10};   // [yours]
 
         // --- obstacle deadzones --------------------------------------------
         // Same cone-plus-range test MCL uses, but widened by the filter's own
         // position sigma: when the EKF is unsure where it is, it is also unsure
         // which beams a post could be spoiling, and should drop more of them.
-        float obstacleConeFrac{0.22f};    // tan(12.5 deg), the V5 half-cone
-        float obstacleRangeTol{6.0f};     // inches
-        float obstacleSigmaPad{2.0f};     // extra tolerance, in position sigmas
+        float obstacleConeFrac{0.22f};    // tan(12.5 deg), the V5 half-cone [model]
+        float obstacleRangeTol{6.0f};     // inches [model]
+        float obstacleSigmaPad{2.0f};     // extra tolerance, in position sigmas [model]
 
         // --- IMU heading ---------------------------------------------------
-        bool  useImuHeading{true};
-        float imuSigmaRad{0.006f};
+        bool  useImuHeading{true};   // [yours]
+        float imuSigmaRad{0.006f};   // [model]
 
         // --- MCL position --------------------------------------------------
-        bool  useMclUpdates{true};
+        bool  useMclUpdates{true};   // [yours]
         // The particle cloud's own spread understates its error once it has
         // converged, so scale it up and never let it claim better than the
         // floor. Trusting the raw spread makes the EKF chase MCL's jitter.
-        float mclSigmaScale{1.6f};
-        float mclSigmaFloor{1.2f};        // inches
-        float mclGateChi2{11.8f};         // 2 dof; 11.8 == 3 sigma
+        float mclSigmaScale{1.6f};   // [sim]
+        float mclSigmaFloor{1.2f};        // inches [sim]
+        float mclGateChi2{11.8f};         // 2 dof; 11.8 == 3 sigma [model]
         // A kidnapped robot fails the gate forever, which is the one case where
         // gating is wrong. Count consecutive failures and hand over to MCL once
         // it is both persistent and coming from a healthy cloud.
-        int   mclResetCycles{10};
-        float mclMinNeffFrac{0.20f};
+        int   mclResetCycles{10};   // [model]
+        float mclMinNeffFrac{0.20f};   // [model]
 
         // --- output ---------------------------------------------------------
-        bool  autoSync{true};             // write the fused pose into odometry
+        bool  autoSync{true};             // write the fused pose into odometry [model]
         // Fraction of the correction applied per update. A hard write steps the
         // pose every cycle and every controller downstream differentiates it;
         // the filter's own state stays exact either way. Relocation bypasses it.
-        float syncProp{0.12f};
-        float thetaSyncProp{0.20f};
-        float updatePeriodMs{10.0f};
+        float syncProp{0.12f};   // [model]
+        float thetaSyncProp{0.20f};   // [model]
+        float updatePeriodMs{10.0f};   // [model]
     };
 
     EkfTracking(OdomTracking& odom,
