@@ -1,11 +1,36 @@
 #include "gamespecific/autons.hpp"
 #include "gamespecific/autons/tuning/support.hpp"
 
+#include <algorithm>
+#include <cmath>
+#include <vector>
+
 #include "chad/api.hpp"
 
 namespace chad {
 
 using namespace autons;
+
+namespace {
+
+// Least squares y = a + b*x, plus the through-origin slope MCL's model wants.
+bool fitSigma(const std::vector<float>& x, const std::vector<float>& y,
+              float& a, float& b, float& originSlope) {
+    const int n = static_cast<int>(x.size());
+    if (n < 3) return false;
+    double sx = 0, sy = 0, sxx = 0, sxy = 0;
+    for (int i = 0; i < n; ++i) {
+        sx += x[i]; sy += y[i]; sxx += x[i] * x[i]; sxy += x[i] * y[i];
+    }
+    const double det = n * sxx - sx * sx;
+    if (std::fabs(det) < 1e-9 || sxx < 1e-9) return false;
+    b = static_cast<float>((n * sxy - sx * sy) / det);
+    a = static_cast<float>((sy - b * sx) / n);
+    originSlope = static_cast<float>(sxy / sxx);
+    return true;
+}
+
+}  // namespace
 
 void autonCharacterize4Filters() {
     Report out;
@@ -60,6 +85,61 @@ void autonCharacterize4Filters() {
     out.result("targetTolerance >= %.2ff", noise.suggestTolerance);
     out.result("bearingHoldDist = %.2ff", noise.suggestBearingHold);
     out.result("pose sigma %.2fin pk %.2fin", noise.sigmaIn, noise.peakIn);
+
+    // The EKF gate is 3 sigma on the combined covariance, so a healthy filter
+    // rejects an MCL update now and then and never twice running. A streak that
+    // climbs, or a relocate nobody caused, means the assumed sigma is too small.
+    out.result("gate streak %d reloc %d",
+               chassis.ekf().mclRejectStreak(), chassis.ekf().relocateCount());
+
+    // Sigma against range needs more than one range, so back away from the wall
+    // and re-measure. Costs about 16 in behind the robot.
+    constexpr int kStops = 3;
+    constexpr float kStopIn = 8.0f;
+    std::vector<float> xs, ys;
+    for (int i = 0; i < MAX_DISTANCE_SENSORS; ++i) {
+        if (beams.samples[i] > 8) {
+            xs.push_back(beams.meanIn[i]);
+            ys.push_back(beams.sigmaIn[i]);
+        }
+    }
+    for (int stop = 1; stop < kStops; ++stop) {
+        out("range sweep %d/%d", stop, kStops - 1);
+        chassis.moveDistance(-kStopIn, 4000);
+        const auto b = ch.measureRangeNoise(distSensors);
+        for (int i = 0; i < MAX_DISTANCE_SENSORS; ++i) {
+            if (b.samples[i] > 8) {
+                xs.push_back(b.meanIn[i]);
+                ys.push_back(b.sigmaIn[i]);
+            }
+        }
+    }
+    chassis.moveDistance((kStops - 1) * kStopIn, 6000);
+
+    float a = 0.0f, slope = 0.0f, originSlope = 0.0f;
+    if (!fitSigma(xs, ys, a, slope, originSlope)) {
+        out.result("range fit needs 3+ points,");
+        out.result("got %d. keep the values above",
+                   static_cast<int>(xs.size()));
+        return;
+    }
+    auto ekf2 = chassis.ekf().config();
+    ekf2.rangeSigmaBase = std::max(a, 0.0f);
+    ekf2.rangeSigmaProp = std::max(slope, 0.0f);
+    chassis.ekf().setConfig(ekf2);
+    auto mcl2 = chassis.mcl().config();
+    mcl2.rangeSigmaProp = std::max(originSlope, 0.0f);
+    chassis.mcl().setConfig(mcl2);
+
+    out.result("range fit supersedes:");
+    out.result("ekf.rangeSigmaBase = %.4ff", std::max(a, 0.0f));
+    out.result("ekf.rangeSigmaProp = %.4ff", std::max(slope, 0.0f));
+    out.result("mcl.rangeSigmaProp = %.4ff", std::max(originSlope, 0.0f));
+    out.result("from %d readings", static_cast<int>(xs.size()));
+    if (slope < 0.0f) {
+        out.result("slope came out negative:");
+        out.result("noise did not grow with range");
+    }
 }
 
 }  // namespace chad

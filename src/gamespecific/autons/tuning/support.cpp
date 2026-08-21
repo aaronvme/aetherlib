@@ -48,11 +48,16 @@ void Report::result(const char* fmt, ...) {
     va_end(a);
     printf("%s\n", buf);
     mPage.emplace_back(buf);
+    // Medium while the page fits, small once it does not: a result you cannot
+    // read is the same as a result that was never printed.
+    const bool small = mPage.size() > static_cast<size_t>(kResultLines);
+    const auto font = small ? pros::E_TEXT_SMALL : pros::E_TEXT_MEDIUM;
+    const int cap = small ? kProgressLines : kResultLines;
     pros::screen::erase();
     int line = 1;
     for (const auto& l : mPage) {
-        if (line > kResultLines) break;
-        pros::screen::print(pros::E_TEXT_MEDIUM, line++, "%s", l.c_str());
+        if (line > cap) break;
+        pros::screen::print(font, line++, "%s", l.c_str());
     }
 }
 
