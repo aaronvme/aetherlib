@@ -37,6 +37,7 @@ extern std::array<pros::Distance*, MAX_DISTANCE_SENSORS> distSensors;
 extern std::array<Pose, MAX_DISTANCE_SENSORS> sensorMounts;
 
 extern ChassisConfig chassisConfig;
+extern FeedforwardGains ramseteFf;
 extern Chassis chassis;
 
 extern AutonSelector selector;
