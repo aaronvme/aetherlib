@@ -854,6 +854,20 @@ p.ffGains.integralClamp = 2.0f;
 p.targetTolerance       = noise.suggestTolerance;
 ```
 
+`ffGains` is per-motion, so the fitted values need somewhere to live between
+runs. `config.cpp` holds one `FeedforwardGains ramseteFf` for that; write the
+phase 1 numbers there and pass it to every motion that follows a path:
+
+```cpp
+p.useVelocityController = true;
+p.ffGains               = ramseteFf;
+```
+
+`ffGains` is in metres and volts, unlike the rest of the API. `kV` comes out the
+same whether the ramp drives straight or spins, because it is fitted against
+per-side wheel speed either way -- which is what lets phase 1 skip the straight
+ramp when there is no room for one.
+
 `measureScale()` needs a tape measure; it returns the factor to multiply
 `Drivetrain::wheelDiameter` by.
 
