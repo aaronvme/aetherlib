@@ -303,10 +303,14 @@ void Chassis::executeCurrentMotion() {
     // live pose moves the target with the robot — the error never shrinks and
     // every moveDistance runs at full output until its timeout.
     float distTargetX = 0.0f, distTargetY = 0.0f;
+    // A straight drive holds one heading, so the steering reference is constant.
+    // A live bearing flips 180 degrees the moment the robot passes the target.
+    float distAxisRad = 0.0f;
     if (req.type == MotionType::Distance) {
         // Pose is kept fresh by the background odometry task — no update() here.
         Pose startPose = mDryRun ? mDryRunPose : mOdom.getPose();
         float dir = req.moveDistParams.forwards ? 1.0f : -1.0f;
+        distAxisRad = startPose.theta;
         distTargetX = startPose.x + req.targetDistance * dir * std::cos(startPose.theta);
         distTargetY = startPose.y + req.targetDistance * dir * std::sin(startPose.theta);
     }
@@ -407,6 +411,9 @@ void Chassis::executeCurrentMotion() {
     bool bearingHeld = false;
     float heldBearing = 0.0f;
 
+    // Zeroed per motion, so a queued one cannot inherit the ramp.
+    float prevLateralOut = 0.0f;
+
     uint32_t prevTick = pros::millis();
 
     while (mMotionRunning && !mMotionCancelled) {
@@ -435,21 +442,16 @@ void Chassis::executeCurrentMotion() {
             // motion still aims correctly after a preceding turn.
             float targetX = distTargetX;
             float targetY = distTargetY;
-            float distErr = distanceToPoint(pose, targetX, targetY);
-            lateralOut = mLateralPID.update(distErr);
 
-            float targetBearingRad = std::atan2(targetY - pose.y, targetX - pose.x);
-            if (!req.moveDistParams.forwards) {
-                // Backward: the "front" is the robot's back.  Face AWAY from
-                // the target so the negated lateral output drives the back
-                // toward it.  The heading error stays small because the
-                // reverse bearing is near the robot's natural heading.
-                targetBearingRad = wrapRad(targetBearingRad + PI);
-                lateralOut = -lateralOut;
-            }
-            float headingErrRad = angleDiffRad(pose.theta, targetBearingRad);
-            angularOut = mAngularPID.update(headingErrRad);
-            settled = std::fabs(distErr) < req.moveDistParams.targetTolerance;
+            // Signed along the fixed axis, so an overshoot backs up instead of
+            // turning around.
+            const float along = (targetX - pose.x) * std::cos(distAxisRad) +
+                                (targetY - pose.y) * std::sin(distAxisRad);
+            lateralOut = mLateralPID.update(along);
+
+            // Reverse keeps this heading; the sign of `along` sends it back.
+            angularOut = mAngularPID.update(angleDiffRad(pose.theta, distAxisRad));
+            settled = std::fabs(along) < req.moveDistParams.targetTolerance;
             break;
         }
         case MotionType::Point: {
@@ -809,6 +811,14 @@ void Chassis::executeCurrentMotion() {
         lateralOut = clamp(lateralOut, -latLimit, latLimit);
         angularOut = clamp(angularOut, -angLimit, angLimit);
 
+        // RAMSETE and swings set their own motor commands and are unaffected.
+        if (mConfig.lateralSlewPerSec > 0.0f) {
+            const float step = mConfig.lateralSlewPerSec * tickDt;
+            lateralOut = clamp(lateralOut, prevLateralOut - step,
+                               prevLateralOut + step);
+        }
+        prevLateralOut = lateralOut;
+
         // Compute motor outputs: tank-style mix, or direct (Swing / RAMSETE)
         {
         float left, right;
@@ -910,11 +920,25 @@ void Chassis::executeCurrentMotion() {
 // Movement Commands (public API)
 // ========================================================================
 
+namespace {
+/// Negative means unspecified. Resolved here so the control loop never sees the
+/// sentinel.
+float orConfig(float v, float fallback) { return v >= 0.0f ? v : fallback; }
+}  // namespace
+
 void Chassis::moveDistance(float target, float timeout, const MoveDistanceParams& params, bool async) {
     MotionRequest req;
     req.type = MotionType::Distance;
-    req.targetDistance = target;     // store raw distance — target X/Y computed at exec time
     req.moveDistParams = params;
+    req.moveDistParams.targetTolerance =
+        orConfig(params.targetTolerance, mConfig.targetToleranceIn);
+    // Negative means backwards, not forwards to a target behind you -- that is
+    // a 180 degree heading error.
+    if (target < 0.0f) {
+        req.moveDistParams.forwards = !req.moveDistParams.forwards;
+        target = -target;
+    }
+    req.targetDistance = target;     // target X/Y computed at exec time
     req.timeout = timeout;
 
     enqueueMotion(req, async);
@@ -926,6 +950,10 @@ void Chassis::moveToPoint(float x, float y, float timeout, const MoveToPointPara
     req.targetX = x;
     req.targetY = y;
     req.movePointParams = params;
+    req.movePointParams.targetTolerance =
+        orConfig(params.targetTolerance, mConfig.targetToleranceIn);
+    req.movePointParams.bearingHoldDist =
+        orConfig(params.bearingHoldDist, mConfig.bearingHoldDist);
     req.timeout = timeout;
 
     enqueueMotion(req, async);
@@ -936,6 +964,8 @@ void Chassis::turnToHeading(float thetaDeg, float timeout, const TurntoHeadingPa
     req.type = MotionType::Heading;
     req.targetHeadingRad = vexToStdRad(thetaDeg);
     req.turnHeadingParams = params;
+    req.turnHeadingParams.targetTolerance =
+        orConfig(params.targetTolerance, mConfig.targetToleranceDeg);
     req.timeout = timeout;
 
     enqueueMotion(req, async);
@@ -947,6 +977,8 @@ void Chassis::turnToPoint(float x, float y, float timeout, const TurnToPointPara
     req.targetX = x;
     req.targetY = y;
     req.turnPointParams = params;
+    req.turnPointParams.targetTolerance =
+        orConfig(params.targetTolerance, mConfig.targetToleranceDeg);
     req.timeout = timeout;
 
     enqueueMotion(req, async);
@@ -981,6 +1013,8 @@ void Chassis::moveRAMSETE(const std::vector<Pose>& path, float timeout, const RA
     req.type = MotionType::RAMSETE;
     req.ramsetePath = path;
     req.ramseteParams = params;
+    req.ramseteParams.targetTolerance =
+        orConfig(params.targetTolerance, mConfig.targetToleranceIn);
     req.timeout = timeout;
 
     enqueueMotion(req, async);
@@ -992,6 +1026,8 @@ void Chassis::swingToHeading(float thetaDeg, SwingSide side, float timeout, cons
     req.targetHeadingRad = vexToStdRad(thetaDeg);
     req.swingSide = side;
     req.swingParams = params;
+    req.swingParams.targetTolerance =
+        orConfig(params.targetTolerance, mConfig.targetToleranceDeg);
     req.timeout = timeout;
 
     enqueueMotion(req, async);

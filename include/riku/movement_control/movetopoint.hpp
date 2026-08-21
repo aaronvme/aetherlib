@@ -13,7 +13,8 @@ struct MoveDistanceParams {
     bool forwards{true};
     float maxSpeed{127.0f};
     float minSpeed{0.0f};
-    float targetTolerance{1.0f};    // inches
+    // Negative uses the ChassisConfig value.
+    float targetTolerance{-1.0f};   // inches
     float earlyExitRange{0.0f};     // exit early if within this range (0 = disabled)
 };
 
@@ -21,7 +22,8 @@ struct MoveToPointParams {
     bool forwards{true};
     float maxSpeed{127.0f};
     float minSpeed{0.0f};
-    float targetTolerance{1.0f};    // inches
+    // Negative uses the ChassisConfig value.
+    float targetTolerance{-1.0f};   // inches
     float earlyExitRange{0.0f};
     float lead{0.0f};               // carrot-point lead for curved approaches
 
@@ -34,7 +36,7 @@ struct MoveToPointParams {
     // Bigger is not better. 1.5 in cuts peak rotation to 82 deg/s for nothing;
     // past it the held bearing goes stale while it still matters and arrivals
     // from a bad angle stop converging, 3 of 15 at 1.5 in against 12 of 15 at 6.
-    float bearingHoldDist{1.5f};    // inches
+    float bearingHoldDist{-1.0f};   // inches, negative = ChassisConfig
 };
 
 }  // namespace riku

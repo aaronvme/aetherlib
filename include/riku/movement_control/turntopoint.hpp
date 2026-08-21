@@ -42,14 +42,14 @@ struct TurntoHeadingParams {
     TurnDirection direction{TurnDirection::SHORTEST};
     float maxSpeed{127.0f};
     float minSpeed{0.0f};
-    float targetTolerance{2.0f};   // VEX degrees
+    float targetTolerance{-1.0f};  // VEX degrees, negative = ChassisConfig
 };
 
 struct TurnToPointParams {
     TurnDirection direction{TurnDirection::SHORTEST};
     float maxSpeed{127.0f};
     float minSpeed{0.0f};
-    float targetTolerance{2.0f};   // VEX degrees
+    float targetTolerance{-1.0f};  // VEX degrees, negative = ChassisConfig
     float offset{0.0f};            // angular offset in VEX degrees
 };
 
@@ -57,7 +57,7 @@ struct SwingParams {
     TurnDirection direction{TurnDirection::SHORTEST};
     float maxSpeed{127.0f};
     float minSpeed{0.0f};
-    float targetTolerance{2.0f};   // VEX degrees
+    float targetTolerance{-1.0f};  // VEX degrees, negative = ChassisConfig
 };
 
 }  // namespace riku

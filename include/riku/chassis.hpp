@@ -51,15 +51,24 @@ struct ChassisConfig {
     float lateralDerivativeFilter{0.1f};
     float angularDerivativeFilter{0.1f};
 
+    /// Cap on how fast the lateral output may change, motor units per second.
+    /// Applies to the fall as well as the rise -- the stop is what tips a tall
+    /// robot, and softer gains only avoid that by never going fast. 0 disables.
+    float lateralSlewPerSec{0.0f};
+
     // Drive curves (driver control)
     DriveCurve throttleCurve;
     DriveCurve steerCurve;
 
-    // Default movement parameters
-    MoveDistanceParams defaultMoveDistance;
-    MoveToPointParams defaultMoveToPoint;
-    TurntoHeadingParams defaultTurnToHeading;
-    TurnToPointParams defaultTurnToPoint;
+    // Robot-wide settle tolerances; every motion defaults to -1 meaning "use
+    // these". targetToleranceIn must exceed the localization error or the settle
+    // test can never pass. Phase 4 prints the value it implies.
+    float targetToleranceIn{1.0f};    // moveDistance, moveToPoint, RAMSETE
+    float targetToleranceDeg{2.0f};   // turnToHeading, turnToPoint, swings
+    float bearingHoldDist{1.5f};      // moveToPoint steering hold radius
+
+    // No default movement parameters here: there were four and nothing read
+    // them. Change the defaults in movement_control/*.hpp instead.
 
     // Distance sensors for MCL/RCL tracking
     // Size controlled by MAX_DISTANCE_SENSORS in Util.hpp
