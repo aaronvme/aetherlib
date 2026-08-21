@@ -50,9 +50,12 @@ void autonCharacterize3Odom() {
     const float along = std::max(drift.alongPerIn, kDriftFloor);
     const float lateral = std::max(drift.lateralPerIn, kDriftFloor);
 
+    // Both are fractions of distance travelled: imeVariance scales the vertical
+    // delta, horizDependentVarianceProp multiplies |dVert|. horizConstantNoise
+    // is inches per update and this measurement says nothing about it.
     auto mcl = chassis.mcl().config();
     mcl.imeVariance = along;
-    mcl.horizConstantNoise = lateral;
+    mcl.horizDependentVarianceProp = lateral;
     chassis.mcl().setConfig(mcl);
 
     auto ekf = chassis.ekf().config();
@@ -62,7 +65,8 @@ void autonCharacterize3Odom() {
 
     out.result("copy to config.cpp:");
     out.result("mcl.imeVariance = %.4ff", along);
-    out.result("mcl.horizConstantNoise = %.4ff", lateral);
+    out.result("mcl.horizDependentVarianceProp");
+    out.result("  = %.4ff", lateral);
     out.result("ekf.vertNoiseProp = %.4ff", along);
     out.result("ekf.slipNoiseProp = %.4ff", lateral);
     out.result("raw %.4f/%.4f floor %.3f", drift.alongPerIn,
