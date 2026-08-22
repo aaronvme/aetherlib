@@ -1,4 +1,4 @@
-// riku-sim PROS shim — pros/misc.hpp
+// chad-sim PROS shim — pros/misc.hpp
 //
 // Controller inputs are fed from the browser (keyboard / on-screen sticks) via
 // the bridge, so driver-control code and drive curves can be exercised too.

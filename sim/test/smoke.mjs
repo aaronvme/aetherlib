@@ -1,13 +1,13 @@
-// Headless smoke test for riku-sim.
+// Headless smoke test for chad-sim.
 //
 //   node sim/test/smoke.mjs
 //
 // Runs the real library off-robot and asserts the localization pipeline is
 // wired correctly. This is the same binary the browser loads, so it doubles as
 // a regression harness you can run in CI.
-import createRikuSim from '../web/riku_sim.mjs';
+import createChadSim from '../web/chad_sim.mjs';
 
-const M = await createRikuSim();
+const M = await createChadSim();
 
 const c = (name, ret, args) => M.cwrap(name, ret, args);
 const api = {

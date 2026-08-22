@@ -1,6 +1,6 @@
-// riku-sim — cooperative fiber scheduler on a virtual clock.
+// chad-sim — cooperative fiber scheduler on a virtual clock.
 //
-// Why fibers: riku runs odometry, MCL, RCL and the chassis motion queue in
+// Why fibers: chad runs odometry, MCL, RCL and the chassis motion queue in
 // pros::Task background loops, and blocks the caller in waitUntilSettled().
 // Those are genuinely concurrent stacks -- you cannot drive them by calling
 // update() in a loop. Fibers give each task a real stack while keeping

@@ -1,4 +1,4 @@
-// riku-sim PROS shim — pros/rtos.hpp
+// chad-sim PROS shim — pros/rtos.hpp
 //
 // Tasks are cooperative fibers driven by a virtual clock (sim/platform/
 // sim_sched.hpp). pros::delay() yields to the scheduler, which advances virtual
@@ -59,7 +59,7 @@ public:
         (void)stack_depth;
     }
 
-    // Callable + name: pros::Task([]{ ... }, "rikuLog")
+    // Callable + name: pros::Task([]{ ... }, "chadLog")
     template <typename F>
     Task(F&& func, const char* name)
         : mId(sim::sched().spawn(std::function<void()>(std::forward<F>(func)), name)) {}
@@ -132,7 +132,7 @@ public:
     bool take(std::uint32_t timeout = TIMEOUT_MAX) { return lock_impl(timeout); }
     bool give() { return unlock_impl(); }
 
-    // std::lock_guard interface -- riku uses std::lock_guard<pros::Mutex>.
+    // std::lock_guard interface -- chad uses std::lock_guard<pros::Mutex>.
     void lock() { lock_impl(TIMEOUT_MAX); }
     void unlock() { unlock_impl(); }
     bool try_lock() { return lock_impl(0); }

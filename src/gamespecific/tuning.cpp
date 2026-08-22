@@ -3,10 +3,10 @@
 #include <memory>
 
 #include "gamespecific/lift.hpp"
-#include "riku/util/logger.hpp"
+#include "chad/util/logger.hpp"
 
 namespace {
-std::shared_ptr<riku::Logger> gLiftLog;
+std::shared_ptr<chad::Logger> gLiftLog;
 }  // namespace
 
 void logLift(bool enabled) {
@@ -15,7 +15,7 @@ void logLift(bool enabled) {
         gLiftLog.reset();
         return;
     }
-    gLiftLog = std::make_shared<riku::Logger>(
+    gLiftLog = std::make_shared<chad::Logger>(
         "lift", std::vector<std::string>{"target", "position", "error", "pid", "ff", "power"});
     gLiftLog->start();
 

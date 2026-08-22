@@ -9,7 +9,7 @@
 #ifdef __EMSCRIPTEN__
 #include <emscripten/fiber.h>
 #else
-#error "riku-sim currently targets Emscripten only (fibers need -sASYNCIFY)."
+#error "chad-sim currently targets Emscripten only (fibers need -sASYNCIFY)."
 #endif
 
 namespace sim {

@@ -1,4 +1,4 @@
-// riku-sim PROS shim — pros/rotation.hpp
+// chad-sim PROS shim — pros/rotation.hpp
 #pragma once
 
 #include <cstdint>

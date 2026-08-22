@@ -1,4 +1,4 @@
-// riku-sim PROS shim — pros/error.h
+// chad-sim PROS shim — pros/error.h
 #pragma once
 
 #include <climits>

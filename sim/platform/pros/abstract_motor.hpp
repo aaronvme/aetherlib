@@ -1,4 +1,4 @@
-// riku-sim PROS shim — pros/abstract_motor.hpp
+// chad-sim PROS shim — pros/abstract_motor.hpp
 #pragma once
 
 #include <cstdint>
@@ -49,7 +49,7 @@ inline MotorGears gearsetFromRpm(int rpm) {
 
 }  // namespace v5
 
-// C-style enums, still used across riku (e.g. Drivetrain::setBrakeMode).
+// C-style enums, still used across chad (e.g. Drivetrain::setBrakeMode).
 typedef enum motor_brake_mode_e {
     E_MOTOR_BRAKE_COAST = 0,
     E_MOTOR_BRAKE_BRAKE = 1,

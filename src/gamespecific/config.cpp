@@ -1,12 +1,8 @@
 #include "gamespecific/config.hpp"
 
-namespace riku {
+namespace chad {
 
 pros::Controller master(pros::E_CONTROLLER_MASTER);
-
-
-
-
 
 
 
@@ -31,7 +27,6 @@ constexpr FieldCircle kFieldPosts[] = {
     {47.0f, -23.5f, 2.0f},   // neutral blue down 
 };
 
-// MCL keeps POINTERS to its obstacle lists — these must outlive the tracker
 std::vector<MclTracking::LineObstacle> gMclLineObstacles;
 std::vector<MclTracking::CircleObstacle> gMclCircleObstacles;
 
@@ -48,8 +43,6 @@ void registerFieldObstacles() {
 }
 
 void registerAutonDisableLine(float lifetimeMs) {
-    // Diagonal auton line: readings crossing it during autonomous see robots /
-    // game objects, not walls. Temporary — expires after `lifetimeMs`.
     chassis.rcl().addLineObstacle(Field::FIELD_HALF, -Field::FIELD_HALF,
                                   -Field::FIELD_HALF,  Field::FIELD_HALF,
                                   lifetimeMs);
@@ -61,32 +54,47 @@ void registerAutonDisableLine(float lifetimeMs) {
 
 //CHASSIS/MOTORS============================================================================
 
+namespace {
 
-pros::MotorGroup leftMotors({7, 6}, pros::MotorGearset::green);
-pros::MotorGroup rightMotors({9, 10}, pros::MotorGearset::green);
-pros::Motor frontMotor(17, pros::MotorGearset::blue);
-pros::Motor leverMotor(-16, pros::MotorGearset::red);
-pros::Motor armMotor(8,pros::v5::MotorGears::blue, pros::v5::MotorUnits::degrees);
+constexpr std::int8_t kLeftGreenPort  = -12;
+constexpr std::int8_t kRightGreenPort = 11;
 
-ScaledIMU imu(15, 360.0, 354.25);
-pros::Optical frontOptic(3);
+const std::vector<std::int8_t> kLeftBluePorts{-18, -19};
+const std::vector<std::int8_t> kRightBluePorts{16, 17};
 
-pros::adi::Pneumatics matchLoadGate('D', false, false);
-pros::adi::Pneumatics lift('C', true, true);
-pros::adi::Pneumatics leftDescoreArm('A', false, false);
-pros::adi::Pneumatics trapDoor('B', false, false);
-pros::adi::Pneumatics intakeLift('G', true, true);
+std::vector<std::int8_t> plus(std::vector<std::int8_t> ports, std::int8_t extra) {
+    ports.push_back(extra);
+    return ports;
+}
+
+}  // namespace
+
+pros::MotorGroup leftBlueMotors(kLeftBluePorts, pros::MotorGearset::blue);
+pros::MotorGroup rightBlueMotors(kRightBluePorts, pros::MotorGearset::blue);
+pros::MotorGroup leftGreenMotors({kLeftGreenPort}, pros::MotorGearset::green);
+pros::MotorGroup rightGreenMotors({kRightGreenPort}, pros::MotorGearset::green);
+
+pros::MotorGroup leftMotors(plus(kLeftBluePorts, kLeftGreenPort),
+                            pros::MotorGearset::invalid);
+pros::MotorGroup rightMotors(plus(kRightBluePorts, kRightGreenPort),
+                             pros::MotorGearset::invalid);
+
+pros::MotorGroup liftMotor({14, -15, 1, -2}, pros::v5::MotorGears::green, pros::v5::MotorUnits::degrees);
+
+ScaledIMU imu(13, 360.0, 359.0);
+
+pros::adi::Pneumatics claw('D', false, false);
+pros::adi::Pneumatics flip('C', true, true);
+
 
 Drivetrain drivetrain(&leftMotors, &rightMotors,
-                      10.4f,
-                      3.25f,
+                      11.918f,
+                      2.6738f,
                       450.0f,
-                      2.0f);
+                      &leftBlueMotors,
+                      &rightBlueMotors);
 
-// No tracking wheels: vertical distance comes from the drive motor encoders and
-// heading from the IMU. That is what "odometry" means on this robot -- add
-// TrackingWheel pointers to the collections below and the same pipeline uses
-// them instead, with MCL switching to its lower tracking-wheel noise terms.
+
 OdomSensors odomSensors = {
     .vertWheelCollection = {},
     .horizWheelCollection = {},
@@ -94,9 +102,9 @@ OdomSensors odomSensors = {
     .drivetrain = &drivetrain,
 };
 
-pros::Distance front_dist(1);
-pros::Distance left_dist(2);
-pros::Distance back_dist(14);
+pros::Distance front_dist(7);
+pros::Distance left_dist(9);
+pros::Distance back_dist(10);
 pros::Distance right_dist(8);
 
 std::array<pros::Distance*, MAX_DISTANCE_SENSORS> distSensors = {
@@ -107,86 +115,108 @@ std::array<pros::Distance*, MAX_DISTANCE_SENSORS> distSensors = {
 // Sensor mount offsets are expressed in robot frame:
 //   x = forward, y = left, theta = pointing angle in radians.
 std::array<Pose, MAX_DISTANCE_SENSORS> sensorMounts = {{
-    {  6.0f,  0.0f,  0.0f        },
-    {  0.0f,  3.5f,  HALF_PI    },
-    { -5.0f,  0.0f,  PI         },
-    {  0.0f, -3.5f,  3.0f * HALF_PI },
+    {  1.0f,  -3.75f,  0.0f        },//done
+    {  0.5f,  6.25f,  HALF_PI    },//done
+    { -0.5f,  5.0f,  PI         },//done
+    {  -0.75f, -6.75f,  3.0f * HALF_PI },//done
 }};
 
 
+// Still on you. Nothing in the tuning autons measures any of this.
+//
+//   run a routine for it
+//     ScaledIMU actualReading   autonCalibrateImu, before anything else
+//     sensorMounts[i].y         autonCalibrateMounts
+//     drivetrain rpm            phase 1 prints the value its kV implies
+//
+//   came off simulator sweeps; the structure is sound, the number is a guess
+//     mcl.hitWeight 1.0   mcl.shortWeight 0.50   mcl.shortDecaySigmas 1.2
+//     mcl.randWeight 0.0008   ekf.mclSigmaScale 1.6   ekf.mclSigmaFloor 1.2
+//     settleTimeMs, and the two resample variances tagged [sim] below.
+//     distSyncProp and thetaSyncProp are inert while the EKF is on.
+//     For the two mclSigma* the check is phase 4's "gate streak / reloc" line.
+//
+//   no routine can measure it -- out-and-back cancels the effect by design
+//     ekf.vertBiasProp 0.06   ekf.slipBiasProp 0.05   ekf.biasDecorrIn 40
+//
+// Per-field tags for all 65 filter settings are in
+// chad/tracking/mcl_tracking.hpp and ekf_tracking.hpp.
 ChassisConfig chassisConfig = {
-    // Tuned in riku-sim over a closed 26 in square of eight chained motions:
-    // 0.17 in / 0.02 deg closing error in 4.16 s, against 1.57 in / 23.5 deg in
-    // 4.37 s at {17,0,2}/{140,0,4} with settleTimeMs 0.
-    //
-    // kI stays at 0 on both loops -- every non-zero value tried made things
-    // worse, because there is no standing load for an integrator to work
-    // against. On a real robot, static friction is such a load, so a small kI
-    // is the first thing to try if the last inch is consistently short.
-    //
-    // The sim models drivetrain lag but not mass, so it under-prices
-    // aggression. It does show the instability boundary though: lateral kP
-    // above ~45 degrades and 60 diverges outright, so 34 has real margin
-    // measured under it. Halve both kP if the robot feels twitchy.
-    .lateralGains = { 34.0f, 0.0f, 2.0f },
-    .angularGains = { 140.0f, 0.0f, 8.0f },
+    .lateralGains = { 9.012f, 0.0f, 1.15f },      // phase 2
+    .angularGains = { 176.607f, 0.0f, 9.933f },   // phase 2
     .lateralWindupRange = 0.0f,
     .angularWindupRange = 0.0f,
-    // The stock 0.1 gives the D term a ~100 ms lag, so it arrived too late to
-    // brake a turn and every turn overshot. This is a damping control as much
-    // as kD is.
     .lateralDerivativeFilter = 0.6f,
     .angularDerivativeFilter = 0.5f,
-    .throttleCurve = { .deadband = 10.0f, .minOutput = 15.0f, .curve = 1.2f },
-    .steerCurve = { .deadband = 10.0f, .minOutput = 10.0f, .curve = 1.3f },
+    .lateralSlewPerSec = 450.0f,   // 0 to full drive in ~280 ms
+    // .throttleCurve = { .deadband = 10.0f, .minOutput = 15.0f, .curve = 1.2f },
+    // .steerCurve = { .deadband = 10.0f, .minOutput = 10.0f, .curve = 1.3f },
+    .targetToleranceIn = 1.0f,     // phase 4 floor, then your call
+    .targetToleranceDeg = 1.5f,
+    .bearingHoldDist = 1.0f,       // phase 4
     .distanceSensors = distSensors,
     .sensorMounts = sensorMounts,
-    // Exiting on the first in-tolerance sample ends the motion while the robot
-    // is still carrying velocity, and nothing corrects the coast that follows:
-    // turns settled 22 deg past the target and stayed there. Holding the
-    // condition for 110 ms costs nothing overall -- motions finish sooner
-    // because they no longer have to recover from their own overshoot.
-    .settleTimeMs = 110,
-    .useMclTracking = false,
+    .settleTimeMs = 110,           // [sim]
+    .useMclTracking = true,
     .useRclTracking = false,
-    .useEkfTracking = false,
+    .useEkfTracking = true,
     
     .mclConfig = {
         .particleCount = 1024,
         .resampleThreshold = 512,
         .maxSensorRange = 140.0f,
-        .distResampleVariance = 1.5f,
-        .thetaResampleVariance = 0.01f,
+        .distResampleVariance = 1.5f,      // [sim]
+        .thetaResampleVariance = 0.01f,    // [sim]
         .maxThetaDeviation = 0.08f,
         .trackingWheelVariance = 0.08f,
-        .imeVariance = 0.12f,
+        .imeVariance = 0.0040f,            // phase 3
         .imuVariance = 0.005f,
-        .horizDependentVarianceProp = 0.01f,
-        .horizConstantNoise = 0.03f,
-        .distSyncProp = 0.10f,
-        .thetaSyncProp = 0.001f,
+        .horizDependentVarianceProp = 0.0040f,  // phase 3
+        .horizConstantNoise = 0.03f,       // [gap] per update, not per inch
+        .distSyncProp = 0.10f,             // [sim]
+        .thetaSyncProp = 0.001f,           // [sim]
         .updatePeriodMs = 25.0f,
         .confidenceThreshold = 10,
         .minSensorRange = 1.0f,
+        .rangeSigmaCloseIn = 0.0680f,      // phase 4
+        .rangeSigmaProp = 0.05f,           // phase 4 range sweep
         .autoSync = true,
     },
-    .rclConfig = {
-        .sensorCount = 4,
-        .maxSyncDist = 30.0f,
-        .accumulationAlpha = 0.3f,
-        .updatePeriodMs = 15.0f,
-        .angleTolerance = 10.0f,
-        .confidenceThreshold = 25,
-        .autoSync = true,
-        .useAccumulation = false,
+    // .rclConfig = {
+    //     .sensorCount = 4,
+    //     .maxSyncDist = 30.0f,
+    //     .accumulationAlpha = 0.3f,
+    //     .updatePeriodMs = 15.0f,
+    //     .angleTolerance = 10.0f,
+    //     .confidenceThreshold = 25,
+    //     .autoSync = true,
+    //     .useAccumulation = false,
+    // },
+    .ekfConfig = {
+        .vertNoiseProp = 0.0040f,   // phase 3
+        .slipNoiseProp = 0.0040f,   // phase 3
+        .rangeSigmaBase = 0.0680f,  // phase 4 range sweep
+        .rangeSigmaProp = 0.030f,   // phase 4 range sweep
     },
-    .ekfConfig = {},
 };
 
+// Feedforward for RAMSETE's velocity controller. METRES and VOLTS -- the units
+// characterisation phase 1 fits in, not the inches the rest of the API takes.
+// kP and kI are not measurable: they came off the sim sweeps. Pass this as
+// RAMSETEParams::ffGains.
+FeedforwardGains ramseteFf = {
+    .kV = 6.1287f,        // r2 0.996
+    .kaStraight = 0.0f,   // phase 1 measures this now
+    .kaTurn = 0.0202f,
+    .ksStraight = 0.7020f,
+    .ksTurn = 1.1607f,
+    .kP = 13.0f,          // phase 1 derives this
+    .integralClamp = 2.0f,
+};
 Chassis chassis(drivetrain, odomSensors, chassisConfig);
 
 AutonSelector selector;
 
 
 
-}  // namespace riku
+}  // namespace chad

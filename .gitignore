@@ -17,11 +17,14 @@ temp.errors
 .d/
 
 
-# riku-sim build output
-sim/web/riku_sim.mjs
-sim/web/riku_sim.wasm
-sim/web/riku_sim.wasm.map
+# chad-sim build output
+sim/web/chad_sim.mjs
+sim/web/chad_sim.wasm
+sim/web/chad_sim.wasm.map
 sim/web/*.data
 
 # Emscripten SDK, if it ever gets cloned inside the project
 /emsdk/
+
+# host test build output
+test/host/build/

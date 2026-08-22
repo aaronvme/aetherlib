@@ -13,7 +13,7 @@ constexpr double kMmPerInch = 25.4;
 
 /// Wheel surface speed at the configured free RPM, inches/sec.
 float maxWheelSpeedIn(const RobotParams& p) {
-    return (p.maxWheelRpm / 60.0f) * (riku::PI * p.wheelDiameterIn);
+    return (p.maxWheelRpm / 60.0f) * (chad::PI * p.wheelDiameterIn);
 }
 
 /// Round to a device's reporting resolution.
@@ -39,15 +39,15 @@ void World::init() {
 
     // Take geometry from the robot's own drivetrain so the sim cannot drift
     // out of sync with the config that ships to the brain.
-    mParams.wheelDiameterIn = riku::drivetrain.wheelDiameter;
-    mParams.trackWidthIn    = riku::drivetrain.trackWidth;
-    mParams.maxWheelRpm     = riku::drivetrain.rpm;
+    mParams.wheelDiameterIn = chad::drivetrain.wheelDiameter;
+    mParams.trackWidthIn    = chad::drivetrain.trackWidth;
+    mParams.maxWheelRpm     = chad::drivetrain.rpm;
 
     field().loadDefault();
     setPhysicsFn([this](double dtMs) { this->step(dtMs); });
 }
 
-void World::teleport(const riku::Pose& pose) {
+void World::teleport(const chad::Pose& pose) {
     mTruth.x = pose.x;
     mTruth.y = pose.y;
     mTruth.theta = pose.theta;
@@ -56,7 +56,7 @@ void World::teleport(const riku::Pose& pose) {
     updateDistanceSensors();
 }
 
-void World::resetTo(const riku::Pose& pose) {
+void World::resetTo(const chad::Pose& pose) {
     mTruth = TrueState{};
     mTruth.x = pose.x;
     mTruth.y = pose.y;
@@ -75,7 +75,7 @@ void World::resetTo(const riku::Pose& pose) {
     // 360/354.25 on the way out. Seeding the true angle here instead would make
     // the corrected heading read 1.6% high from the first tick -- a constant
     // offset that looks exactly like a real miscalibration.
-    mImuRotationDeg = riku::stdRadToVexDeg(pose.theta) * mParams.imuUnderReport;
+    mImuRotationDeg = chad::stdRadToVexDeg(pose.theta) * mParams.imuUnderReport;
 
     for (int i = 1; i < kMaxSmartPorts; i++) {
         bus().motors[i].positionDeg = 0.0;
@@ -136,8 +136,8 @@ void World::updateDrive(double dtSec) {
         return static_cast<float>(mv / 12000.0) * vMax * scale;
     };
 
-    const float targetL = sideTargetIn(riku::drivetrain.leftMotors,  mParams.leftScale);
-    const float targetR = sideTargetIn(riku::drivetrain.rightMotors, mParams.rightScale);
+    const float targetL = sideTargetIn(chad::drivetrain.leftMotors,  mParams.leftScale);
+    const float targetR = sideTargetIn(chad::drivetrain.rightMotors, mParams.rightScale);
 
     // First-order lag toward the commanded speed. Not a physics model -- just
     // enough dynamics that PID and exit conditions face something to settle.
@@ -180,7 +180,7 @@ void World::updateDrive(double dtSec) {
     } else {
         mTruth.colliding = true;
     }
-    mTruth.theta = riku::wrapRad(static_cast<float>(mTruth.theta + dTheta));
+    mTruth.theta = chad::wrapRad(static_cast<float>(mTruth.theta + dTheta));
 
     accumulateEncoders(mLeftCmdIn * dtSec, mRightCmdIn * dtSec);
     accumulateImu(dTheta, dtSec);
@@ -199,8 +199,8 @@ void World::updateDrive(double dtSec) {
 void World::accumulateEncoders(double leftTravelIn, double rightTravelIn) {
     // Encoders only see the fraction of travel that was not slip.
     const double seen = 1.0 - mParams.encoderSlip;
-    const double circumference = riku::PI * mParams.wheelDiameterIn;
-    const double extRatio = riku::drivetrain.externalGearRatio();
+    const double circumference = chad::PI * mParams.wheelDiameterIn;
+    const double extRatio = chad::drivetrain.externalGearRatio();
     if (circumference <= 0.0 || extRatio <= 0.0) return;
 
     // Wheel revolutions -> motor revolutions -> motor shaft degrees, the
@@ -212,7 +212,7 @@ void World::accumulateEncoders(double leftTravelIn, double rightTravelIn) {
 namespace {
 /// Inches of pod travel -> rotation-sensor centidegrees.
 std::int32_t podCentideg(double travelIn, double wheelDiamIn) {
-    const double circumference = riku::PI * wheelDiamIn;
+    const double circumference = chad::PI * wheelDiamIn;
     if (circumference <= 0.0) return 0;
     return static_cast<std::int32_t>(travelIn / circumference * 36000.0);
 }
@@ -229,8 +229,8 @@ void World::publishEncoders() {
     bus().rotations[kHorizPodPort].positionCentideg =
         podCentideg(mPodHorizIn, kPodWheelDiamIn);
 
-    const double circumference = riku::PI * mParams.wheelDiameterIn;
-    const double extRatio = riku::drivetrain.externalGearRatio();
+    const double circumference = chad::PI * mParams.wheelDiameterIn;
+    const double extRatio = chad::drivetrain.externalGearRatio();
     if (circumference <= 0.0 || extRatio <= 0.0) return;
 
     const double seen = 1.0 - mParams.encoderSlip;
@@ -249,8 +249,8 @@ void World::publishEncoders() {
         }
     };
 
-    writeSide(riku::drivetrain.leftMotors,  mMotorDegLeft,  mLeftCmdIn * seen);
-    writeSide(riku::drivetrain.rightMotors, mMotorDegRight, mRightCmdIn * seen);
+    writeSide(chad::drivetrain.leftMotors,  mMotorDegLeft,  mLeftCmdIn * seen);
+    writeSide(chad::drivetrain.rightMotors, mMotorDegRight, mRightCmdIn * seen);
 }
 
 // ============================================================================
@@ -259,7 +259,7 @@ void World::publishEncoders() {
 
 void World::accumulateImu(double dThetaRad, double dtSec) {
     // Standard-math CCW radians -> VEX clockwise-positive degrees.
-    const double dVexDeg = -dThetaRad * riku::RAD_TO_DEG;
+    const double dVexDeg = -dThetaRad * chad::RAD_TO_DEG;
 
     mImuRotationDeg += dVexDeg * mParams.imuUnderReport;
     mImuRotationDeg += mParams.imuDriftDegPerSec * dtSec;
@@ -286,10 +286,10 @@ void World::updateDistanceSensors() {
     const float maxRangeIn = mParams.distMaxRangeMm / static_cast<float>(kMmPerInch);
 
     const int rays = (mParams.distConeRays < 1) ? 1 : mParams.distConeRays;
-    const float fov = mParams.distFovDeg * riku::DEG_TO_RAD;
+    const float fov = mParams.distFovDeg * chad::DEG_TO_RAD;
 
-    for (int i = 0; i < riku::MAX_DISTANCE_SENSORS; i++) {
-        pros::Distance* dev = riku::distSensors[i];
+    for (int i = 0; i < chad::MAX_DISTANCE_SENSORS; i++) {
+        pros::Distance* dev = chad::distSensors[i];
         if (dev == nullptr) {
             mBeams[i].active = false;
             continue;
@@ -297,7 +297,7 @@ void World::updateDistanceSensors() {
 
         // Mount offsets straight from the robot config: x forward, y left,
         // theta pointing angle -- the same array handed to MCL.
-        const riku::Pose& mount = riku::sensorMounts[i];
+        const chad::Pose& mount = chad::sensorMounts[i];
 
         const float sx = mTruth.x + (mount.x * ct - mount.y * st);
         const float sy = mTruth.y + (mount.x * st + mount.y * ct);
@@ -350,7 +350,7 @@ void World::updateDistanceSensors() {
         beam.active = true;
         beam.originX = sx;
         beam.originY = sy;
-        beam.dirDeg = axis * riku::RAD_TO_DEG;
+        beam.dirDeg = axis * chad::RAD_TO_DEG;
         beam.fovDeg = mParams.distFovDeg;
         beam.rangeIn = any ? best.dist : maxRangeIn;
         // Drawn along the axis to whatever the axis ray hit, so the laser is
@@ -373,7 +373,7 @@ void World::updateDistanceSensors() {
 
         // Angle between the outgoing ray and the surface normal. 0 is head-on.
         const float dot = -(std::cos(axis) * best.nx + std::sin(axis) * best.ny);
-        const float incidence = std::acos(riku::clamp(dot, -1.0f, 1.0f)) * riku::RAD_TO_DEG;
+        const float incidence = std::acos(chad::clamp(dot, -1.0f, 1.0f)) * chad::RAD_TO_DEG;
         beam.incidenceDeg = incidence;
 
         double mm = best.dist * kMmPerInch;
@@ -400,7 +400,7 @@ void World::updateDistanceSensors() {
         const double rangeTerm = 1.0 - 0.6 * (mm / mParams.distMaxRangeMm);
         const double angleTerm = 1.0 - 0.7 * (incidence / mParams.distMaxIncidenceDeg);
         int conf = static_cast<int>(63.0 * rangeTerm * angleTerm);
-        conf = static_cast<int>(riku::clamp(static_cast<float>(conf), 0.0f, 63.0f));
+        conf = static_cast<int>(chad::clamp(static_cast<float>(conf), 0.0f, 63.0f));
 
         slot.distanceMm = static_cast<std::int32_t>(mm);
         slot.confidence = conf;

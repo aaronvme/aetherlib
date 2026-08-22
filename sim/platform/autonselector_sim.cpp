@@ -1,13 +1,13 @@
-// riku-sim replacement for src/riku/auton_selector/autonselector.cpp.
+// chad-sim replacement for src/chad/auton_selector/autonselector.cpp.
 //
 // The real implementation draws an LVGL list on the brain screen. The sim
 // keeps the same class contract but no UI: routine selection comes from the
 // browser via the bridge. Registration order and runSelected() semantics match
 // the real selector, so autons registered by gamespecific code appear in the
 // dropdown in the same order they would on the brain.
-#include "riku/auton_selector/autonselector.hpp"
+#include "chad/auton_selector/autonselector.hpp"
 
-namespace riku {
+namespace chad {
 
 void AutonSelector::registerAuton(const std::string& name, AutonFunc func) {
     mAutons.push_back({name, std::move(func), nullptr});
@@ -37,4 +37,4 @@ void AutonSelector::runSelected() {
 void AutonSelector::buttonCb(lv_event_t*) {}
 void AutonSelector::refreshHighlight() {}
 
-}  // namespace riku
+}  // namespace chad

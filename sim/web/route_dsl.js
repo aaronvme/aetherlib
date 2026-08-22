@@ -1,4 +1,4 @@
-// riku-sim — route DSL.
+// chad-sim — route DSL.
 //
 // Parses route text into a flat opcode list the WASM bridge executes against
 // the real Chassis API, plus a waypoint list for the field preview.
@@ -253,7 +253,7 @@ export function buildPath(vias, spacingIn = 2) {
   return pts;
 }
 
-export const DEFAULT_ROUTE = `// riku-sim route — runs the real Chassis API.
+export const DEFAULT_ROUTE = `// chad-sim route — runs the real Chassis API.
 // setPose / moveTo / turnTo / drive / boomerang / arc / swing
 // delay / waitSettled / maxSpeed / lateralGains / angularGains
 // optional t: <ms> timeout on any motion.

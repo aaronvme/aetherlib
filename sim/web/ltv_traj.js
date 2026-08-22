@@ -1,4 +1,4 @@
-// riku-sim — LTV/LQR trajectory blob generation.
+// chad-sim — LTV/LQR trajectory blob generation.
 //
 // LTVPathFollower::prepare_trajectory() parses a text blob rather than taking
 // a pose vector:

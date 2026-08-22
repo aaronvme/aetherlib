@@ -1,4 +1,4 @@
-// riku-sim — virtual runtime backing the PROS shim.
+// chad-sim — virtual runtime backing the PROS shim.
 //
 // The shim headers under sim/platform/pros/ are thin: every device just reads
 // or writes a slot in DeviceBus. The robot model owns the other side of that
@@ -100,7 +100,7 @@ void setPhysicsFn(std::function<void(double dtMs)> fn);
 // ============================================================================
 //
 // Every noise source in the sim pulls from here so a given seed replays
-// exactly. NOTE: riku's MclTracking seeds itself from std::random_device, so
+// exactly. NOTE: chad's MclTracking seeds itself from std::random_device, so
 // its particle jitter is not reproducible across runs -- only the world
 // (sensor noise, drift) is. See sim/README.md.
 

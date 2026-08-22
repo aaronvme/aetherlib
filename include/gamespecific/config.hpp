@@ -3,11 +3,11 @@
 #include <array>
 
 #include "main.h"
-#include "riku/api.hpp"
-#include "riku/tracking/rcl_tracking.hpp"
+#include "chad/api.hpp"
+#include "chad/tracking/rcl_tracking.hpp"
 
 
-namespace riku {
+namespace chad {
 
 extern pros::Controller master;
 
@@ -37,6 +37,7 @@ extern std::array<pros::Distance*, MAX_DISTANCE_SENSORS> distSensors;
 extern std::array<Pose, MAX_DISTANCE_SENSORS> sensorMounts;
 
 extern ChassisConfig chassisConfig;
+extern FeedforwardGains ramseteFf;
 extern Chassis chassis;
 
 extern AutonSelector selector;
@@ -45,5 +46,5 @@ void registerFieldObstacles();
 
 void registerAutonDisableLine(float lifetimeMs = 16000.0f);
 
-}  // namespace riku
+}  // namespace chad
 

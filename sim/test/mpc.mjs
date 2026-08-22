@@ -3,14 +3,14 @@
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 const here = dirname(fileURLToPath(import.meta.url));
-const createRikuSim = (await import('file://' + join(here, '..', 'web', 'riku_sim.mjs'))).default;
+const createChadSim = (await import('file://' + join(here, '..', 'web', 'chad_sim.mjs'))).default;
 
-const M = await createRikuSim();
-// sim/web/riku_sim.* are untracked build output, so they survive a branch switch
+const M = await createChadSim();
+// sim/web/chad_sim.* are untracked build output, so they survive a branch switch
 // and a build from a branch without MPC leaves a binary that silently lacks it.
 if (typeof M._sim_mpc_run !== 'function') {
   console.error('The built sim has no MPC exports.');
-  console.error('sim/web/riku_sim.* is untracked build output, so switching');
+  console.error('sim/web/chad_sim.* is untracked build output, so switching');
   console.error('branches does not rebuild it. Run ./sim/build.sh and retry.');
   process.exit(1);
 }

@@ -1,4 +1,4 @@
-// riku-sim shim for PROS's umbrella header.
+// chad-sim shim for PROS's umbrella header.
 // Mirrors include/api.h minus LVGL and the C-only headers the sim does not need.
 #pragma once
 

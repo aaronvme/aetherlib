@@ -1,4 +1,4 @@
-# riku
+# chad
 
 A C++ robotics library for VEX V5RC built on the PROS kernel, combining the
 strongest parts of [FBLib](https://github.com/jiazegao/FBLib), the 1516X
@@ -6,12 +6,12 @@ codebase and [LemLib](https://github.com/LemLib/LemLib) into one library.
 
 **Target:** VEX V5 Brain (ARM Cortex-A9, PROS kernel 4.2.2)
 **Language:** gnu++26
-**Namespace:** `riku`
+**Namespace:** `chad`
 
 ## Layout
 
 ```
-include/riku/
+include/chad/
   util/               math, Pose, PID, fast trig, IMU scaling, jam detection, warnings
   tracking/           odometry, MCL, RCL localization
   movement_control/   point-to-point, turns, arcs, boomerang, RAMSETE, profiles,
@@ -26,8 +26,8 @@ include/Eigen/        vendored Eigen (used by the LTV follower)
 ## Usage
 
 ```cpp
-#include "riku/api.hpp"
-using namespace riku;
+#include "chad/api.hpp"
+using namespace chad;
 ```
 
 Every public class and function is listed in [API.md](API.md).
@@ -55,7 +55,7 @@ make clean && make
 instead of treating voltage as speed; it measured faster with better heading at
 every setting tried. Its feedforward gains were fitted against the simulator, so
 refit `kV`/`ksStraight`/`kP` on hardware before relying on them
-(`riku/util/tuning.hpp` logs the CSV for it).
+(`chad/util/tuning.hpp` logs the CSV for it).
 
 ### Deprecated
 
@@ -76,15 +76,15 @@ controller.
 
 ## Tuning logs
 
-Subsystems emit telemetry through a callback; `riku/util/tuning.hpp` and
+Subsystems emit telemetry through a callback; `chad/util/tuning.hpp` and
 `gamespecific/tuning.hpp` attach hooks that write CSV to the microSD card.
 The subsystems themselves know nothing about logging. All off by default, and
 no-ops without a card.
 
 ```cpp
-riku::tuning::logChassis(chassis, true);                          // chas<n>.csv
-riku::tuning::logJamDetector(jam, true);                          // jam<n>.csv
-riku::tuning::logFeedforward(ltv.velocityController(), true);     // ff<n>.csv
+chad::tuning::logChassis(chassis, true);                          // chas<n>.csv
+chad::tuning::logJamDetector(jam, true);                          // jam<n>.csv
+chad::tuning::logFeedforward(ltv.velocityController(), true);     // ff<n>.csv
 logLift(true);                                                    // lift<n>.csv
 ```
 
@@ -105,12 +105,12 @@ You can also attach a raw callback with no SD card involved, e.g. to print to
 the terminal or drive a screen widget:
 
 ```cpp
-chassis.setTelemetry([](const riku::ChassisSample& s) { ... });
+chassis.setTelemetry([](const chad::ChassisSample& s) { ... });
 ```
 
 ## License
 
 GPL-3.0-or-later — see [LICENSE](LICENSE).
 
-riku incorporates code from several projects; see
+chad incorporates code from several projects; see
 [ATTRIBUTION.md](ATTRIBUTION.md) for per-source licensing.

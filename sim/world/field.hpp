@@ -1,4 +1,4 @@
-// riku-sim — field geometry and the ground-truth raycaster.
+// chad-sim — field geometry and the ground-truth raycaster.
 //
 // This is the part of the sim that has to be right for MCL/RCL work: obstacles
 // are real geometry, and a distance sensor ray stops at whatever it hits first.
