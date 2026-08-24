@@ -5,6 +5,7 @@
 #include "chad/chassis.hpp"
 #include "chad/drivetrain.hpp"
 #include "chad/util/pid.hpp"
+#include "chad/util/relay_core.hpp"
 
 namespace chad::tuning {
 
@@ -50,18 +51,11 @@ struct RelayTuneConfig {
     /// while parked.
     bool includeIntegral{false};
 
-    std::function<void(const char* stage, const char* detail)> onProgress;
-};
+    /// Phase budget and dwell margin. See RelayIdentifyConfig.
+    float minSwingRatio{3.0f};
+    float dwellSlack{1.2f};
 
-struct RelayFit {
-    float ku{0.0f};          // ultimate gain, output units per error unit
-    float tu{0.0f};          // ultimate period, seconds
-    float amplitude{0.0f};   // measured half-amplitude of the limit cycle
-    float kP{0.0f};
-    float kI{0.0f};
-    float kD{0.0f};
-    int cycles{0};
-    bool valid{false};
+    std::function<void(const char* stage, const char* detail)> onProgress;
 };
 
 class RelayAutoTuner {

@@ -12,18 +12,33 @@ namespace chad::tuning {
 // needs a known field position, except measureScale(). Run before PidAutoTuner.
 
 struct CharacterizeConfig {
-    // The fit carries an acceleration term, so the ramp need not be quasistatic.
-    // That assumption used to cost 36 ft of travel and a separate step for kA.
-    float rampVoltsPerSec{2.0f};
+    // Two slopes, slow first. One slope leaves the acceleration column nearly
+    // constant once the drivetrain settles, so kA is barely excited: with
+    // realistic velocity quantisation a single-slope ramp fits kA to within
+    // 100% of zero at every window length, while switching slope part way
+    // recovers it to a few percent. Slow-first also pins kS, which fast-first
+    // misses by 15-70%.
+    float rampVoltsPerSec{1.0f};
+    float rampVoltsPerSecFast{6.0f};
+    float rampSwitchVolts{4.5f};
     float maxVolts{9.0f};
-
-    float stepVolts{7.0f};   // unused now; kA comes out of the ramp fit
-    float stepMs{700.0f};
 
     float sampleMs{10.0f};
 
+    // Ticks the acceleration difference spans, paired against the window mean.
+    // Velocity is quantised, so a short span is mostly quantisation noise.
+    int accelSpanTicks{40};
+
     // Below this the fit reads stiction as slope.
     float minSpeedInPerSec{3.0f};
+
+    // Standard errors of kA needed before kA is believed. r2 cannot police it:
+    // a ramp that leaves kA unidentified still fits r2 = 0.9999, because kS and
+    // kV carry the voltage on their own.
+    float kaMinT{25.0f};
+
+    // Whole-fit gate. Every fit measured, sound or not, cleared 0.996.
+    float minR2{0.9f};
 
     // The ramp shuttles, reversing past this. Samples around a reversal are
     // discarded, so a shorter span just wastes more of them.
@@ -35,15 +50,16 @@ struct CharacterizeConfig {
     std::function<void(const char* stage, const char* detail)> onProgress;
 };
 
-// Units FeedforwardGains expects. r2 under ~0.9 means the ramp outran the
-// drivetrain, the surface changed, or a motor is not pulling.
+// Units FeedforwardGains expects.
 struct FeedforwardFit {
     float kV{0.0f};
     float kS{0.0f};
     float kA{0.0f};
     float r2{0.0f};
+    float kaT{0.0f};        // |kA| in standard errors
     int samples{0};
-    bool valid{false};
+    bool valid{false};      // kS and kV are usable
+    bool kaValid{false};    // and so is kA
 };
 
 // Odometry error per inch: the robot ends where it began, so whatever odometry

@@ -28,12 +28,12 @@ void logChassis(Chassis& chassis, bool enabled) {
         return;
     }
     gChassisLog = open("chas", {"type", "x", "y", "thetaDeg", "targetX", "targetY",
-                                "latOut", "angOut", "settled"});
+                                "latOut", "angOut", "inTolerance"});
     auto log = gChassisLog;
     chassis.setTelemetry([log](const ChassisSample& s) {
         log->row({static_cast<float>(s.type), s.x, s.y, s.thetaDeg,
                   s.targetX, s.targetY, s.lateralOut, s.angularOut,
-                  s.settled ? 1.0f : 0.0f});
+                  s.inTolerance ? 1.0f : 0.0f});
     });
 }
 

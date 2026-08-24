@@ -35,8 +35,11 @@ void autonProbe2Motions() {
         const uint32_t t0 = pros::millis();
         chassis.turnToHeading(to, 2000, {.targetTolerance = 2.0f});
         const uint32_t ms = pros::millis() - t0;
-        out.result("turn %.0f: %.1f->%.1f %ums", to, before,
-                   stdRadToVexDeg(chassis.getPose().theta), ms);
+        // The outcome, not the duration: a motion can now end early on a stall
+        // as well as on arrival, so a short time is not evidence of success.
+        out.result("turn %.0f: %.1f->%.1f %ums %s", to, before,
+                   stdRadToVexDeg(chassis.getPose().theta), ms,
+                   outcomeName(chassis.lastOutcome()));
     }
 
     for (const float d : {8.0f, -8.0f}) {
@@ -47,11 +50,12 @@ void autonProbe2Motions() {
         const uint32_t ms = pros::millis() - t0;
         const Pose p = chassis.getPose();
         const float along = p.x * std::cos(h0) + p.y * std::sin(h0);
-        out.result("drive %.0f: %.1f off %.1f %ums", d, along,
-                   -p.x * std::sin(h0) + p.y * std::cos(h0), ms);
+        out.result("drive %.0f: %.1f off %.1f %ums %s", d, along,
+                   -p.x * std::sin(h0) + p.y * std::cos(h0), ms,
+                   outcomeName(chassis.lastOutcome()));
         out.result("   turned %+.0f deg", radToDeg(angleDiffRad(h0, p.theta)));
     }
-    out.result("2000ms = never settled");
+    out.result("want arrived; timeout/stalled = bad");
 }
 
 }  // namespace chad

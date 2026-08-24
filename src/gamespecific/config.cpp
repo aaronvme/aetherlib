@@ -92,7 +92,9 @@ Drivetrain drivetrain(&leftMotors, &rightMotors,
                       2.6738f,
                       450.0f,
                       &leftBlueMotors,
-                      &rightBlueMotors);
+                      &rightBlueMotors,
+                      WheelType::Traction,
+                      0.0f);
 
 
 OdomSensors odomSensors = {
@@ -125,22 +127,43 @@ std::array<Pose, MAX_DISTANCE_SENSORS> sensorMounts = {{
 // Still on you. Nothing in the tuning autons measures any of this.
 //
 //   run a routine for it
+//     drivetrain wheels         which wheels are on the base, not a guess
+//     drivetrain grip limit     drive a known-radius circle until it slides
 //     ScaledIMU actualReading   autonCalibrateImu, before anything else
 //     sensorMounts[i].y         autonCalibrateMounts
 //     drivetrain rpm            phase 1 prints the value its kV implies
 //
+//   no routine yet, but a bench measurement settles it
+//     ekf.rangeLatencyMs 30     drive a straight leg at a known speed past a
+//                               wall and sweep this until the front sensor's
+//                               innovation stops depending on speed. It is a
+//                               BIAS of speed*latency, so 60 in/s and a 30 ms
+//                               error is 1.8 in of standing offset -- and zero,
+//                               the old value, is the one setting guaranteed
+//                               wrong. Wrong-but-plausible beats off.
+//
 //   came off simulator sweeps; the structure is sound, the number is a guess
 //     mcl.hitWeight 1.0   mcl.shortWeight 0.50   mcl.shortDecaySigmas 1.2
-//     mcl.randWeight 0.0008   ekf.mclSigmaScale 1.6   ekf.mclSigmaFloor 1.2
-//     settleTimeMs, and the two resample variances tagged [sim] below.
+//     mcl.randWeight 0.0008   settleTimeMs   mcl.thetaResampleVariance 0.01
 //     distSyncProp and thetaSyncProp are inert while the EKF is on.
-//     For the two mclSigma* the check is phase 4's "gate streak / reloc" line.
+//     For ekf.mclSigmaScale/Floor the check is phase 4's "gate streak / reloc".
+//
+//   swept, not guessed: 648 paired kidnaps, 8 starts x 16 directions x 8 seeds
+//     mcl.distResampleVariance 1.5 -- every lower roughening tried tracks
+//     better and recovers worse, and the FUSED pose is what is driven on.
+//     ekf.mclSigmaFloor 1.2 is the optimum AT that roughening; it is lowering
+//     the roughening that would make a higher floor pay. Numbers in API.md.
 //
 //   no routine can measure it -- out-and-back cancels the effect by design
-//     ekf.vertBiasProp 0.06   ekf.slipBiasProp 0.05   ekf.biasDecorrIn 40
+//     ekf.vertBiasProp 0.010   ekf.slipBiasProp 0.010   ekf.biasDecorrIn 40
+//     Sized at 2.5x the 0.0040/in closure error phase 3 does measure, which is
+//     the margin a tape-measured wheel diameter leaves. These set the range
+//     gate width, so re-check phase 4's "gate streak / reloc" line after any
+//     change: at the old 0.06 the gate stood open to +/-7.4 inches.
 //
-// Per-field tags for all 65 filter settings are in
-// chad/tracking/mcl_tracking.hpp and ekf_tracking.hpp.
+// Per-field tags for all 65 filter settings live on the Config structs, which
+// are in chad/tracking/mcl_core.hpp and ekf_core.hpp -- the *_tracking.hpp
+// headers only alias them.
 ChassisConfig chassisConfig = {
     .lateralGains = { 9.012f, 0.0f, 1.15f },      // phase 2
     .angularGains = { 176.607f, 0.0f, 9.933f },   // phase 2
@@ -197,6 +220,12 @@ ChassisConfig chassisConfig = {
         .slipNoiseProp = 0.0040f,   // phase 3
         .rangeSigmaBase = 0.0680f,  // phase 4 range sweep
         .rangeSigmaProp = 0.030f,   // phase 4 range sweep
+        // Estimate, not a measurement: smart-port refresh plus half the ToF
+        // integration window. CONFIRM ON THE ROBOT -- see the note above.
+        .rangeLatencyMs = 30.0f,    // [gap]
+        // Zero deliberately: the state's heading is propagated from this same
+        // IMU, so measurement and prediction already share its port delay.
+        .imuLatencyMs = 0.0f,       // [model]
     },
 };
 

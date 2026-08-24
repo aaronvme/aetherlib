@@ -1,5 +1,7 @@
 #include "chad/util/characterize.hpp"
 
+#include "chad/util/characterize_core.hpp"
+
 #include <cmath>
 #include <cstdio>
 #include <vector>
@@ -11,89 +13,6 @@ namespace chad::tuning {
 namespace {
 
 constexpr float kVoltsPerPower = 12.0f / 127.0f;
-
-struct Sample {
-    float volts;
-    float speed;   // in/s
-};
-
-// Least squares on volts = kS + kV*speed + kA*accel. Fitting acceleration rather
-// than assuming it away is what lets the ramp be fast, and yields kA for free.
-struct Dyn { float speed, accel, volts; };
-
-bool fitDynamic(const std::vector<Dyn>& s, float& kv, float& ks, float& ka,
-                float& r2) {
-    if (s.size() < 16) return false;
-    // Normal equations for [1, speed, accel].
-    double A[3][4] = {};
-    double sy = 0.0;
-    for (const Dyn& p : s) {
-        const double x[3] = {1.0, p.speed, p.accel};
-        for (int i = 0; i < 3; i++) {
-            for (int j = 0; j < 3; j++) A[i][j] += x[i] * x[j];
-            A[i][3] += x[i] * p.volts;
-        }
-        sy += p.volts;
-    }
-    // Gauss-Jordan with partial pivoting.
-    for (int c = 0; c < 3; c++) {
-        int piv = c;
-        for (int r = c + 1; r < 3; r++) {
-            if (std::fabs(A[r][c]) > std::fabs(A[piv][c])) piv = r;
-        }
-        if (std::fabs(A[piv][c]) < 1e-12) return false;
-        if (piv != c) for (int k = 0; k < 4; k++) std::swap(A[c][k], A[piv][k]);
-        const double d = A[c][c];
-        for (int k = 0; k < 4; k++) A[c][k] /= d;
-        for (int r = 0; r < 3; r++) {
-            if (r == c) continue;
-            const double f = A[r][c];
-            for (int k = 0; k < 4; k++) A[r][k] -= f * A[c][k];
-        }
-    }
-    ks = static_cast<float>(A[0][3]);
-    kv = static_cast<float>(A[1][3]);
-    ka = static_cast<float>(A[2][3]);
-
-    const double mean = sy / static_cast<double>(s.size());
-    double ssRes = 0.0, ssTot = 0.0;
-    for (const Dyn& p : s) {
-        const double pred = ks + kv * p.speed + ka * p.accel;
-        ssRes += (p.volts - pred) * (p.volts - pred);
-        ssTot += (p.volts - mean) * (p.volts - mean);
-    }
-    r2 = ssTot > 0.0 ? static_cast<float>(1.0 - ssRes / ssTot) : 0.0f;
-    return true;
-}
-
-// Least squares on volts = kS + kV * speed.
-bool fitLine(const std::vector<Sample>& s, float& slope, float& intercept,
-             float& r2) {
-    if (s.size() < 8) return false;
-    double sx = 0, sy = 0, sxx = 0, sxy = 0;
-    const double n = static_cast<double>(s.size());
-    for (const Sample& p : s) {
-        sx += p.speed; sy += p.volts;
-        sxx += static_cast<double>(p.speed) * p.speed;
-        sxy += static_cast<double>(p.speed) * p.volts;
-    }
-    const double den = n * sxx - sx * sx;
-    if (std::fabs(den) < 1e-9) return false;
-    const double m = (n * sxy - sx * sy) / den;
-    const double b = (sy - m * sx) / n;
-
-    double ssTot = 0, ssRes = 0;
-    const double mean = sy / n;
-    for (const Sample& p : s) {
-        const double pred = m * p.speed + b;
-        ssRes += (p.volts - pred) * (p.volts - pred);
-        ssTot += (p.volts - mean) * (p.volts - mean);
-    }
-    slope = static_cast<float>(m);
-    intercept = static_cast<float>(b);
-    r2 = (ssTot > 1e-9) ? static_cast<float>(1.0 - ssRes / ssTot) : 0.0f;
-    return true;
-}
 
 }  // namespace
 
@@ -112,23 +31,20 @@ void Characterizer::drive(float volts, bool spin) {
 
 FeedforwardFit Characterizer::feedforward(bool spinInPlace) {
     FeedforwardFit fit;
-    std::vector<Dyn> samples;
     char msg[96];
 
     report("feedforward", spinInPlace ? "ramping (spin)" : "ramping (straight)");
 
     const float dt = mConfig.sampleMs / 1000.0f;
+    FeedforwardAccumulator acc;
+    RampSampler sampler(mConfig.accelSpanTicks, dt);
     float dir = 1.0f;
     float legStart = mDrivetrain.averagePositionDeg();
     const float degPerIn = 360.0f /
         (mDrivetrain.externalGearRatio() * PI * mDrivetrain.wheelDiameter);
 
-    // Velocity is quantised, so consecutive differences are mostly noise.
-    constexpr int kAccelSpan = 5;
-    std::vector<float> speedHist;
-    int skipAfterReversal = 0;
-
-    for (float v = 0.0f; v <= mConfig.maxVolts; v += mConfig.rampVoltsPerSec * dt) {
+    float v = 0.0f;
+    while (v <= mConfig.maxVolts) {
         drive(v * dir, spinInPlace);
         pros::delay(static_cast<uint32_t>(mConfig.sampleMs));
         const float l = mDrivetrain.leftVelocityInPerSec();
@@ -137,15 +53,11 @@ FeedforwardFit Characterizer::feedforward(bool spinInPlace) {
         // the fit needs. The chassis speed is 0.
         const float speed = spinInPlace ? 0.5f * (std::fabs(l) + std::fabs(r))
                                         : dir * 0.5f * (l + r);
-        speedHist.push_back(speed);
 
-        if (skipAfterReversal > 0) {
-            --skipAfterReversal;
-        } else if (static_cast<int>(speedHist.size()) > kAccelSpan &&
-                   speed > mConfig.minSpeedInPerSec) {
-            const float prev = speedHist[speedHist.size() - 1 - kAccelSpan];
-            const float accel = (speed - prev) / (dt * kAccelSpan);
-            samples.push_back({speed, accel, v});
+        RampSampler::Sample sample;
+        if (sampler.push(speed, v, sample) &&
+            sample.speed > mConfig.minSpeedInPerSec) {
+            acc.add(sample.speed, sample.accel, sample.volts);
         }
 
         if (!spinInPlace) {
@@ -157,29 +69,33 @@ FeedforwardFit Characterizer::feedforward(bool spinInPlace) {
                 dir = -dir;
                 legStart = mDrivetrain.averagePositionDeg();
                 // A step in every quantity being fitted.
-                skipAfterReversal = 2 * kAccelSpan;
-                speedHist.clear();
+                sampler.reset();
             }
         }
+        v += (v < mConfig.rampSwitchVolts ? mConfig.rampVoltsPerSec
+                                          : mConfig.rampVoltsPerSecFast) * dt;
     }
     drive(0.0f, spinInPlace);
     pros::delay(400);
 
-    float kvPerIn = 0.0f, ks = 0.0f, kaPerIn = 0.0f, r2 = 0.0f;
-    if (!fitDynamic(samples, kvPerIn, ks, kaPerIn, r2)) {
+    FeedforwardFitStats st;
+    if (!acc.solve(st)) {
         report("feedforward", "not enough motion to fit -- raise maxVolts");
         return fit;
     }
     // Per in/s to per m/s divides by INCH_TO_METER; same for in/s^2.
-    fit.kV = kvPerIn / INCH_TO_METER;
-    fit.kA = kaPerIn / INCH_TO_METER;
-    fit.kS = ks;
-    fit.r2 = r2;
-    fit.samples = static_cast<int>(samples.size());
-    fit.valid = fit.kV > 0.0f && fit.r2 > 0.5f;
+    fit.kV = st.kV / INCH_TO_METER;
+    fit.kA = st.kA / INCH_TO_METER;
+    fit.kS = st.kS;
+    fit.r2 = st.r2;
+    fit.kaT = st.kaT;
+    fit.samples = st.samples;
+    fit.valid = fit.kV > 0.0f && fit.r2 >= mConfig.minR2;
+    fit.kaValid = fit.valid && fit.kA > 0.0f && fit.kaT >= mConfig.kaMinT;
 
-    std::snprintf(msg, sizeof(msg), "kV %.3f kS %.3f kA %.4f r2 %.3f n=%d",
-                  fit.kV, fit.kS, fit.kA, fit.r2, fit.samples);
+    std::snprintf(msg, sizeof(msg), "kV %.3f kS %.3f kA %.4f%s r2 %.3f n=%d",
+                  fit.kV, fit.kS, fit.kA, fit.kaValid ? "" : " (kA UNFIT)",
+                  fit.r2, fit.samples);
     report("feedforward", msg);
     return fit;
 }

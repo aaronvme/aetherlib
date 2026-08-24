@@ -15,9 +15,10 @@ struct AutoTuneConfig {
     std::vector<float> angleStepsDeg{90.0f, 180.0f};
     std::vector<float> distanceStepsIn{24.0f, 48.0f};
 
-    /// Each trial runs for exactly this long. Tolerance is forced to 0 so the
-    /// motion cannot settle early - otherwise it exits the moment it reaches
-    /// tolerance and the overshoot is never observed.
+    /// Each trial runs for exactly this long: the motion is asked to hold for
+    /// its whole timeout window, because a trial that exits at tolerance never
+    /// shows its overshoot and one that exits on a stall is scored on a
+    /// truncated trace.
     float trialMs{1500.0f};
 
     /// Reps per candidate gain, averaged. Each rep is an out-and-back pair.
@@ -38,7 +39,11 @@ struct AutoTuneConfig {
     /// kI is only attempted if steady-state error stays above this.
     float steadyStateTolDeg{1.5f};
     float steadyStateTolIn{0.75f};
-    float kiStep{0.01f};
+    // Relative to kP, like kdRatioStep, because kI/kP is a reciprocal time
+    // constant: 0.5 to 3.0 per second here, so Ti spans 2.0 s down to 0.33 s.
+    // An absolute step could not reach either axis -- against a kP that grows
+    // to 152, a kI of 0.06 is a Ti of 2530 s inside a 1.5 s trial.
+    float kiRatioStep{0.5f};
 
     int maxIterations{6};
 

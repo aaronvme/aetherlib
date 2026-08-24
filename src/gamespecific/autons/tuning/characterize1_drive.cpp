@@ -32,9 +32,13 @@ void autonCharacterize1Drive() {
     drivetrain.trackWidth = width;
     ramseteFf.kV = str.kV;
     ramseteFf.ksStraight = str.kS;
-    ramseteFf.kaStraight = str.kA;
+    // An unidentified kA fits near zero with r2 still at 0.999, so writing it
+    // unconditionally is how kaStraight ends up at 0 and stays there.
+    ramseteFf.kaStraight = str.kaValid ? str.kA : 0.0f;
     ramseteFf.ksTurn = turn.kS;
-    ramseteFf.kaTurn = turn.kA * width * INCH_TO_METER * 0.5f;
+    ramseteFf.kaTurn = turn.kaValid
+                           ? turn.kA * width * INCH_TO_METER * 0.5f
+                           : 0.0f;
 
     constexpr float kLoopSpeedup = 3.0f;
     const float tau = str.kV > 0.0f ? str.kA / str.kV : 0.0f;
@@ -42,9 +46,13 @@ void autonCharacterize1Drive() {
 
     out.result("copy to config.cpp:");
     out.result("trackWidth = %.3ff (was %.3f)", width, widthWas);
-    out.result("kV=%.4ff kaStraight=%.4ff", str.kV, str.kA);
+    out.result("kV=%.4ff kaStraight=%.4ff", str.kV, ramseteFf.kaStraight);
     out.result("ksStraight=%.4ff ksTurn=%.4ff", str.kS, turn.kS);
     out.result("kaTurn=%.4ff kP=%.2ff", ramseteFf.kaTurn, ramseteFf.kP);
+    if (!str.kaValid || !turn.kaValid) {
+        out.result("kA UNFIT t=%.1f/%.1f want>=25", str.kaT, turn.kaT);
+        out.result("raise rampVoltsPerSecFast or accelSpanTicks");
+    }
     out.result("r2=%.3f tau=%.3fs", str.r2, tau);
     // Free speed the fit implies, against the rpm the RAMSETE profile cruises at.
     const float ffTop =

@@ -57,12 +57,15 @@ StepMetrics PidAutoTuner::runTrial(bool angular, float delta) {
         mTrace.error.push_back(err);
     });
 
-    // Tolerance 0 never satisfies |err| < tol, so the motion runs the full
-    // window and the whole response is captured.
+    // holdForTimeout runs the whole window, so the whole response is captured.
+    // This used to be an unsatisfiable tolerance of 0, which stall detection
+    // then defeated: every trial exited ~800 ms into a 1500 ms window and the
+    // search was scoring settle time and oscillation count over a truncated
+    // trace.
     if (angular) {
-        mChassis.turnToHeading(mTarget, mConfig.trialMs, {.targetTolerance = 0.0f});
+        mChassis.turnToHeading(mTarget, mConfig.trialMs, {.holdForTimeout = true});
     } else {
-        mChassis.moveDistance(mDelta, mConfig.trialMs, {.targetTolerance = 0.0f});
+        mChassis.moveDistance(mDelta, mConfig.trialMs, {.holdForTimeout = true});
     }
 
     mChassis.setTelemetry(nullptr);
@@ -72,7 +75,11 @@ StepMetrics PidAutoTuner::runTrial(bool angular, float delta) {
         std::lock_guard<pros::Mutex> lock(mTraceMutex);
         copy = mTrace;
     }
-    return analyseStep(copy.t, copy.error, std::fabs(delta), mConfig.weights);
+    // The settle band is what this axis can actually hold, not a fixed 2% of
+    // the step: below it every candidate scores the whole trial window and the
+    // 8.0-per-second settle weight ranks nothing.
+    const float band = angular ? mConfig.steadyStateTolDeg : mConfig.steadyStateTolIn;
+    return analyseStep(copy.t, copy.error, std::fabs(delta), mConfig.weights, band);
 }
 
 StepMetrics PidAutoTuner::evaluate(const PIDGains& gains, bool angular, float step) {
@@ -128,9 +135,10 @@ StepMetrics PidAutoTuner::runSteps(bool angular, float step) {
 
 void PidAutoTuner::report(const char* stage, const PIDGains& g, const StepMetrics& m) {
     std::printf("[autotune] %-8s kP=%.3f kI=%.4f kD=%.3f | e0=%.2f over=%.1f%% "
-                "sse=%.2f settle=%.0fms osc=%d cost=%.1f\n",
+                "sse=%.2f settle=%.0fms%s osc=%d cost=%.1f\n",
                 stage, g.kP, g.kI, g.kD, m.initial, m.overshootPct,
-                m.steadyState, m.settleMs, m.oscillations, m.cost);
+                m.steadyState, m.settleMs, m.settledInBand ? "" : "+",
+                m.oscillations, m.cost);
     if (mConfig.onProgress) mConfig.onProgress(stage, g, m);
 }
 
@@ -198,7 +206,7 @@ PIDGains PidAutoTuner::tuneAxis(bool angular) {
         if (mLast.valid && mLast.steadyState > ssTol) {
             for (int i = 1; i <= mConfig.maxIterations && !mCancelled; ++i) {
                 PIDGains trial = best;
-                trial.kI = mConfig.kiStep * static_cast<float>(i);
+                trial.kI = best.kP * mConfig.kiRatioStep * static_cast<float>(i);
 
                 const StepMetrics m = evaluate(trial, angular, step);
                 if (!m.valid) { report("no trace", trial, m); break; }
