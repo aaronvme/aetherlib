@@ -28,3 +28,4 @@ sim/web/*.data
 
 # host test build output
 test/host/build/
+*.pdb
