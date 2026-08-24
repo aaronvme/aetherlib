@@ -33,10 +33,15 @@ float arcStartHeading(const Pose& current, float targetX, float targetY,
 // ============================================================================
 
 struct ArcParams {
+    /// Drive the arc backwards. The radius sign is relative to the direction of
+    /// travel either way, so a reverse arc mirrors to the other side.
     bool forwards{true};
     float maxSpeed{127.0f};
     float minSpeed{0.0f};
+    /// Inches. Unlike the other motions this does not fall back to
+    /// ChassisConfig::targetToleranceIn.
     float targetTolerance{1.0f};
+    /// Not read by the controller; the radius already sets the curvature.
     float lead{0.0f};
 };
 

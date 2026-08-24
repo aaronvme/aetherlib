@@ -26,8 +26,8 @@ float resolveTurnError(float rawErrorRad, TurnDirection direction);
 /// Heading error to face a target point from current pose
 float headingToPoint(const Pose& current, float targetX, float targetY);
 
-/// Heading error with an angular offset (positive = CCW)
-/// @param offsetDeg  angular offset in VEX degrees
+/// Heading error with an angular offset
+/// @param offsetDeg  angular offset in VEX degrees, so positive is CLOCKWISE
 float headingToPointOffset(const Pose& current, float targetX, float targetY,
                             float offsetDeg);
 
@@ -43,6 +43,9 @@ struct TurntoHeadingParams {
     float maxSpeed{127.0f};
     float minSpeed{0.0f};
     float targetTolerance{-1.0f};  // VEX degrees, negative = ChassisConfig
+    /// Run the whole timeout window: no arrival, no stall. What a step-response
+    /// capture needs (util/autotune.hpp). Ignored without a timeout.
+    bool holdForTimeout{false};
 };
 
 struct TurnToPointParams {
@@ -50,7 +53,7 @@ struct TurnToPointParams {
     float maxSpeed{127.0f};
     float minSpeed{0.0f};
     float targetTolerance{-1.0f};  // VEX degrees, negative = ChassisConfig
-    float offset{0.0f};            // angular offset in VEX degrees
+    float offset{0.0f};            // VEX degrees, so positive is clockwise
 };
 
 struct SwingParams {

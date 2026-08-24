@@ -24,16 +24,25 @@ int lookaheadIndex(const std::vector<Pose>& path, const Pose& pose,
 // ============================================================================
 
 struct RAMSETEParams {
-    // b and zeta use the conventional (meter-based) parameterization; the
-    // controller scales b to inches internally. The textbook b≈2.0 is set for
-    // FRC-scale paths and tracks a VEX field badly — its curves are far tighter
-    // relative to the robot, and measured on this drivetrain b=2 leaves 6 in of
-    // cross-track where b=48 leaves under 1 in at the same peak speed.
+    // b is rad^2/m^2 -- the conventional metre parameterization -- and
+    // chassis.cpp multiplies it by INCH_TO_METER^2 before use. The textbook
+    // b = 2 is set for FRC-scale paths and tracks a VEX field badly: swept over
+    // three paths at the sim's 70 ms response lag, peak cross-track runs
+    // b=2: 3.4-12.5 in, b=12: 1.6-5.0, b=48: 1.2-2.5, b=144: 1.1-1.5, and
+    // settle time 4.2-5.1 s at b=2 against 2.0-2.9 s at b=48. Past b=48 the
+    // curve is flat -- b=96 buys under 0.5 in -- and the sim has no mass, so it
+    // cannot price the aggression it is rewarding. Hence 48, not higher.
     //
-    // Low zeta leaves a curved path off its final tangent with no authority to
-    // converge, so the motion sits out its timeout instead of exiting; the exit
-    // appears between 0.80 and 0.85. Raise b only on hardware -- the sim has no
-    // mass, so it rewards aggression whose cost it cannot show.
+    // zeta 0.70 is the textbook value and is measurably worse here: at a 140 ms
+    // response lag it overshoots the path end by 1.4-2.4 in against 0.6-0.8 in
+    // at 0.85, and it leaves 2.7 in of final error where 0.85 leaves 0.9.
+    //
+    // Neither gain governs the overshoot itself. Every term of the law scales
+    // with the reference speed and a profile ends at rest, so the last of a
+    // motion is an open-loop coast: 0.00 in past the end at a 20 ms response
+    // lag, 0.5 in at 70 ms, 2.1 in at 140 ms, 3.5 in at 200 ms, moving under
+    // 0.35 in across b = 12..96 and zeta = 0.70..0.95. Shorten it with
+    // maxAccel or useVelocityController, not with b.
     float b{48.0f};      // aggressiveness (higher = tighter tracking), b > 0
     float zeta{0.85f};   // damping ratio, 0 < zeta < 1
     float maxSpeed{127.0f};            // peak output, motor units (0–127)
@@ -41,8 +50,11 @@ struct RAMSETEParams {
     // the motion cannot start; binds within ~minSpeed²/(2·maxAccel) of the start.
     float minSpeed{12.0f};
     // Must exceed the localization error or the motion never exits: under MCL,
-    // 1 in against a 1.5 in estimate error timed out 3/3, and 3 in passed.
-    float targetTolerance{-1.0f};      // inches, negative = ChassisConfig
+    // 1 in against a 1.5 in estimate error timed out 3/3, and 3 in passed. So
+    // this does NOT default to ChassisConfig::targetToleranceIn, which is set
+    // for a straight drive and is 1 in on this robot -- the value measured to
+    // fail. Set it to -1 to opt into the config value anyway.
+    float targetTolerance{3.0f};       // inches, negative = ChassisConfig
     // Curved paths finish 5-12 deg off the final tangent and the law has no
     // authority left to fix it (every term scales with v_d, which the profile
     // has driven to 0), so a tight value here means the motion runs out its

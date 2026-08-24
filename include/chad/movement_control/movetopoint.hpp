@@ -16,6 +16,10 @@ struct MoveDistanceParams {
     // Negative uses the ChassisConfig value.
     float targetTolerance{-1.0f};   // inches
     float earlyExitRange{0.0f};     // exit early if within this range (0 = disabled)
+    /// Run the whole timeout window: no arrival, no chaining, no stall. What a
+    /// step-response capture needs (util/autotune.hpp). Ignored without a
+    /// timeout, or the motion would never end.
+    bool holdForTimeout{false};
 };
 
 struct MoveToPointParams {
@@ -25,7 +29,10 @@ struct MoveToPointParams {
     // Negative uses the ChassisConfig value.
     float targetTolerance{-1.0f};   // inches
     float earlyExitRange{0.0f};
-    float lead{0.0f};               // carrot-point lead for curved approaches
+    // Not read by the controller. moveToPoint drives the straight line; a curved
+    // approach that also lands on a heading is moveBoomerang. Kept so existing
+    // calls still compile.
+    float lead{0.0f};
 
     // Steering stops recomputing the bearing inside this radius and holds the
     // last one: atan2 over a shrinking offset is dominated by whatever noise the
