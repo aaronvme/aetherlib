@@ -25,3 +25,7 @@ sim/web/*.data
 
 # Emscripten SDK, if it ever gets cloned inside the project
 /emsdk/
+
+# host test build output
+test/host/build/
+*.pdb
