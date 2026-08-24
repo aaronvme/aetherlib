@@ -114,6 +114,22 @@ public:
         float obstacleRangeTol = 6.0f;     // inches; reading vs post surface
         bool autoSync = true;              // automatically sync pose to odometry
         bool useAccumulation = false;      // average multiple readings for stability
+
+        // Appended after the fields gamespecific/config.cpp names by designator,
+        // so the designated initialiser there stays in declaration order.
+
+        float minReadingMm = 1.0f;         // below this the read faulted
+        /// Past this a reading is silence -- which is itself evidence, when the
+        /// pose puts a wall inside noReturnWallLimit.
+        float maxReadingMm = 2000.0f;
+        /// The V5 changes ranging mode here, and below it low confidence is
+        /// normal, so confidenceThreshold only applies above it.
+        float confidenceRangeMm = 200.0f;
+        /// Weighted, not counted: reading THROUGH a wall is conclusive alone,
+        /// silence where one should be is not, so it takes two.
+        int displaceEvidence = 2;
+        int displaceWeightTooFar = 2;
+        int displaceWeightSilent = 1;
     };
 
     // ========================================================================

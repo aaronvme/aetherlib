@@ -9,6 +9,7 @@
 #include "pros/rotation.hpp"
 #include "pros/rtos.hpp"
 
+#include "chad/tracking/odom_core.hpp"
 #include "chad/util/util.hpp"
 
 namespace chad {
@@ -59,6 +60,14 @@ public:
     float rawTicks() const;
     float rawDegrees() const;
 
+    /// True when the last distanceIn() read faulted and served a held value. A
+    /// held value averaged in with live ones halves the reported distance per
+    /// dead wheel without tripping any jump guard, so the caller must drop it
+    /// rather than average it.
+    bool faulted() const { return mFaulted; }
+    /// Faulted reads since construction. Climbing means a wheel is dropping out.
+    uint32_t faultCount() const { return mFaults; }
+
 private:
     SensorType mType;
     pros::adi::Encoder* mAdi{nullptr};
@@ -73,6 +82,8 @@ private:
     // teleporting odometry by ~2 billion ticks. Mutable: distanceIn() is
     // logically const.
     mutable float mLastGoodDistIn{0.0f};
+    mutable bool mFaulted{false};
+    mutable uint32_t mFaults{0};
 };
 
 // ============================================================================
@@ -136,11 +147,13 @@ public:
     // WARNING: single-tick only. If update() runs more than once between two
     // reads, the intermediate deltas are LOST. Use consumeDelta() instead when
     // more than one task may drive update() (the background odom task does).
-    OdomDelta getLastDelta() const { return mLastDelta; }
+    OdomDelta getLastDelta() const { return mCore.lastDelta(); }
 
     // One independent accumulator per consumer. Two filters sharing a channel
     // would each see only the motion the other had not yet taken.
-    enum DeltaChannel { CHANNEL_MCL = 0, CHANNEL_EKF = 1, DELTA_CHANNELS = 2 };
+    static constexpr int CHANNEL_MCL = OdomCore::CHANNEL_MCL;
+    static constexpr int CHANNEL_EKF = OdomCore::CHANNEL_EKF;
+    static constexpr int DELTA_CHANNELS = OdomCore::DELTA_CHANNELS;
 
     // Retrieve the ACCUMULATED decomposed delta on `channel` since the previous
     // call for that channel, and reset it. Thread-safe. This is what MCL and the
@@ -182,35 +195,56 @@ public:
     // Get heading in standard math radians
     float imuHeadingRad() const;
 
+    /// Primary IMU heading in standard math radians. False when no IMU is fitted
+    /// or the read faulted, in which case `out` holds the last good value -- a
+    /// hold looks exactly like a robot that is not turning, so a filter must not
+    /// fuse it as a measurement.
+    bool imuHeadingRad(float& out) const;
+
+    /// Whether a primary IMU is fitted at all. Without one there is no absolute
+    /// heading source and heading is unobservable.
+    bool hasImu() const;
+
+    /// Ticks dropped by the dead-reckoning jump guards. Climbing means a wheel
+    /// sensor or the IMU is dropping out and reappearing re-zeroed.
+    uint32_t jumpRejects() const;
+    uint32_t headingJumpRejects() const;
+
+    /// Ticks in which a fitted tracking wheel could not be read, so the
+    /// distance came from fewer sensors than were installed. A partial failure
+    /// changes what the average means and trips no jump guard, so this is the
+    /// only way it is visible.
+    uint32_t distanceFaults() const;
+    /// Ticks in which EVERY tracking wheel on an axis faulted, so distance was
+    /// held rather than measured.
+    uint32_t distanceOutages() const;
+
+    /// The integrator itself, for its config (jump guards, heading source).
+    /// Thread-safe accessors only; do not step it from outside.
+    OdomCore::Config coreConfig() const;
+    void setCoreConfig(const OdomCore::Config& config);
+
 private:
     OdomSensors mSensors;
-    Pose mPose;
+    OdomCore mCore;
 
     // Serializes update()/setPose()/getPose()/reset()/consumeDelta()/setSensors()
     // across tasks. Multiple tasks touch odometry concurrently (background odom
-    // task, MCL, RCL, user code) — an unserialized read-modify-write of
-    // mPose/mPrev* would corrupt the pose. Mutable so const accessors can lock.
+    // task, MCL, RCL, user code) — an unserialized read-modify-write of the
+    // integrator would corrupt the pose. Mutable so const accessors can lock.
     mutable pros::Mutex mMutex;
 
-    // Previous readings for delta computation
-    float mPrevVertDist{0.0f};     // accumulated vertical distance last update
-    float mPrevHorizDist{0.0f};    // accumulated horizontal distance last update
-    float mPrevHeadingRad{0.0f};   // IMU heading last update
-    // A disconnected IMU holds the heading at its last good value, which looks
-    // exactly like a robot that is not turning.
     mutable uint32_t mImuFaults{0};
+    mutable uint32_t mDistanceFaults{0};
+    mutable uint32_t mDistanceOutages{0};
+    // Last motor-encoder distance that came from a live encoder, held through a
+    // total outage so the pose stops rather than stepping to a fabricated zero.
+    mutable float mLastGoodMotorVertIn{0.0f};
     std::atomic<bool> mBackgroundUpdatesEnabled{false};
 
-    // Most recent decomposed delta, stored for MCL per-axis noise.
-    // Updated at the end of each update() call.
-    OdomDelta mLastDelta;
-
-    // Accumulated delta since last consumeDelta() — survives multiple update()
-    // ticks so consumers polling slower than the update rate never miss motion.
-    OdomDelta mAccumDelta[DELTA_CHANNELS];
-
-    // Helper: average distance across a wheel collection
-    static float averageDistance(const std::vector<TrackingWheel*>& wheels);
+    // Helper: average distance across a wheel collection, live wheels only.
+    // Counts the dropouts, because a halved average is not a jump.
+    float averageDistance(const std::vector<TrackingWheel*>& wheels) const;
     static float averageOffset(const std::vector<TrackingWheel*>& wheels);
 
     // Current vertical distance: tracking wheels → motor encoders → 0

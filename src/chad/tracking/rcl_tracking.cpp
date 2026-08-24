@@ -214,33 +214,40 @@ RclTracking::ReadingClass RclTracking::classifyReading(int index, float& wallDis
     // where the sensor value changes between the range check here and the
     // coordinate computation in getBotCoordFromSensor().
     float readingInch = s.readingInch;
-    if (readingInch < 1.0f * MM_TO_INCH) return ReadingClass::Invalid;
-
-    if (readingInch > 2000.0f * MM_TO_INCH) {
-        // Silence where the pose predicts a near wall is as solid a contradiction
-        // as reading through one. It fixes no coordinate, but it is what tells an
-        // axis whose beams have all fallen silent that the robot has moved.
-        float range = 0.0f;
-        auto [w, d] = nearestWall(s);
-        range = d;
-        if (w >= 0 && range < mConfig.noReturnWallLimit) return ReadingClass::Impossible;
-        return ReadingClass::Invalid;
-    }
-
-    // — Confidence check —
-    // V5 sensor confidence is 0–63. Low-confidence readings produce noise.
-    if (readingInch > 200.0f * MM_TO_INCH && s.confidence < mConfig.confidenceThreshold) {
-        return ReadingClass::Invalid;
-    }
+    if (readingInch < mConfig.minReadingMm * MM_TO_INCH) return ReadingClass::Invalid;
 
     // — Heading alignment check —
     // RCL requires the sensor ray to be near-orthogonal to a field wall
     // (within angleTolerance of 0°, 90°, 180°, or 270° in world frame).
     // A diagonal ray cannot determine which wall was hit and the distance
     // measurement has amplified angle error.
+    //
+    // Ahead of the no-return branch, not after it. A ToF beam well off the wall
+    // normal legitimately gets nothing back, and scoring that silence as
+    // Impossible made it displacement evidence: the four shipped mounts are 90
+    // degrees apart, so fmod by HALF_PI is the same for all of them and they
+    // fail this test together -- four silent beams, 4 evidence points against a
+    // threshold of 2, and mDisplaced latched onto recoverySyncProp for a robot
+    // that had merely turned.
     float angleTolRad = degToRad(mConfig.angleTolerance);
     float angleMod = std::fmod(std::fabs(s.worldHeading), HALF_PI);
     if (angleMod > angleTolRad && angleMod < HALF_PI - angleTolRad) {
+        return ReadingClass::Invalid;
+    }
+
+    if (readingInch > mConfig.maxReadingMm * MM_TO_INCH) {
+        // Silence where the pose predicts a near wall is as solid a contradiction
+        // as reading through one. It fixes no coordinate, but it is what tells an
+        // axis whose beams have all fallen silent that the robot has moved.
+        auto [w, d] = nearestWall(s);
+        if (w >= 0 && d < mConfig.noReturnWallLimit) return ReadingClass::Impossible;
+        return ReadingClass::Invalid;
+    }
+
+    // — Confidence check —
+    // V5 sensor confidence is 0–63. Low-confidence readings produce noise.
+    if (readingInch > mConfig.confidenceRangeMm * MM_TO_INCH &&
+        s.confidence < mConfig.confidenceThreshold) {
         return ReadingClass::Invalid;
     }
 
@@ -428,12 +435,12 @@ void RclTracking::update() {
     for (int i = 0; i < mConfig.sensorCount; i++) {
         float wallDist = 0.0f;
         switch (classifyReading(i, wallDist)) {
-            case ReadingClass::TooFar:     evidence += 2; break;
-            case ReadingClass::Impossible: evidence += 1; break;
+            case ReadingClass::TooFar:     evidence += mConfig.displaceWeightTooFar; break;
+            case ReadingClass::Impossible: evidence += mConfig.displaceWeightSilent; break;
             default: break;
         }
     }
-    mDisplaceCycles = (evidence >= 2) ? (mDisplaceCycles + 1) : 0;
+    mDisplaceCycles = (evidence >= mConfig.displaceEvidence) ? (mDisplaceCycles + 1) : 0;
     if (mDisplaceCycles >= mConfig.displaceCycles) {
         mDisplaced = true;
     } else if (evidence == 0) {

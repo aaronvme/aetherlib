@@ -48,21 +48,34 @@ float TrackingWheel::distanceIn() const {
     // good distance instead so a transient disconnect just freezes position.
     constexpr int32_t kProsErr = INT32_MAX;
 
+    // faulted() is what stops a held value being averaged in with live ones:
+    // that halves the reported distance per dead wheel and trips no jump guard.
     if (mType == SensorType::ADI && mAdi != nullptr) {
         // ADI encoder: ticks → revolutions → distance
         int32_t rawTicks = mAdi->get_value();
-        if (rawTicks == kProsErr) return mLastGoodDistIn;
+        if (rawTicks == kProsErr) {
+            mFaulted = true;
+            ++mFaults;
+            return mLastGoodDistIn;
+        }
         float revolutions = static_cast<float>(rawTicks) / (ADI_TICKS_PER_REV * mGearRatio);
         mLastGoodDistIn = revolutions * circumference;
+        mFaulted = false;
         return mLastGoodDistIn;
     } else if (mType == SensorType::Rotation && mRot != nullptr) {
         // Rotation sensor: centidegrees → revolutions → distance
         int32_t rawCentideg = mRot->get_position();
-        if (rawCentideg == kProsErr) return mLastGoodDistIn;
+        if (rawCentideg == kProsErr) {
+            mFaulted = true;
+            ++mFaults;
+            return mLastGoodDistIn;
+        }
         float revolutions = static_cast<float>(rawCentideg) / (ROTATION_UNITS_PER_REV * mGearRatio);
         mLastGoodDistIn = revolutions * circumference;
+        mFaulted = false;
         return mLastGoodDistIn;
     }
+    mFaulted = true;
     return 0.0f;
 }
 
@@ -92,22 +105,19 @@ void TrackingWheel::reset() {
 // OdomTracking
 // ============================================================================
 
-OdomTracking::OdomTracking()
-    : mPose() {
-    mPrevVertDist   = currentVertDistance();
-    mPrevHorizDist  = currentHorizDistance();
-    mPrevHeadingRad = currentHeadingRad();
+OdomTracking::OdomTracking() {
+    mCore.rebaseline(currentVertDistance(), currentHorizDistance(),
+                     currentHeadingRad());
 }
 
 OdomTracking::OdomTracking(const OdomSensors& sensors)
-    : mSensors(sensors), mPose() {
-    // Initialize previous readings from current sensor values so the first
-    // update() computes a near-zero delta.  Without this, the first update
-    // sees a jump equal to the entire accumulated tracking-wheel distance
-    // plus a 90° heading offset (IMU 0° VEX = PI/2 standard radians).
-    mPrevVertDist   = currentVertDistance();
-    mPrevHorizDist  = currentHorizDistance();
-    mPrevHeadingRad = currentHeadingRad();
+    : mSensors(sensors) {
+    // Baseline from the current readings so the first update() computes a
+    // near-zero delta. Without this the first update sees a jump equal to the
+    // entire accumulated distance plus a 90 degree heading offset (IMU 0 VEX is
+    // PI/2 standard radians).
+    mCore.rebaseline(currentVertDistance(), currentHorizDistance(),
+                     currentHeadingRad());
 }
 
 OdomTracking::~OdomTracking() {
@@ -117,9 +127,8 @@ OdomTracking::~OdomTracking() {
 void OdomTracking::setSensors(const OdomSensors& sensors) {
     std::lock_guard<pros::Mutex> lock(mMutex);
     mSensors = sensors;
-    mPrevVertDist  = currentVertDistance();
-    mPrevHorizDist = currentHorizDistance();
-    mPrevHeadingRad = currentHeadingRad();
+    mCore.rebaseline(currentVertDistance(), currentHorizDistance(),
+                     currentHeadingRad());
 }
 
 // ============================================================================
@@ -133,15 +142,26 @@ float OdomTracking::currentVertDistance() const {
     }
     // 2. Integrated motor encoders (drivetrain fallback)
     if (mSensors.drivetrain != nullptr) {
-        float avgDeg = mSensors.drivetrain->averagePositionDeg();
-        float motorRevolutions = avgDeg / 360.0f;
+        const EncoderAverage avg = mSensors.drivetrain->averagePositionDegLive();
+        if (avg.faulted > 0) ++mDistanceFaults;
+        if (!avg.valid()) {
+            // Every encoder is dead. The scalar accessor returns 0.0 here,
+            // which a consumer cannot tell from standing at the origin: the
+            // first tick reads as one big jump and gets rejected, and every
+            // tick after reads a consistent zero, so the pose sits still while
+            // the robot drives. Hold instead, and count it.
+            ++mDistanceOutages;
+            return mLastGoodMotorVertIn;
+        }
         // Motor encoders measure the MOTOR shaft. With an external gear ratio
         // (e.g. 600 RPM blue cartridge driving a 450 RPM wheel), one motor rev
         // is only wheelRPM/cartridgeRPM wheel revs. Omitting this factor
         // overestimated distance by 33% on a 600→450 geared drive.
-        float wheelRevolutions = motorRevolutions *
+        const float wheelRevolutions = (avg.value / 360.0f) *
             mSensors.drivetrain->externalGearRatio();
-        return wheelRevolutions * mSensors.drivetrain->wheelDiameter * PI;
+        mLastGoodMotorVertIn =
+            wheelRevolutions * mSensors.drivetrain->wheelDiameter * PI;
+        return mLastGoodMotorVertIn;
     }
     // 3. No vertical tracking source
     return 0.0f;
@@ -156,22 +176,34 @@ float OdomTracking::currentHorizDistance() const {
     return 0.0f;
 }
 
-float OdomTracking::currentHeadingRad() const {
-    if (!mSensors.imuCollection.empty() && mSensors.imuCollection[0] != nullptr) {
-        float rawHeading = mSensors.imuCollection[0]->get_heading();
-        // PROS returns PROS_ERR_F (== INFINITY) on an IMU fault (disconnect,
-        // transient error, mid-calibration). Feeding that downstream corrupts
-        // the pose; hold the last good heading instead of integrating garbage.
-        if (!std::isfinite(rawHeading)) {
-            ++mImuFaults;
-            return mPrevHeadingRad;
-        }
-        // Apply calibration scale factor to correct IMU under-reporting.
-        // V5 IMUs typically read ~354.25° for a 360° physical turn.
-        float scaledHeading = rawHeading * mSensors.imuScaleFactor;
-        return vexToStdRad(scaledHeading);
+bool OdomTracking::hasImu() const {
+    return !mSensors.imuCollection.empty() && mSensors.imuCollection[0] != nullptr;
+}
+
+bool OdomTracking::imuHeadingRad(float& out) const {
+    if (!hasImu()) {
+        out = mCore.prevHeadingRad();
+        return false;
     }
-    return 0.0f;
+    const float rawHeading = mSensors.imuCollection[0]->get_heading();
+    // PROS returns PROS_ERR_F (== INFINITY) on an IMU fault (disconnect,
+    // transient error, mid-calibration). Feeding that downstream corrupts the
+    // pose; hold the last good heading instead of integrating garbage.
+    if (!std::isfinite(rawHeading)) {
+        ++mImuFaults;
+        out = mCore.prevHeadingRad();
+        return false;
+    }
+    // Calibration scale factor: V5 IMUs typically read ~354.25 degrees for a
+    // 360 degree physical turn.
+    out = vexToStdRad(rawHeading * mSensors.imuScaleFactor);
+    return true;
+}
+
+float OdomTracking::currentHeadingRad() const {
+    float heading = 0.0f;
+    imuHeadingRad(heading);
+    return heading;
 }
 
 // ============================================================================
@@ -184,61 +216,15 @@ void OdomTracking::update(bool force) {
     }
 
     std::lock_guard<pros::Mutex> lock(mMutex);
-    float headingRad = currentHeadingRad();
-    float vertDist   = currentVertDistance();
-    float horizDist  = currentHorizDistance();
-
-    // — Compute deltas since last update —
-    float dThetaRad = headingRad - mPrevHeadingRad;
-    dThetaRad = wrapRad(dThetaRad);
-
-    float dVert  = vertDist  - mPrevVertDist;
-    float dHoriz = horizDist - mPrevHorizDist;
-
-    // — Arc approximation for field-frame displacement —
-    float midHeadingRad = mPrevHeadingRad + dThetaRad * 0.5f;
-
-    float dX = 0.0f;
-    float dY = 0.0f;
-
-    if (std::fabs(dThetaRad) < 1e-6f) {
-        // Negligible rotation → use simple trig (no arc)
-        dX = dVert * std::cos(mPrevHeadingRad) - dHoriz * std::sin(mPrevHeadingRad);
-        dY = dVert * std::sin(mPrevHeadingRad) + dHoriz * std::cos(mPrevHeadingRad);
-    } else {
-        // Arc approximation with midpoint heading
-        dX = dVert * std::cos(midHeadingRad) - dHoriz * std::sin(midHeadingRad);
-        dY = dVert * std::sin(midHeadingRad) + dHoriz * std::cos(midHeadingRad);
-    }
-
-    // — Integrate into pose —
-    mPose.x += dX;
-    mPose.y += dY;
-    mPose.theta = headingRad;
-
-    // — Store for next update —
-    mPrevVertDist   = vertDist;
-    mPrevHorizDist  = horizDist;
-    mPrevHeadingRad = headingRad;
-
-    // — Expose decomposed delta for MCL per-axis noise —
-    mLastDelta = {dVert, dHoriz, dThetaRad};
-
-    // — Accumulate for consumeDelta() so consumers polling slower than the
-    //   update rate (e.g. MCL at 25ms vs odometry at 10ms) never miss motion —
-    for (auto& acc : mAccumDelta) {
-        acc.dVert  += dVert;
-        acc.dHoriz += dHoriz;
-        acc.dTheta += dThetaRad;
-    }
+    float headingRad = 0.0f;
+    const bool headingValid = imuHeadingRad(headingRad);
+    mCore.step(currentVertDistance(), currentHorizDistance(), headingRad,
+               headingValid);
 }
 
 OdomDelta OdomTracking::consumeDelta(int channel) {
-    if (channel < 0 || channel >= DELTA_CHANNELS) return {};
     std::lock_guard<pros::Mutex> lock(mMutex);
-    OdomDelta out = mAccumDelta[channel];
-    mAccumDelta[channel] = {};
-    return out;
+    return mCore.consumeDelta(channel);
 }
 
 void OdomTracking::setBackgroundUpdatesEnabled(bool enabled) {
@@ -293,21 +279,16 @@ void OdomTracking::run() {
 
 void OdomTracking::setPose(const Pose& pose) {
     std::lock_guard<pros::Mutex> lock(mMutex);
-    mPose = pose;
-    // Re-sync accumulated distances to current sensor readings so the next
-    // delta starts from zero (tracking wheels → motor encoders → 0).
-    mPrevVertDist  = currentVertDistance();
-    mPrevHorizDist = currentHorizDistance();
-    // IMPORTANT: do NOT set mPrevHeadingRad here.  mPrevHeadingRad tracks
-    // the raw IMU heading, not the odometry pose heading.  Overwriting it
-    // with pose.theta would cause the next update() to compute a spurious
-    // dThetaRad equal to imuHeading - pose.theta (the sync correction of any
-    // tracking system that called setPose, e.g. MCL syncToOdometry).
+    // Pose only. Re-baselining the encoders here deletes the distance driven
+    // since the last tick, and with a filter writing the pose back every cycle
+    // that is a standing fraction of every inch travelled. The heading baseline
+    // must not move either: it tracks the raw IMU, not the pose.
+    mCore.setPose(pose);
 }
 
 Pose OdomTracking::getPose() const {
     std::lock_guard<pros::Mutex> lock(mMutex);
-    return mPose;
+    return mCore.pose();
 }
 
 void OdomTracking::reset() {
@@ -319,19 +300,16 @@ void OdomTracking::reset() {
     for (auto* wheel : mSensors.horizWheelCollection) {
         if (wheel != nullptr) wheel->reset();
     }
-    mPose = Pose{};
-    // Re-baseline: for motor encoders (which can't be reset), store the
-    // current reading so the next delta starts from zero.
-    mPrevVertDist   = currentVertDistance();
-    mPrevHorizDist  = currentHorizDistance();
-    // Read current IMU heading so the next update() computes a near-zero
-    // delta.  Setting this to 0.0f would cause a ~90° spurious rotation
-    // on the first update after reset (IMU 0° VEX = PI/2 rad).
-    mPrevHeadingRad = currentHeadingRad();
-    // Drop any motion accumulated before the reset — it belongs to the old
+    mCore.setPose(Pose{});
+    // Re-baseline: the wheels really were zeroed above, and motor encoders
+    // cannot be, so store the current reading either way. Reading the IMU keeps
+    // the next update()'s delta near zero; baselining it at 0.0f would cause a
+    // 90 degree spurious rotation (IMU 0 VEX is PI/2 rad).
+    mCore.rebaseline(currentVertDistance(), currentHorizDistance(),
+                     currentHeadingRad());
+    // Drop any motion accumulated before the reset: it belongs to the old
     // baseline and would otherwise be applied to consumers after re-zeroing.
-    mLastDelta = {};
-    for (auto& acc : mAccumDelta) acc = {};
+    mCore.clearDeltas();
 }
 
 void OdomTracking::calibrate() {
@@ -355,21 +333,64 @@ float OdomTracking::imuHeadingDeg() const {
 }
 
 float OdomTracking::imuHeadingRad() const {
-    return vexToStdRad(imuHeadingDeg());
+    return currentHeadingRad();
 }
 
-float OdomTracking::averageDistance(const std::vector<TrackingWheel*>& wheels) {
+uint32_t OdomTracking::jumpRejects() const {
+    std::lock_guard<pros::Mutex> lock(mMutex);
+    return mCore.jumpRejects();
+}
+
+uint32_t OdomTracking::headingJumpRejects() const {
+    std::lock_guard<pros::Mutex> lock(mMutex);
+    return mCore.headingJumpRejects();
+}
+
+uint32_t OdomTracking::distanceFaults() const {
+    std::lock_guard<pros::Mutex> lock(mMutex);
+    return mDistanceFaults;
+}
+
+uint32_t OdomTracking::distanceOutages() const {
+    std::lock_guard<pros::Mutex> lock(mMutex);
+    return mDistanceOutages;
+}
+
+OdomCore::Config OdomTracking::coreConfig() const {
+    std::lock_guard<pros::Mutex> lock(mMutex);
+    return mCore.config();
+}
+
+void OdomTracking::setCoreConfig(const OdomCore::Config& config) {
+    std::lock_guard<pros::Mutex> lock(mMutex);
+    mCore.setConfig(config);
+}
+
+float OdomTracking::averageDistance(const std::vector<TrackingWheel*>& wheels) const {
     if (wheels.empty()) return 0.0f;
 
-    float sum = 0.0f;
-    int count = 0;
+    float values[8];
+    bool bad[8];
+    float held = 0.0f;
+    int n = 0;
     for (const auto* wheel : wheels) {
-        if (wheel != nullptr) {
-            sum += wheel->distanceIn();
-            ++count;
-        }
+        if (wheel == nullptr || n >= 8) continue;
+        values[n] = wheel->distanceIn();
+        bad[n] = wheel->faulted();
+        held += values[n];
+        n++;
     }
-    return (count > 0) ? (sum / static_cast<float>(count)) : 0.0f;
+    if (n == 0) return 0.0f;
+
+    const DistanceAverage avg = averageLiveDistance(values, bad, n);
+    if (avg.faulted > 0) ++mDistanceFaults;
+    if (!avg.valid()) {
+        // Nothing live. Hold, so odometry freezes for the tick instead of
+        // stepping to a different sensor set.
+        ++mDistanceOutages;
+        return held / static_cast<float>(n);
+    }
+    return avg.value;
 }
 
 float OdomTracking::averageOffset(const std::vector<TrackingWheel*>& wheels) {
