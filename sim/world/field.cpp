@@ -1,5 +1,6 @@
 #include "field.hpp"
 
+#include <algorithm>
 #include <cmath>
 
 namespace sim {
@@ -18,10 +19,21 @@ Field& field() {
 void Field::clear() {
     mSegments.clear();
     mCircles.clear();
+    mPerimeter = Bounds{};
 }
 
 void Field::addSegment(float x1, float y1, float x2, float y2, int kind) {
     mSegments.push_back({x1, y1, x2, y2, kind});
+    if (kind != 0) return;
+    if (!mPerimeter.has) {
+        mPerimeter = Bounds{true, std::min(x1, x2), std::min(y1, y2),
+                                  std::max(x1, x2), std::max(y1, y2)};
+        return;
+    }
+    mPerimeter.minX = std::min(mPerimeter.minX, std::min(x1, x2));
+    mPerimeter.minY = std::min(mPerimeter.minY, std::min(y1, y2));
+    mPerimeter.maxX = std::max(mPerimeter.maxX, std::max(x1, x2));
+    mPerimeter.maxY = std::max(mPerimeter.maxY, std::max(y1, y2));
 }
 
 void Field::addCircle(float x, float y, float r, int kind) {
@@ -157,16 +169,52 @@ float Field::raycast(float ox, float oy, float dc, float ds, float maxRange) con
     return h.hit ? h.dist : maxRange;
 }
 
-bool Field::collides(float x, float y, float radius, bool includeCircles) const {
-    if (std::fabs(x) > kHalf - radius || std::fabs(y) > kHalf - radius) return true;
-    if (!includeCircles) return false;
-    for (const auto& c : mCircles) {
-        const float dx = x - c.x;
-        const float dy = y - c.y;
-        const float rr = c.r + radius;
-        if (dx * dx + dy * dy < rr * rr) return true;
+/// Distance from a point to a segment.
+static float pointSegmentDist(float px, float py, const Segment& s) {
+    const float ex = s.x2 - s.x1, ey = s.y2 - s.y1;
+    const float len2 = ex * ex + ey * ey;
+    float t = 0.0f;
+    if (len2 > 1e-12f) {
+        t = ((px - s.x1) * ex + (py - s.y1) * ey) / len2;
+        t = (t < 0.0f) ? 0.0f : (t > 1.0f ? 1.0f : t);
     }
-    return false;
+    const float dx = px - (s.x1 + t * ex);
+    const float dy = py - (s.y1 + t * ey);
+    return std::sqrt(dx * dx + dy * dy);
+}
+
+float Field::penetration(float x, float y, float radius, bool includeCircles) const {
+    float worst = 0.0f;
+
+    // The perimeter BOX, not the perimeter segments: it also contains a robot
+    // that was teleported outside, which a distance test would let drive away.
+    // Off the LOADED kind-0 geometry, so clear() really leaves an unbounded field
+    // -- a file-scope half-width stopped the robot at the VRC wall with no
+    // geometry loaded at all.
+    if (mPerimeter.has) {
+        worst = std::max(worst, std::max(mPerimeter.minX + radius - x,
+                                         x - (mPerimeter.maxX - radius)));
+        worst = std::max(worst, std::max(mPerimeter.minY + radius - y,
+                                         y - (mPerimeter.maxY - radius)));
+    }
+    if (!includeCircles) return worst;
+
+    // Non-perimeter segments are solid too. Without this, a structure added
+    // from the geometry editor blocks the distance sensors but not the robot,
+    // which drives straight through the thing its sensors can see.
+    for (const auto& s : mSegments) {
+        if (s.kind == 0) continue;
+        worst = std::max(worst, radius - pointSegmentDist(x, y, s));
+    }
+    for (const auto& c : mCircles) {
+        const float d = std::hypot(x - c.x, y - c.y);
+        worst = std::max(worst, (c.r + radius) - d);
+    }
+    return worst;
+}
+
+bool Field::collides(float x, float y, float radius, bool includeCircles) const {
+    return penetration(x, y, radius, includeCircles) > 0.0f;
 }
 
 }  // namespace sim

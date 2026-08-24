@@ -11,12 +11,15 @@
 //     encoders ~10 ms) and hold a stale value in between. Reading faster than
 //     the device updates returns the previous sample, exactly as on a brain.
 //   * Distance sensors integrate a ~25 deg cone, not a pencil ray, so a thin
-//     goal post is detected from off-axis and the reading is the NEAREST thing
-//     in the cone.
+//     goal post is detected from off-axis. The reported range is the STRONGEST
+//     return in the cone, not the nearest: nearest is the cone edge whenever a
+//     flat wall fills the cone, which reads 39.07 in against 43.02 at 30 deg off
+//     square. See updateDistanceSensors() for the strength model.
 //   * Confidence falls with range and with glancing incidence, and the sensor
 //     drops out entirely past a grazing threshold -- the dominant real-world
 //     failure mode when a robot is near-parallel to a wall.
-//   * Encoders and the IMU are quantised to their real resolutions.
+//   * Encoder POSITION and the IMU heading are quantised to their real
+//     resolutions. Motor velocity is not -- it is published as an exact float.
 //
 // Sensor mount offsets are read straight from chad::sensorMounts in
 // gamespecific/config.cpp, using the same robot-frame convention the library
@@ -41,14 +44,21 @@ struct RobotParams {
     float leftScale{1.0f};
     float rightScale{1.0f};
 
-    // Fraction of real travel the encoders fail to see (wheel slip).
+    // Fraction of real travel the encoders fail to see. Modelled as encoder
+    // under-report, NOT as slip: ground truth is untouched, so the robot still
+    // covers the full distance and only odometry comes up short. Real slip on
+    // traction wheels would lose the ground too.
     float encoderSlip{0.0f};
 
     // --- IMU ---------------------------------------------------------------
-    // underReport reproduces the V5's habit of reading short; with the default
-    // and ScaledIMU's 360/354.25 correction, the two cancel exactly.
+    // The V5's habit of reading short. init() overwrites this with the inverse
+    // of config.cpp's ScaledIMU correction, so the default is a correctly
+    // calibrated IMU and any value you set here is a calibration error.
     float imuUnderReport{354.25f / 360.0f};
     float imuDriftDegPerSec{0.0f};
+    /// Random-WALK intensity in deg/sqrt(s), not white measurement noise: it is
+    /// added to the accumulated rotation, so the error never returns to zero.
+    /// At 2.0 the heading is 11.9 deg RMS out after 32 s at REST and stays out.
     float imuNoiseDeg{0.0f};
     float imuPeriodMs{10.0f};
 
@@ -76,10 +86,15 @@ struct RobotParams {
     /// reads several inches short whenever the robot is not square to it.
     float distConeSigmaFrac{0.25f};
 
-    /// Whether the robot collides with goal posts. The perimeter always stops it.
+    /// Whether the robot collides with goal posts and editor structures. The
+    /// LOADED perimeter always stops it; a field with no kind-0 geometry has no
+    /// walls, which is what Field::clear() leaves behind.
     bool collideObstacles{true};
 
-    // Robot footprint, used for collision and drawing.
+    /// Robot footprint, drawn as-is. Collision is an orientation-free disc of a
+    /// QUARTER of the diagonal: 5.31 in here against a 7.50 in half-width, so the
+    /// drawn robot overlaps a wall by 2.19 in where it stops. Kept because both
+    /// numbers are guesses and the route suites are tuned to that clearance.
     float robotLengthIn{15.0f};
     float robotWidthIn{15.0f};
 };
@@ -151,8 +166,10 @@ private:
 
     // Continuous ground-truth sensor values. These advance every physics tick;
     // the publish* methods copy them onto the bus at device rate.
-    double mMotorDegLeft{0.0};
-    double mMotorDegRight{0.0};
+    // Wheel travel the encoders saw, inches -- per-motor shaft degrees are
+    // derived at publish time from each port's own cartridge.
+    double mWheelSeenLeft{0.0};
+    double mWheelSeenRight{0.0};
     double mImuRotationDeg{0.0};
 
     // Dead-wheel travel, published to the rotation-sensor slots so the sim can

@@ -35,7 +35,7 @@ struct MotorState {
     bool reversed{false};       // negative port number in the config
     double positionDeg{0.0};    // integrated encoder, motor shaft degrees
     double velocityRpm{0.0};    // motor shaft RPM
-    double commandedMv{0.0};    // last move_voltage(), millivolts, -12000..12000
+    double commandedMv{0.0};    // PHYSICAL millivolts at the motor, -12000..12000
     int brakeMode{0};           // 0 coast, 1 brake, 2 hold
     double temperatureC{25.0};
     double currentMa{0.0};

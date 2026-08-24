@@ -16,37 +16,22 @@ public:
                MotorGears gearset = MotorGears::green,
                MotorUnits units = MotorUnits::degrees)
         : mGears(gearset), mUnits(units) {
-        for (std::int8_t p : ports) {
-            const int abs = (p < 0) ? -p : p;
-            mPorts.push_back(static_cast<std::uint8_t>(abs));
-            mReversed.push_back(p < 0);
-            auto& m = sim::bus().motors[abs];
-            m.present = true;
-            m.reversed = (p < 0);
-            m.gearsetRpm = static_cast<int>(gearsetRpm(gearset));
-        }
+        for (std::int8_t p : ports) registerPort(p, gearset);
     }
 
     MotorGroup(const std::vector<std::int8_t>& ports,
                MotorGears gearset = MotorGears::green,
                MotorUnits units = MotorUnits::degrees)
         : mGears(gearset), mUnits(units) {
-        for (std::int8_t p : ports) {
-            const int abs = (p < 0) ? -p : p;
-            mPorts.push_back(static_cast<std::uint8_t>(abs));
-            mReversed.push_back(p < 0);
-            auto& m = sim::bus().motors[abs];
-            m.present = true;
-            m.reversed = (p < 0);
-            m.gearsetRpm = static_cast<int>(gearsetRpm(gearset));
-        }
+        for (std::int8_t p : ports) registerPort(p, gearset);
     }
 
     // --- commands -----------------------------------------------------------
 
     std::int32_t move_voltage(const std::int32_t mv) const {
+        const double cmd = clampMv(mv);
         for (std::size_t i = 0; i < mPorts.size(); i++) {
-            sim::bus().motors[mPorts[i]].commandedMv = clampMv(mv);
+            sim::bus().motors[mPorts[i]].commandedMv = mReversed[i] ? -cmd : cmd;
         }
         return 1;
     }
@@ -142,9 +127,11 @@ public:
     }
     std::int32_t tare_position(void) const { return tare_position_all(); }
 
+    /// Read from the port, not from the group: a real motor always reports its
+    /// own cartridge, so a group spanning two cartridges reports two answers.
     MotorGears get_gearing(const std::uint8_t index = 0) const {
-        (void)index;
-        return mGears;
+        if (index >= mPorts.size()) return MotorGears::invalid;
+        return gearsetFromRpm(sim::bus().motors[mPorts[index]].gearsetRpm);
     }
 
     std::int32_t set_gearing_all(MotorGears g) const {
@@ -160,6 +147,23 @@ public:
     const std::vector<std::uint8_t>& ports() const { return mPorts; }
 
 private:
+    /// A group built with `invalid` gearset must not touch the port's cartridge:
+    /// config.cpp declares the blue and green sense groups first and then a
+    /// combined command group with `invalid`, and overwriting from that group
+    /// would leave every drive port claiming the same cartridge -- hiding the
+    /// mixed-cartridge mistake Drivetrain's header warns about.
+    void registerPort(std::int8_t p, MotorGears gearset) {
+        const int abs = (p < 0) ? -p : p;
+        mPorts.push_back(static_cast<std::uint8_t>(abs));
+        mReversed.push_back(p < 0);
+        auto& m = sim::bus().motors[abs];
+        m.present = true;
+        m.reversed = (p < 0);
+        if (gearset != MotorGears::invalid) {
+            m.gearsetRpm = static_cast<int>(gearsetRpm(gearset));
+        }
+    }
+
     std::int32_t setBrake(int mode) const {
         for (std::size_t i = 0; i < mPorts.size(); i++) sim::bus().motors[mPorts[i]].brakeMode = mode;
         return 1;

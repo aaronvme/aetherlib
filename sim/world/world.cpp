@@ -43,6 +43,15 @@ void World::init() {
     mParams.trackWidthIn    = chad::drivetrain.trackWidth;
     mParams.maxWheelRpm     = chad::drivetrain.rpm;
 
+    // Under-report is the INVERSE of the correction config.cpp applies, so the
+    // default means "the ScaledIMU calibration is right" and a zero-knob run
+    // has no heading error. Hard-coding a factor here instead lets the two
+    // drift apart, and the gap looks exactly like a real miscalibration: a
+    // constant heading bias, present before the robot has moved, that turns
+    // every inch driven into 2% of cross-track odometry error.
+    const double imuScale = chad::imu.scaleFactor();
+    if (imuScale > 1e-6) mParams.imuUnderReport = static_cast<float>(1.0 / imuScale);
+
     field().loadDefault();
     setPhysicsFn([this](double dtMs) { this->step(dtMs); });
 }
@@ -63,7 +72,7 @@ void World::resetTo(const chad::Pose& pose) {
     mTruth.theta = pose.theta;
 
     mLeftCmdIn = mRightCmdIn = 0.0f;
-    mMotorDegLeft = mMotorDegRight = 0.0;
+    mWheelSeenLeft = mWheelSeenRight = 0.0;
     mDistAccum = mImuAccum = mEncAccum = 0.0;
     mPodVertIn = mPodHorizIn = 0.0;
 
@@ -127,12 +136,20 @@ void World::step(double dtMs) {
 void World::updateDrive(double dtSec) {
     const float vMax = maxWheelSpeedIn(mParams);
 
-    // Commanded voltage -> target wheel speed. Motors in a group all carry the
-    // same command, so reading the first port of each side is sufficient.
+    // Commanded voltage -> target wheel speed. The bus holds each motor's
+    // PHYSICAL command, so the reversal has to be undone per motor to recover
+    // the side's forward command -- the port sign IS the mirrored mounting, and
+    // the two cancel. Averaging rather than reading one port is what makes a
+    // side wired with mixed signs show up as motors fighting instead of as a
+    // clean drive.
     auto sideTargetIn = [&](const pros::MotorGroup* group, float scale) -> float {
         if (group == nullptr || group->ports().empty()) return 0.0f;
-        const auto& m = bus().motors[group->ports()[0]];
-        const double mv = m.reversed ? -m.commandedMv : m.commandedMv;
+        double mv = 0.0;
+        for (std::uint8_t port : group->ports()) {
+            const auto& m = bus().motors[port];
+            mv += m.reversed ? -m.commandedMv : m.commandedMv;
+        }
+        mv /= static_cast<double>(group->ports().size());
         return static_cast<float>(mv / 12000.0) * vMax * scale;
     };
 
@@ -161,7 +178,7 @@ void World::updateDrive(double dtSec) {
     mTruth.vAngRad = vAng;
 
     const double dTheta = vAng * dtSec;
-    const double dDist  = vLin * dtSec;
+    double dDist  = vLin * dtSec;
 
     // Integrate about the arc midpoint -- matches how odometry reconstructs it,
     // so any disagreement is from sensor error rather than integration style.
@@ -171,18 +188,39 @@ void World::updateDrive(double dtSec) {
 
     // Walls and posts are solid: stop translation on contact but let the robot
     // keep rotating, otherwise it can wedge permanently.
+    //
+    // Gated on penetration DEPTH, because the current pose can already be inside
+    // geometry (sim_teleport does not check, and the editor can drop a structure
+    // on the robot) and testing only the proposal rejected every direction
+    // forever. Requiring a strict DECREASE is what keeps escape from becoming a
+    // licence to tunnel: from a clear pose the only move accepted is into clear
+    // space.
     const float radius = 0.5f * std::hypot(mParams.robotLengthIn, mParams.robotWidthIn);
-    if (!field().collides(static_cast<float>(nx), static_cast<float>(ny), radius * 0.5f,
-                          mParams.collideObstacles)) {
+    const float probe = radius * 0.5f;
+    const float penNow = field().penetration(mTruth.x, mTruth.y, probe,
+                                             mParams.collideObstacles);
+    const float penNext = field().penetration(static_cast<float>(nx), static_cast<float>(ny),
+                                              probe, mParams.collideObstacles);
+    if (penNext <= 0.0f || penNext < penNow) {
         mTruth.x = static_cast<float>(nx);
         mTruth.y = static_cast<float>(ny);
-        mTruth.colliding = false;
+        mTruth.colliding = penNow > 0.0f;
     } else {
         mTruth.colliding = true;
+        // Pinned means the wheels are not turning. Integrating the command
+        // anyway reported full wheel speed forever, which no rest test can tell
+        // from driving -- so a wall stall could never fire, and a motion that
+        // grazed a post reported Arrived at a pose outside the field. Rotation
+        // survives, matching the translation-only block above.
+        const float halfTrack = 0.5f * mParams.trackWidthIn;
+        mTruth.vLinIn = 0.0f;
+        mTruth.leftVelIn  = -vAng * halfTrack;
+        mTruth.rightVelIn =  vAng * halfTrack;
+        dDist = 0.0;
     }
     mTruth.theta = chad::wrapRad(static_cast<float>(mTruth.theta + dTheta));
 
-    accumulateEncoders(mLeftCmdIn * dtSec, mRightCmdIn * dtSec);
+    accumulateEncoders(mTruth.leftVelIn * dtSec, mTruth.rightVelIn * dtSec);
     accumulateImu(dTheta, dtSec);
 
     // Dead wheels roll on the floor rather than being driven, so they see the
@@ -197,16 +235,12 @@ void World::updateDrive(double dtSec) {
 // ============================================================================
 
 void World::accumulateEncoders(double leftTravelIn, double rightTravelIn) {
-    // Encoders only see the fraction of travel that was not slip.
+    // Encoders only see the fraction of travel that was not slip. Held as WHEEL
+    // travel rather than shaft degrees: each motor's own cartridge sets its
+    // shaft ratio, and publishEncoders() applies that per port.
     const double seen = 1.0 - mParams.encoderSlip;
-    const double circumference = chad::PI * mParams.wheelDiameterIn;
-    const double extRatio = chad::drivetrain.externalGearRatio();
-    if (circumference <= 0.0 || extRatio <= 0.0) return;
-
-    // Wheel revolutions -> motor revolutions -> motor shaft degrees, the
-    // inverse of the conversion OdomTracking::currentVertDistance() applies.
-    mMotorDegLeft  += (leftTravelIn  * seen / circumference) / extRatio * 360.0;
-    mMotorDegRight += (rightTravelIn * seen / circumference) / extRatio * 360.0;
+    mWheelSeenLeft  += leftTravelIn  * seen;
+    mWheelSeenRight += rightTravelIn * seen;
 }
 
 namespace {
@@ -230,17 +264,24 @@ void World::publishEncoders() {
         podCentideg(mPodHorizIn, kPodWheelDiamIn);
 
     const double circumference = chad::PI * mParams.wheelDiameterIn;
-    const double extRatio = chad::drivetrain.externalGearRatio();
-    if (circumference <= 0.0 || extRatio <= 0.0) return;
+    const double wheelRpm = chad::drivetrain.rpm;
+    if (circumference <= 0.0 || wheelRpm <= 0.0) return;
 
     const double seen = 1.0 - mParams.encoderSlip;
 
-    auto writeSide = [&](const pros::MotorGroup* group, double deg, double velIn) {
+    auto writeSide = [&](const pros::MotorGroup* group, double travelIn, double velIn) {
         if (group == nullptr) return;
-        const double motorRpm = (velIn / circumference) / extRatio * 60.0;
-        const double q = quantise(deg, mParams.encoderResolutionDeg);
+        const double wheelRevs = travelIn / circumference;
+        const double wheelRevPerMin = velIn / circumference * 60.0;
         for (std::uint8_t port : group->ports()) {
             auto& m = bus().motors[port];
+            // Shaft revs per wheel rev is THIS motor's cartridge over the
+            // drive's wheel RPM, so a group carrying two cartridges reports two
+            // different encoder counts, exactly as it does on the robot.
+            const double shaftPerWheel = m.gearsetRpm / wheelRpm;
+            const double q = quantise(wheelRevs * shaftPerWheel * 360.0,
+                                      mParams.encoderResolutionDeg);
+            const double motorRpm = wheelRevPerMin * shaftPerWheel;
             // The bus stores the raw sensor value; pros::Motor applies the
             // reversal flag on read, exactly as the real device does.
             m.positionDeg = m.reversed ? -q : q;
@@ -249,8 +290,9 @@ void World::publishEncoders() {
         }
     };
 
-    writeSide(chad::drivetrain.leftMotors,  mMotorDegLeft,  mLeftCmdIn * seen);
-    writeSide(chad::drivetrain.rightMotors, mMotorDegRight, mRightCmdIn * seen);
+    // Achieved, not commanded: a stalled motor reports the speed it is managing.
+    writeSide(chad::drivetrain.leftMotors,  mWheelSeenLeft,  mTruth.leftVelIn  * seen);
+    writeSide(chad::drivetrain.rightMotors, mWheelSeenRight, mTruth.rightVelIn * seen);
 }
 
 // ============================================================================

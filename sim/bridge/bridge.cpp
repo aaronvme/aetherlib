@@ -5,11 +5,13 @@
 // them, advances virtual time, and marshals state out to JavaScript.
 #include <emscripten/emscripten.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <memory>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include "../platform/sim_runtime.hpp"
@@ -24,6 +26,32 @@
 #include "gamespecific/autons.hpp"
 #include "gamespecific/config.hpp"
 
+#include "bridge_internal.hpp"
+
+// The shared state is named unqualified throughout this file; it lives in a
+// namespace only so the other bridge translation units can reach it.
+using namespace simbridge;
+
+namespace simbridge {
+int gCollideTicks = 0;
+bool gManualActive = false;
+
+// kV is volts per m/s, and it is the gain the followers are most sensitive to:
+// guessing low shows up as a systematic along-track deficit rather than as a
+// controller fault. 6.2 is 12 V / 1.95 m/s, the speed of a 3.25 in wheel at
+// 450 rpm -- but config.cpp now measures this drivetrain at 2.6738 in, i.e.
+// 1.60 m/s, which implies 7.5. Left at 6.2 because every follower figure in
+// sim/README.md was measured with it; re-measure before changing it.
+chad::FeedforwardGains gLtvGains{
+    .kV = 6.2f,
+    .kaStraight = 0.0f,
+    .kaTurn = 0.0f,
+    .ksStraight = 0.3f,
+    .ksTurn = 0.0f,
+    .kP = 2.0f,
+};
+}  // namespace simbridge
+
 namespace {
 
 // --- localization mode bits -------------------------------------------------
@@ -31,6 +59,10 @@ namespace {
 // Bit 0 clear means dead reckoning only: with no tracking wheels in
 // chad::odomSensors that is the IMU plus the drive motor encoders, nothing more.
 constexpr int kLocMcl = 1;
+
+/// Virtual time sim_reset spends letting the cancelled tasks park before the
+/// clock is rewound. One 10 ms control period, so every loop gets a full tick.
+constexpr double kResetDrainMs = 10.0;
 constexpr int kLocRcl = 2;
 constexpr int kLocEkf = 4;
 
@@ -42,9 +74,9 @@ bool gStarted = false;
 std::uint32_t gSeed = 0xC0FFEEu;
 
 // Manual drive command in volts, applied when no routine is running.
+// gManualActive is in simbridge -- every controller entry point clears it.
 float gManualLeft = 0.0f;
 float gManualRight = 0.0f;
-bool  gManualActive = false;
 
 sim::TaskId gRouteTask = sim::kInvalidTask;
 
@@ -61,13 +93,43 @@ chad::TrackingWheel gVertWheel(gVertPod, 2.75f, 0.0f);
 chad::TrackingWheel gHorizWheel(gHorizPod, 2.75f, 0.0f);
 bool gOdomPods = false;
 
-// Ticks spent in contact, not just a bool: a controller that grazes a post for
-// one tick and one that leans on it all run read the same otherwise.
-int gCollideTicks = 0;
-
 std::string gStateJson;
 std::vector<float> gParticleBuf(chad::MclTracking::PARTICLE_MAX * 4);
 int gParticleCount = 0;
+
+/// Append-only formatting into a fixed buffer.
+///
+/// The idiom this replaces -- `n += snprintf(buf + n, sizeof(buf) - n, ...)` --
+/// overflows the buffer rather than truncating: snprintf returns what it WOULD
+/// have written, so once the text exceeds the buffer `n` runs past its end and
+/// `sizeof(buf) - n` becomes an enormous size_t. Eight sensors of beam and
+/// filter detail were already within a factor of two of the old 8 KB bound.
+struct JsonBuf {
+    char data[16384];
+    int n{0};
+
+    template <typename... Args>
+    void addf(const char* fmt, Args... args) {
+        const int cap = static_cast<int>(sizeof(data)) - 1;
+        if (n < 0 || n >= cap) return;
+        const int written = std::snprintf(data + n, static_cast<std::size_t>(cap - n + 1),
+                                          fmt, args...);
+        if (written < 0) return;
+        n += (written < cap - n) ? written : (cap - n);
+    }
+
+    /// Literal text, no formatting. Separate so a constant string is never
+    /// handed to snprintf as its format.
+    void add(const char* text) { addf("%s", text); }
+};
+
+/// Function-local, so a 16 KB buffer is not on the caller's stack -- the browser
+/// polls this from the main thread but a fiber could too, and Asyncify stacks
+/// are 32 KB.
+JsonBuf& jsonBuf() {
+    static JsonBuf buf;
+    return buf;
+}
 
 // Ground-truth and estimate history for the path overlays.
 struct Trail { std::vector<float> xy; };
@@ -170,6 +232,152 @@ void recordSample() {
     gRecord.push_back(t.vAngRad * chad::RAD_TO_DEG);
 }
 
+// --- drive command readback -------------------------------------------------
+//
+// What the library is actually asking the motors for, in volts, with the port
+// sign undone the same way the world undoes it. The one observable that can tell
+// "the motion handed its speed to the next one" from "the motion stopped", and
+// the only way to assert the safety property that a drained motion queue leaves
+// nothing commanded.
+
+float sideCommandVolts(const pros::MotorGroup* g) {
+    if (g == nullptr || g->ports().empty()) return 0.0f;
+    double mv = 0.0;
+    for (std::uint8_t port : g->ports()) {
+        const auto& m = sim::bus().motors[port];
+        mv += m.reversed ? -m.commandedMv : m.commandedMv;
+    }
+    return static_cast<float>(mv / static_cast<double>(g->ports().size()) / 1000.0);
+}
+
+// --- total drive-encoder outage --------------------------------------------
+//
+// A real V5 reports PROS_ERR from a port whose device has gone, and the
+// drivetrain's fault test is exactly that: a reading at or past INT32_MAX. The
+// world republishes the real drive ports every encoder tick, so poking those
+// cannot hold a fault; instead the sense groups are pointed at ports the world
+// never writes, carrying a value no encoder could report. Same code path as
+// unplugging every drive motor: EncoderAverage::live drops to 0.
+//
+// 3-6 are free in gamespecific/config.cpp and must stay off the drivetrain's
+// command groups, which are the only ports the world writes. Blue, so that
+// resolving externalGearRatio() while these are installed gives the 450/600 the
+// real sense groups give.
+pros::MotorGroup gDeadLeftSense({3, 4}, pros::MotorGears::blue);
+pros::MotorGroup gDeadRightSense({5, 6}, pros::MotorGears::blue);
+constexpr double kFaultReading = 4.0e9;   // > INT32_MAX, finite, like PROS_ERR
+
+/// 0 healthy, 1 every port faulted, 2 every port reading a constant zero. The
+/// second is a different failure and the more dangerous one: the readings are
+/// perfectly valid, so nothing downstream can tell them from a robot parked at
+/// its baseline.
+int gEncodersDead = 0;
+pros::MotorGroup* gRealLeftSense = nullptr;
+pros::MotorGroup* gRealRightSense = nullptr;
+
+void poisonDeadEncoders() {
+    const double value = (gEncodersDead == 2) ? 0.0 : kFaultReading;
+    for (std::uint8_t port : {3, 4, 5, 6}) {
+        auto& m = sim::bus().motors[port];
+        m.positionDeg = value;
+        m.velocityRpm = value;
+    }
+}
+
+void applyDeadEncoders() {
+    if (gEncodersDead != 0) {
+        poisonDeadEncoders();
+        chad::drivetrain.leftSenseMotors = &gDeadLeftSense;
+        chad::drivetrain.rightSenseMotors = &gDeadRightSense;
+    } else {
+        chad::drivetrain.leftSenseMotors = gRealLeftSense;
+        chad::drivetrain.rightSenseMotors = gRealRightSense;
+    }
+}
+
+// --- MCL resample counter ---------------------------------------------------
+//
+// MclCore reports resampledLast() but keeps no cumulative count, so this is
+// --- motion trace -----------------------------------------------------------
+//
+// Chassis::setTelemetry() hands out one ChassisSample per motion tick. `type` is
+// the running MotionType as the library itself reports it (the same int a
+// telemetry CSV records) and `inTolerance` is SettleMonitor::inTolerance(), so
+// this is where "when did the settle test first pass" comes from -- as opposed
+// to "when did the motion return", which the runner times separately. The gap
+// between the two is the settle hold. A motion can return without this ever
+// having passed: a curved path arrives with a heading residual outside
+// tolerance, so its toleranceMs stays -1 and that is honest, not a fault.
+// The record's own `settled` field is a different thing -- Chassis::isSettled(),
+// i.e. the motion queue is empty.
+int    gTraceType = 0;
+int    gTraceTicks = 0;
+double gTraceFirstToleranceMs = -1.0;
+float  gTracePeakLat = 0.0f;
+float  gTracePeakAng = 0.0f;
+
+void resetTrace() {
+    gTraceType = 0;
+    gTraceTicks = 0;
+    gTraceFirstToleranceMs = -1.0;
+    gTracePeakLat = gTracePeakAng = 0.0f;
+}
+
+void onChassisSample(const chad::ChassisSample& s) {
+    gTraceType = s.type;
+    gTraceTicks++;
+    gTracePeakLat = std::max(gTracePeakLat, std::fabs(s.lateralOut));
+    gTracePeakAng = std::max(gTracePeakAng, std::fabs(s.angularOut));
+    if (s.inTolerance && gTraceFirstToleranceMs < 0.0) {
+        gTraceFirstToleranceMs = sim::preciseMillis();
+    }
+}
+
+// --- motion program ---------------------------------------------------------
+//
+// One scripted motion and one record of how it ended. Declared here because
+// sim_reset clears them; the runner is further down with the C API it serves.
+
+struct MotionStep {
+    int type{0};                 // chad::MotionType, as an int
+    float a{0}, b{0}, c{0};
+    float timeout{0.0f};
+    float maxSpeed{127.0f};
+    float minSpeed{0.0f};
+    float tolerance{-1.0f};      // negative = ChassisConfig default
+    float earlyExit{0.0f};
+    float delayAfterMs{0.0f};
+    bool back{false};
+    bool async{false};
+    bool holdWindow{false};
+};
+
+struct MotionRecord {
+    int index{0};
+    int type{0};                 // as the library's own telemetry reports it
+    int outcome{0};
+    int ticks{0};
+    bool arrived{false};
+    bool settled{false};
+    float ms{0.0f};              // motion start to the blocking call returning
+    float toleranceMs{-1.0f};    // first tick the settle test passed, from start
+    float vIn{0.0f}, vOut{0.0f};       // truth speed entering / leaving, in/s
+    float cmdIn{0.0f}, cmdOut{0.0f};   // mean drive command, volts
+    float peakLat{0.0f}, peakAng{0.0f};
+    float x{0.0f}, y{0.0f}, h{0.0f};
+    float trueX{0.0f}, trueY{0.0f};
+};
+
+std::vector<MotionStep> gMotionSteps;
+std::vector<MotionRecord> gMotionRecords;
+bool gMotionActive = false;
+std::string gMotionJson;
+
+// Defined further down, next to the state each one owns; declared here because
+// sim_init() and sim_reset() are the first things in the file.
+void takeParamBaseline();
+void cancelStrayFollowers();
+
 }  // namespace
 
 extern "C" {
@@ -193,17 +401,41 @@ void sim_init() {
 
     chad::registerFieldObstacles();
 
+    // The encoder source to come back to after a simulated outage.
+    gRealLeftSense = chad::drivetrain.leftSenseMotors;
+    gRealRightSense = chad::drivetrain.rightSenseMotors;
+
+    // One ChassisSample per motion tick: the running MotionType and whether the
+    // settle test is currently passing, neither of which is reachable any other
+    // way.
+    chad::chassis.setTelemetry(onChassisSample);
+
     // Odometry only for now; MCL/RCL are opt-in from the UI.
     chad::chassis.odom().startBackgroundOdom();
+
+    // Last, so it captures the configuration config.cpp actually ships rather
+    // than whatever the constructors defaulted to.
+    takeParamBaseline();
 }
 
 EMSCRIPTEN_KEEPALIVE void sim_set_localization(int mode);
+// Owned by bridge_traj.cpp / bridge_mpc.cpp; both are no-ops when idle.
+EMSCRIPTEN_KEEPALIVE void sim_traj_cancel();
+EMSCRIPTEN_KEEPALIVE void sim_mpc_cancel();
+EMSCRIPTEN_KEEPALIVE int sim_traj_running();
+EMSCRIPTEN_KEEPALIVE int sim_mpc_running();
 
 EMSCRIPTEN_KEEPALIVE
 void sim_reset(float x, float y, float thetaDeg) {
     const chad::Pose p{x, y, chad::vexToStdRad(thetaDeg)};
     const int wasLoc = gLocMode;
     gCollideTicks = 0;
+    gMotionRecords.clear();
+    gMotionActive = false;
+    resetTrace();
+    // A reset is a clean robot: injected faults do not survive it.
+    gEncodersDead = 0;
+    applyDeadEncoders();
 
     // Tear the run down through the library's own lifecycle calls so its
     // pros::Task pointers are released properly, rather than killing the
@@ -213,10 +445,20 @@ void sim_reset(float x, float y, float thetaDeg) {
         sim::sched().kill(gRouteTask);
         gRouteTask = sim::kInvalidTask;
     }
+    // The trajectory, MPC and LTV followers run on fibers this function does not
+    // own, and a live one keeps driving the robot straight through the reset.
+    cancelStrayFollowers();
     chad::chassis.ekf().stopTracking();
     chad::chassis.mcl().stopTracking();
     chad::chassis.rcl().stopTracking();
     gLocMode = 0;
+
+    // Let every task notice the cancel and park itself, on the old clock, before
+    // it is rewound. Unconditional on purpose: stopTracking() above already
+    // spends virtual time in a pros::delay loop WHEN a filter was up, and
+    // nothing at all when none was, which is why the first trial after sim_init
+    // was not comparable with any later one. Details in sim/README.md.
+    sim::sched().runFor(kResetDrainMs);
 
     // Rewind the clock and rephase every background loop so they all become due
     // at t=0. That is what makes a reset reproducible: odometry, MCL and the
@@ -270,6 +512,10 @@ void sim_teleport(float x, float y, float thetaDeg) {
 EMSCRIPTEN_KEEPALIVE
 void sim_step(float ms) {
     applyManualDrive();
+    // Re-asserted every step: sim_reset zeroes every port on the bus, and a
+    // fault that healed itself on the next reset would be a fault nobody could
+    // test through one.
+    if (gEncodersDead != 0) poisonDeadEncoders();
     sim::sched().runFor(ms);
 
     const auto& t = sim::world().truth();
@@ -425,22 +671,6 @@ chad::LtvLqrFollower& lqr() {
 chad::LTVPathFollower* gLtv = nullptr;
 std::string gLtvPath;
 
-// Feedforward gains are settable so they can be tuned in the sim rather than
-// guessed. kV is volts per m/s: at 12 V this drivetrain runs about 1.95 m/s,
-// so the physically correct value is near 6.2, not the token default.
-// kV defaults to the value implied by the drivetrain itself: 12 V produces
-// 450 rpm on a 3.25 in wheel, i.e. ~1.95 m/s, so kV ~= 12 / 1.95 = 6.2 V per
-// m/s. Guessing low here shows up as a systematic along-track deficit, not as
-// a controller fault -- 0.9 leaves the path 9 in short, 6.2 lands within 0.5.
-chad::FeedforwardGains gLtvGains{
-    .kV = 6.2f,
-    .kaStraight = 0.0f,
-    .kaTurn = 0.0f,
-    .ksStraight = 0.3f,
-    .ksTurn = 0.0f,
-    .kP = 2.0f,
-};
-
 chad::LTVPathFollower& ltv() {
     if (gLtv == nullptr) {
         gLtv = new chad::LTVPathFollower(chad::chassis, chad::drivetrain, gLtvGains);
@@ -452,6 +682,16 @@ chad::LTVPathFollower& ltv() {
 void rebuildLtv() {
     delete gLtv;
     gLtv = nullptr;
+}
+
+/// Stop every follower that owns a fiber or a pros::Task of its own. Guarded on
+/// the pointers rather than calling ltv()/lqr(), which would construct a
+/// follower on every reset just to cancel it.
+void cancelStrayFollowers() {
+    if (gLtv != nullptr) gLtv->cancel();
+    if (gLqr != nullptr) gLqr->cancel();
+    sim_traj_cancel();
+    sim_mpc_cancel();
 }
 
 void execRoute() {
@@ -751,13 +991,26 @@ void sim_set_param(const char* name, float value) {
         else if (k == "ekfThetaSyncProp") c.thetaSyncProp = value;
         chad::chassis.ekf().setConfig(c);
     } else if (k == "lateralDFilt" || k == "angularDFilt" ||
-               k == "lateralWindup" || k == "angularWindup" || k == "settleTimeMs") {
-        if      (k == "lateralDFilt")  chad::chassisConfig.lateralDerivativeFilter = value;
-        else if (k == "angularDFilt")  chad::chassisConfig.angularDerivativeFilter = value;
-        else if (k == "lateralWindup") chad::chassisConfig.lateralWindupRange = value;
-        else if (k == "angularWindup") chad::chassisConfig.angularWindupRange = value;
-        else chad::chassisConfig.settleTimeMs = static_cast<std::uint32_t>(value);
-        chad::chassis.setPidTuning(chad::chassisConfig);
+               k == "lateralWindup" || k == "angularWindup" || k == "settleTimeMs" ||
+               k == "settleSpeedIn" || k == "settleSpeedDeg" ||
+               k == "stallSpeedIn" || k == "stallSpeedDeg" ||
+               k == "stallTimeMs" || k == "stallGraceMs") {
+        // setPidTuning carries the whole exit test, not just the gains, so the
+        // stall thresholds are reachable from here -- they decide when a motion
+        // gives up and nothing else in the sim could set them.
+        auto& cc = chad::chassisConfig;
+        if      (k == "lateralDFilt")  cc.lateralDerivativeFilter = value;
+        else if (k == "angularDFilt")  cc.angularDerivativeFilter = value;
+        else if (k == "lateralWindup") cc.lateralWindupRange = value;
+        else if (k == "angularWindup") cc.angularWindupRange = value;
+        else if (k == "settleSpeedIn") cc.settleSpeedIn = value;
+        else if (k == "settleSpeedDeg") cc.settleSpeedDeg = value;
+        else if (k == "stallSpeedIn")  cc.stallSpeedIn = value;
+        else if (k == "stallSpeedDeg") cc.stallSpeedDeg = value;
+        else if (k == "stallTimeMs")   cc.stallTimeMs = static_cast<std::uint32_t>(value);
+        else if (k == "stallGraceMs")  cc.stallGraceMs = static_cast<std::uint32_t>(value);
+        else cc.settleTimeMs = static_cast<std::uint32_t>(value);
+        chad::chassis.setPidTuning(cc);
     } else if (k.rfind("rcl", 0) == 0) {
         auto c = chad::chassis.rcl().config();
         if      (k == "rclHardSync")  c.hardSync = (value != 0.0f);
@@ -776,6 +1029,15 @@ void sim_set_param(const char* name, float value) {
         else if (k == "mclDeadzoneLikelihood") c.deadzoneLikelihood = value;
         else if (k == "mclResampleVar")   c.distResampleVariance = value;
         else if (k == "mclThetaResampleVar") c.thetaResampleVariance = value;
+        // The roughening the cloud ramps to once the measurements stop fitting.
+        // Decoupling it from distResampleVariance is the whole kidnap-recovery
+        // mechanism, and it had no knob here at all.
+        else if (k == "mclSearchVar")     c.distSearchVariance = value;
+        else if (k == "mclThetaSearchVar") c.thetaSearchVariance = value;
+        else if (k == "mclSearchMismatchFull") c.searchMismatchFull = value;
+        else if (k == "mclSearchMismatchFloor") c.searchMismatchFloor = value;
+        else if (k == "mclLostFitSigmas") c.lostFitSigmas = value;
+        else if (k == "mclInjectResampleFloor") c.injectResampleFloor = value;
         else if (k == "mclResampleThresh") c.resampleThreshold = static_cast<int>(value);
         else if (k == "mclImeVariance")   c.imeVariance = value;
         else if (k == "mclHorizProp")     c.horizDependentVarianceProp = value;
@@ -817,38 +1079,85 @@ void sim_set_param(const char* name, float value) {
     }
 }
 
-/// Read back a tunable. The browser's sliders used to publish their own markup
-/// defaults on load, which silently overwrote whatever gamespecific/config.cpp
-/// had been tuned to -- the panel has to ask what the value IS, not assert one.
-/// Returns NaN for an unknown key so the caller can fall back.
-EMSCRIPTEN_KEEPALIVE
-float sim_get_param(const char* name) {
-    const auto& p = sim::world().params();
-    const std::string k(name);
+// ---------------------------------------------------------------------------
+// Reading parameters back, and the baseline sim_init established
+// ---------------------------------------------------------------------------
+//
+// sim_reset deliberately does NOT restore any of this: it CONSUMES the knobs
+// written before it, so restoring would remove the ability to configure the
+// world a reset establishes. The measurement behind that and the full contract
+// are in sim/README.md, "What sim_reset restores, and what it does not".
 
-    if      (k == "responseTauMs")     return p.responseTauMs;
-    else if (k == "leftScale")         return p.leftScale;
-    else if (k == "rightScale")        return p.rightScale;
-    else if (k == "ekfSyncProp")       return chad::chassis.ekf().config().syncProp;
-    else if (k == "ekfThetaSyncProp")  return chad::chassis.ekf().config().thetaSyncProp;
-    else if (k == "encoderSlip")       return p.encoderSlip;
-    else if (k == "imuUnderReport")    return p.imuUnderReport;
-    else if (k == "imuDriftDegPerSec") return p.imuDriftDegPerSec;
-    else if (k == "imuNoiseDeg")       return p.imuNoiseDeg;
-    else if (k == "distNoiseMm")       return p.distNoiseMm;
-    else if (k == "distMaxRangeMm")    return p.distMaxRangeMm;
-    else if (k == "distMinRangeMm")    return p.distMinRangeMm;
-    else if (k == "distPeriodMs")      return p.distPeriodMs;
-    else if (k == "distFovDeg")        return p.distFovDeg;
-    else if (k == "distConeRays")      return static_cast<float>(p.distConeRays);
-    else if (k == "distMaxIncidenceDeg") return p.distMaxIncidenceDeg;
-    else if (k == "distConeSigmaFrac") return p.distConeSigmaFrac;
-    else if (k == "collideObstacles")  return p.collideObstacles ? 1.0f : 0.0f;
-    else if (k == "imuPeriodMs")       return p.imuPeriodMs;
-    else if (k == "encoderPeriodMs")   return p.encoderPeriodMs;
-    else if (k == "encoderResolutionDeg") return p.encoderResolutionDeg;
+namespace {
 
-    const auto& cc = chad::chassisConfig;
+/// Every knob sim_set_param can move, as one copyable value. Two of these turn
+/// "is this trial running the configuration config.cpp ships?" from a
+/// hand-written list into a comparison.
+struct ParamSet {
+    sim::RobotParams world{};
+    std::decay_t<decltype(chad::chassis.mcl().config())> mcl{};
+    std::decay_t<decltype(chad::chassis.ekf().config())> ekf{};
+    std::decay_t<decltype(chad::chassis.rcl().config())> rcl{};
+    chad::ChassisConfig chassis{};
+    chad::RAMSETEParams ramsete{};
+    chad::MoveToPointParams mtp{};
+    std::uint32_t seed{0};
+};
+
+ParamSet liveParams() {
+    ParamSet s;
+    s.world = sim::world().params();
+    s.mcl = chad::chassis.mcl().config();
+    s.ekf = chad::chassis.ekf().config();
+    s.rcl = chad::chassis.rcl().config();
+    s.chassis = chad::chassisConfig;
+    s.ramsete = gRamsete;
+    s.mtp = gMoveToPoint;
+    s.seed = gSeed;
+    return s;
+}
+
+/// `seed` is the one key this does not write. It names the trial rather than the
+/// model, sim_reset already re-derives both RNGs from it, and restoring it would
+/// silently re-randomise a sweep that had pinned it. sim_param_restored()
+/// reports that at runtime, so it is not true only in this comment.
+void applyParams(const ParamSet& s) {
+    sim::world().params() = s.world;
+    chad::chassis.mcl().setConfig(s.mcl);
+    chad::chassis.ekf().setConfig(s.ekf);
+    chad::chassis.rcl().setConfig(s.rcl);
+    chad::chassisConfig = s.chassis;
+    chad::chassis.setPidTuning(s.chassis);
+    gRamsete = s.ramsete;
+    gMoveToPoint = s.mtp;
+}
+
+/// One key out of one set. sim_get_param and the baseline read both go through
+/// here, so a slider and a leak check cannot be reading different things.
+float readParam(const ParamSet& s, const std::string& k) {
+    if      (k == "responseTauMs")     return s.world.responseTauMs;
+    else if (k == "leftScale")         return s.world.leftScale;
+    else if (k == "rightScale")        return s.world.rightScale;
+    else if (k == "ekfSyncProp")       return s.ekf.syncProp;
+    else if (k == "ekfThetaSyncProp")  return s.ekf.thetaSyncProp;
+    else if (k == "encoderSlip")       return s.world.encoderSlip;
+    else if (k == "imuUnderReport")    return s.world.imuUnderReport;
+    else if (k == "imuDriftDegPerSec") return s.world.imuDriftDegPerSec;
+    else if (k == "imuNoiseDeg")       return s.world.imuNoiseDeg;
+    else if (k == "distNoiseMm")       return s.world.distNoiseMm;
+    else if (k == "distMaxRangeMm")    return s.world.distMaxRangeMm;
+    else if (k == "distMinRangeMm")    return s.world.distMinRangeMm;
+    else if (k == "distPeriodMs")      return s.world.distPeriodMs;
+    else if (k == "distFovDeg")        return s.world.distFovDeg;
+    else if (k == "distConeRays")      return static_cast<float>(s.world.distConeRays);
+    else if (k == "distMaxIncidenceDeg") return s.world.distMaxIncidenceDeg;
+    else if (k == "distConeSigmaFrac") return s.world.distConeSigmaFrac;
+    else if (k == "collideObstacles")  return s.world.collideObstacles ? 1.0f : 0.0f;
+    else if (k == "imuPeriodMs")       return s.world.imuPeriodMs;
+    else if (k == "encoderPeriodMs")   return s.world.encoderPeriodMs;
+    else if (k == "encoderResolutionDeg") return s.world.encoderResolutionDeg;
+
+    const auto& cc = s.chassis;
     if      (k == "lateralKp")     return cc.lateralGains.kP;
     else if (k == "lateralKi")     return cc.lateralGains.kI;
     else if (k == "lateralKd")     return cc.lateralGains.kD;
@@ -860,20 +1169,235 @@ float sim_get_param(const char* name) {
     else if (k == "lateralWindup") return cc.lateralWindupRange;
     else if (k == "angularWindup") return cc.angularWindupRange;
     else if (k == "settleTimeMs")  return static_cast<float>(cc.settleTimeMs);
+    else if (k == "settleSpeedIn") return cc.settleSpeedIn;
+    else if (k == "settleSpeedDeg") return cc.settleSpeedDeg;
+    else if (k == "stallSpeedIn")  return cc.stallSpeedIn;
+    else if (k == "stallSpeedDeg") return cc.stallSpeedDeg;
+    else if (k == "stallTimeMs")   return static_cast<float>(cc.stallTimeMs);
+    else if (k == "stallGraceMs")  return static_cast<float>(cc.stallGraceMs);
 
-    else if (k == "ramseteB")          return gRamsete.b;
-    else if (k == "ramseteZeta")       return gRamsete.zeta;
-    else if (k == "ramseteMinSpeed")   return gRamsete.minSpeed;
-    else if (k == "ramseteMaxAccel")   return gRamsete.maxAccel;
-    else if (k == "ramseteTolerance")  return gRamsete.targetTolerance;
-    else if (k == "ramseteHeadingTol") return gRamsete.headingTolerance;
+    else if (k == "seed")          return static_cast<float>(s.seed);
 
-    const auto mc = chad::chassis.mcl().config();
-    if      (k == "mclObsCone")  return mc.obstacleConeFrac;
-    else if (k == "mclObsTol")   return mc.obstacleRangeTol;
-    else if (k == "mclSyncProp") return mc.distSyncProp;
+    else if (k == "ramseteB")          return s.ramsete.b;
+    else if (k == "ramseteZeta")       return s.ramsete.zeta;
+    else if (k == "ramseteMinSpeed")   return s.ramsete.minSpeed;
+    else if (k == "ramseteMaxAccel")   return s.ramsete.maxAccel;
+    else if (k == "ramseteLookahead")  return s.ramsete.lookaheadDist;
+    else if (k == "ramseteTolerance")  return s.ramsete.targetTolerance;
+    else if (k == "ramseteHeadingTol") return s.ramsete.headingTolerance;
+    else if (k == "ramseteStall")      return s.ramsete.stallSpeed;
+    else if (k == "ramseteProfile")    return s.ramsete.useVelocityProfile ? 1.0f : 0.0f;
+    else if (k == "ramseteLatAccel")   return s.ramsete.maxLateralAccel;
+    else if (k == "ramseteMaxSpeed")   return s.ramsete.maxSpeed;
+    else if (k == "ramseteVelCtrl")    return s.ramsete.useVelocityController ? 1.0f : 0.0f;
+    else if (k == "ramseteFfKv")       return s.ramsete.ffGains.kV;
+    else if (k == "ramseteFfKs")       return s.ramsete.ffGains.ksStraight;
+    else if (k == "ramseteFfKp")       return s.ramsete.ffGains.kP;
+    else if (k == "ramseteFfKi")       return s.ramsete.ffGains.kI;
+    else if (k == "mtpBearingHold")    return s.mtp.bearingHoldDist;
+    else if (k == "mtpTolerance")      return s.mtp.targetTolerance;
+
+    // Every key sim_set_param accepts is readable, or a slider cannot show the
+    // value it is about to overwrite and a test cannot assert that a set landed.
+    if (k.rfind("ekf", 0) == 0) {
+        const auto& c = s.ekf;
+        if      (k == "ekfMclSigmaScale") return c.mclSigmaScale;
+        else if (k == "ekfMclSigmaFloor") return c.mclSigmaFloor;
+        else if (k == "ekfRangeGate")     return c.rangeGateChi2;
+        else if (k == "ekfObsTol")        return c.obstacleRangeTol;
+        else if (k == "ekfObsSigmaPad")   return c.obstacleSigmaPad;
+        else if (k == "ekfSlipProp")      return c.slipNoiseProp;
+        else if (k == "ekfVertProp")      return c.vertNoiseProp;
+        else if (k == "ekfVertBias")      return c.vertBiasProp;
+        else if (k == "ekfSlipBias")      return c.slipBiasProp;
+        else if (k == "ekfBiasDecorr")    return c.biasDecorrIn;
+        else if (k == "ekfRangeSigBase")  return c.rangeSigmaBase;
+        else if (k == "ekfRangeSigProp")  return c.rangeSigmaProp;
+        else if (k == "ekfMaxIncidence")  return c.maxIncidenceRad;
+        else if (k == "ekfImuSigma")      return c.imuSigmaRad;
+        else if (k == "ekfPosFloor")      return c.posNoiseFloor;
+        else if (k == "ekfThetaPerInch")  return c.thetaNoisePerInch;
+        else if (k == "ekfMclGate")       return c.mclGateChi2;
+        else if (k == "ekfUseRange")      return c.useRangeUpdates ? 1.0f : 0.0f;
+        else if (k == "ekfResetCycles")   return static_cast<float>(c.mclResetCycles);
+        return std::nanf("");
+    }
+
+    if (k.rfind("rcl", 0) == 0) {
+        const auto& c = s.rcl;
+        if      (k == "rclHardSync") return c.hardSync ? 1.0f : 0.0f;
+        else if (k == "rclSyncProp") return c.syncProp;
+        else if (k == "rclSyncRate") return c.maxSyncRate;
+        else if (k == "rclObsTol")   return c.obstacleRangeTol;
+        return std::nanf("");
+    }
+
+    if (k.rfind("mcl", 0) == 0) {
+        const auto& c = s.mcl;
+        if      (k == "mclObsCone")       return c.obstacleConeFrac;
+        else if (k == "mclObsTol")        return c.obstacleRangeTol;
+        else if (k == "mclSyncProp")      return c.distSyncProp;
+        else if (k == "mclDistSyncProp")  return c.distSyncProp;
+        else if (k == "mclRangeSigClose") return c.rangeSigmaCloseIn;
+        else if (k == "mclRangeSigProp")  return c.rangeSigmaProp;
+        else if (k == "mclShortWeight")   return c.shortWeight;
+        else if (k == "mclShortDecay")    return c.shortDecaySigmas;
+        else if (k == "mclRandWeight")    return c.randWeight;
+        else if (k == "mclMaxRandomFrac") return c.maxRandomFrac;
+        else if (k == "mclDeadzoneLikelihood") return c.deadzoneLikelihood;
+        else if (k == "mclResampleVar")   return c.distResampleVariance;
+        else if (k == "mclThetaResampleVar") return c.thetaResampleVariance;
+        else if (k == "mclSearchVar")     return c.distSearchVariance;
+        else if (k == "mclThetaSearchVar") return c.thetaSearchVariance;
+        else if (k == "mclSearchMismatchFull") return c.searchMismatchFull;
+        else if (k == "mclSearchMismatchFloor") return c.searchMismatchFloor;
+        else if (k == "mclLostFitSigmas") return c.lostFitSigmas;
+        else if (k == "mclInjectResampleFloor") return c.injectResampleFloor;
+        else if (k == "mclResampleThresh") return static_cast<float>(c.resampleThreshold);
+        else if (k == "mclImeVariance")   return c.imeVariance;
+        else if (k == "mclHorizProp")     return c.horizDependentVarianceProp;
+        else if (k == "mclHorizConst")    return c.horizConstantNoise;
+        else if (k == "mclImuVariance")   return c.imuVariance;
+        else if (k == "mclMaxThetaDev")   return c.maxThetaDeviation;
+        else if (k == "mclObsConeFrac")   return c.obstacleConeFrac;
+        else if (k == "mclObsRangeTol")   return c.obstacleRangeTol;
+        return std::nanf("");
+    }
 
     return std::nanf("");
+}
+
+ParamSet gBaseline;
+
+const char* const kParamNames[] = {
+    "responseTauMs", "leftScale", "rightScale", "encoderSlip", "imuUnderReport",
+    "imuDriftDegPerSec", "imuNoiseDeg", "distNoiseMm", "distMaxRangeMm",
+    "distMinRangeMm", "distPeriodMs", "distFovDeg", "distConeRays",
+    "distMaxIncidenceDeg", "distConeSigmaFrac", "collideObstacles",
+    "imuPeriodMs", "encoderPeriodMs", "encoderResolutionDeg", "lateralKp",
+    "lateralKi", "lateralKd", "angularKp", "angularKi", "angularKd",
+    "mclObsCone", "mclObsTol", "ekfMclSigmaScale", "ekfMclSigmaFloor",
+    "ekfRangeGate", "ekfObsTol", "ekfObsSigmaPad", "ekfSlipProp", "ekfVertProp",
+    "ekfVertBias", "ekfSlipBias", "ekfBiasDecorr", "ekfRangeSigBase",
+    "ekfRangeSigProp", "ekfMaxIncidence", "ekfImuSigma", "ekfPosFloor",
+    "ekfThetaPerInch", "ekfMclGate", "ekfUseRange", "ekfResetCycles",
+    "ekfSyncProp", "ekfThetaSyncProp", "lateralDFilt", "angularDFilt",
+    "lateralWindup", "angularWindup", "settleTimeMs", "settleSpeedIn",
+    "settleSpeedDeg", "stallSpeedIn", "stallSpeedDeg", "stallTimeMs",
+    "stallGraceMs", "rclHardSync", "rclSyncProp", "rclSyncRate", "rclObsTol",
+    "mclRangeSigClose", "mclRangeSigProp", "mclShortWeight", "mclShortDecay",
+    "mclRandWeight", "mclMaxRandomFrac", "mclDeadzoneLikelihood", "mclResampleVar",
+    "mclThetaResampleVar", "mclSearchVar", "mclThetaSearchVar", "mclSearchMismatchFull",
+    "mclSearchMismatchFloor", "mclLostFitSigmas", "mclInjectResampleFloor",
+    "mclResampleThresh", "mclImeVariance", "mclHorizProp", "mclHorizConst",
+    "mclImuVariance", "mclMaxThetaDev", "mclObsConeFrac", "mclObsRangeTol",
+    "mclSyncProp", "ramseteB", "ramseteZeta", "ramseteMinSpeed", "ramseteMaxAccel",
+    "ramseteLookahead", "ramseteTolerance", "ramseteHeadingTol", "ramseteStall",
+    "ramseteProfile", "ramseteLatAccel", "ramseteMaxSpeed", "ramseteVelCtrl",
+    "ramseteFfKv", "ramseteFfKs", "ramseteFfKp", "ramseteFfKi", "mtpBearingHold",
+    "mtpTolerance", "mclDistSyncProp", "seed",
+};
+constexpr int kParamCount =
+    static_cast<int>(sizeof(kParamNames) / sizeof(kParamNames[0]));
+
+std::string gParamJson;
+
+void takeParamBaseline() { gBaseline = liveParams(); }
+
+bool paramRestored(const std::string& k) { return k != "seed"; }
+
+int restorableParamCount() {
+    int n = 0;
+    for (int i = 0; i < kParamCount; i++) n += paramRestored(kParamNames[i]) ? 1 : 0;
+    return n;
+}
+
+/// Exact comparison on purpose: these are float32 fields written through
+/// float32, so a value that round-tripped is bit-identical and anything else is
+/// a real difference.
+///
+/// Restored keys only. A moved `seed` is what every trial does on purpose, so
+/// counting it would make "dirty == 0" fail for correct callers and stop being
+/// an assertion anyone could use.
+int countDirtyParams(const ParamSet& live) {
+    int n = 0;
+    for (int i = 0; i < kParamCount; i++) {
+        const std::string k(kParamNames[i]);
+        if (paramRestored(k) && readParam(live, k) != readParam(gBaseline, k)) n++;
+    }
+    return n;
+}
+
+}  // namespace
+
+/// Read back a tunable. The browser's sliders used to publish their own markup
+/// defaults on load, which silently overwrote whatever gamespecific/config.cpp
+/// had been tuned to -- the panel has to ask what the value IS, not assert one.
+/// Returns NaN for an unknown key so the caller can fall back.
+EMSCRIPTEN_KEEPALIVE
+float sim_get_param(const char* name) {
+    return readParam(liveParams(), std::string(name));
+}
+
+/// The value sim_init() found for the same key. NaN for an unknown key.
+EMSCRIPTEN_KEEPALIVE
+float sim_param_baseline(const char* name) {
+    return readParam(gBaseline, std::string(name));
+}
+
+/// How many keys sim_set_param accepts, and the i'th name. Enumerable so a
+/// caller can sweep, diff or display the whole set without keeping a second copy
+/// of the list -- sim/test/ui.mjs parses both if/else chains out of this file and
+/// fails if the three ever disagree.
+EMSCRIPTEN_KEEPALIVE
+int sim_param_count() { return kParamCount; }
+
+EMSCRIPTEN_KEEPALIVE
+const char* sim_param_name(int i) {
+    return (i >= 0 && i < kParamCount) ? kParamNames[i] : "";
+}
+
+/// 1 if sim_params_restore() writes this key, 0 if it deliberately does not,
+/// -1 if sim_set_param does not know it at all.
+EMSCRIPTEN_KEEPALIVE
+int sim_param_restored(const char* name) {
+    const std::string k(name);
+    bool known = false;
+    for (int i = 0; i < kParamCount && !known; i++) known = (k == kParamNames[i]);
+    if (!known) return -1;
+    return paramRestored(k) ? 1 : 0;
+}
+
+/// Put every restored key back to what sim_init() found.
+EMSCRIPTEN_KEEPALIVE
+void sim_params_restore() { applyParams(gBaseline); }
+
+/// Every restored key whose current value differs from the baseline, with both
+/// values. One call at the top of a trial asserts independence over the whole
+/// set. The probe that blinded the beams for every later trial DID list
+/// distMaxRangeMm in its hand-written baseline -- in the block that ran before
+/// the reset, which is why listing keys by hand is not the fix.
+EMSCRIPTEN_KEEPALIVE
+const char* sim_params_dirty_json() {
+    const ParamSet live = liveParams();
+    std::string items;
+    int n = 0;
+    for (int i = 0; i < kParamCount; i++) {
+        const std::string k(kParamNames[i]);
+        if (!paramRestored(k)) continue;
+        const float now = readParam(live, k);
+        const float was = readParam(gBaseline, k);
+        if (now == was) continue;
+        char b[160];
+        std::snprintf(b, sizeof(b), "%s{\"k\":\"%s\",\"is\":%.6g,\"was\":%.6g}",
+                      n ? "," : "", kParamNames[i], now, was);
+        items += b;
+        n++;
+    }
+    gParamJson = "{\"count\":" + std::to_string(n) +
+                 ",\"of\":" + std::to_string(restorableParamCount()) +
+                 ",\"params\":[" + items + "]}";
+    return gParamJson.c_str();
 }
 
 // ============================================================================
@@ -904,8 +1428,268 @@ void sim_field_add_segment(float x1, float y1, float x2, float y2) {
 }
 
 EMSCRIPTEN_KEEPALIVE
+void sim_field_add_segment_kind(float x1, float y1, float x2, float y2, int kind) {
+    sim::field().addSegment(x1, y1, x2, y2, kind);
+}
+
+EMSCRIPTEN_KEEPALIVE
 void sim_field_add_circle(float x, float y, float r) {
     sim::field().addCircle(x, y, r);
+}
+
+// ============================================================================
+// Motion outcomes, settling and chaining
+// ============================================================================
+//
+// The Route DSL runs motions but reports nothing about how they ended, and its
+// commands carry no earlyExitRange or minSpeed -- so the whole outcome and
+// chaining API was unreachable from here. This runs a scripted list of motions
+// on its own fiber through the ordinary blocking Chassis API and keeps one
+// record per motion: the outcome, whether it arrived, how long it took, when the
+// settle test first passed, and the drive speed and command on both sides of the
+// call. The last of those is what makes a handover distinguishable from a stop.
+
+namespace {
+
+float meanDriveCommand() {
+    return 0.5f * (sideCommandVolts(chad::drivetrain.leftMotors) +
+                   sideCommandVolts(chad::drivetrain.rightMotors));
+}
+
+void runMotionStep(const MotionStep& s) {
+    const float tol = s.tolerance;
+    switch (s.type) {
+    case static_cast<int>(chad::MotionType::Distance): {
+        chad::MoveDistanceParams p;
+        p.forwards = (s.a >= 0.0f) != s.back;
+        p.maxSpeed = s.maxSpeed;
+        p.minSpeed = s.minSpeed;
+        if (tol >= 0.0f) p.targetTolerance = tol;
+        p.earlyExitRange = s.earlyExit;
+        p.holdForTimeout = s.holdWindow;
+        chad::chassis.moveDistance(std::fabs(s.a), s.timeout, p, s.async);
+        break;
+    }
+    case static_cast<int>(chad::MotionType::Point): {
+        chad::MoveToPointParams p;
+        p.forwards = !s.back;
+        p.maxSpeed = s.maxSpeed;
+        p.minSpeed = s.minSpeed;
+        if (tol >= 0.0f) p.targetTolerance = tol;
+        p.earlyExitRange = s.earlyExit;
+        chad::chassis.moveToPoint(s.a, s.b, s.timeout, p, s.async);
+        break;
+    }
+    case static_cast<int>(chad::MotionType::Heading): {
+        chad::TurntoHeadingParams p;
+        p.maxSpeed = s.maxSpeed;
+        p.minSpeed = s.minSpeed;
+        if (tol >= 0.0f) p.targetTolerance = tol;
+        p.holdForTimeout = s.holdWindow;
+        chad::chassis.turnToHeading(s.a, s.timeout, p, s.async);
+        break;
+    }
+    case static_cast<int>(chad::MotionType::TurnPoint): {
+        chad::TurnToPointParams p;
+        p.maxSpeed = s.maxSpeed;
+        p.minSpeed = s.minSpeed;
+        if (tol >= 0.0f) p.targetTolerance = tol;
+        chad::chassis.turnToPoint(s.a, s.b, s.timeout, p, s.async);
+        break;
+    }
+    case static_cast<int>(chad::MotionType::Arc): {
+        chad::ArcParams p;
+        p.forwards = !s.back;
+        p.maxSpeed = s.maxSpeed;
+        p.minSpeed = s.minSpeed;
+        if (tol >= 0.0f) p.targetTolerance = tol;
+        chad::chassis.moveArc(s.a, s.b, s.c, s.timeout, p, s.async);
+        break;
+    }
+    case static_cast<int>(chad::MotionType::Boomerang): {
+        chad::BoomerangParams p;
+        p.forwards = !s.back;
+        p.maxSpeed = s.maxSpeed;
+        p.minSpeed = s.minSpeed;
+        if (tol >= 0.0f) p.targetTolerance = tol;
+        chad::chassis.moveBoomerang(s.a, s.b, s.c, s.timeout, p, s.async);
+        break;
+    }
+    case static_cast<int>(chad::MotionType::Swing): {
+        chad::SwingParams p;
+        p.maxSpeed = s.maxSpeed;
+        p.minSpeed = s.minSpeed;
+        if (tol >= 0.0f) p.targetTolerance = tol;
+        const auto side = (s.b >= 0.5f) ? chad::SwingSide::Right
+                                        : chad::SwingSide::Left;
+        chad::chassis.swingToHeading(s.a, side, s.timeout, p, s.async);
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+void execMotionProgram() {
+    for (std::size_t i = 0; i < gMotionSteps.size(); i++) {
+        const MotionStep& s = gMotionSteps[i];
+        MotionRecord r;
+        r.index = static_cast<int>(i);
+        r.vIn = sim::world().truth().vLinIn;
+        r.cmdIn = meanDriveCommand();
+
+        resetTrace();
+        const double t0 = sim::preciseMillis();
+        runMotionStep(s);
+        const double t1 = sim::preciseMillis();
+
+        r.ms = static_cast<float>(t1 - t0);
+        r.toleranceMs = (gTraceFirstToleranceMs >= 0.0)
+            ? static_cast<float>(gTraceFirstToleranceMs - t0) : -1.0f;
+        r.type = gTraceType;
+        r.ticks = gTraceTicks;
+        r.peakLat = gTracePeakLat;
+        r.peakAng = gTracePeakAng;
+        r.outcome = static_cast<int>(chad::chassis.lastOutcome());
+        r.arrived = chad::chassis.lastMotionArrived();
+        r.settled = chad::chassis.isSettled();
+        r.vOut = sim::world().truth().vLinIn;
+        r.cmdOut = meanDriveCommand();
+        const chad::Pose p = chad::chassis.getPose();
+        r.x = p.x;
+        r.y = p.y;
+        r.h = chad::stdRadToVexDeg(p.theta);
+        r.trueX = sim::world().truth().x;
+        r.trueY = sim::world().truth().y;
+        gMotionRecords.push_back(r);
+
+        if (s.delayAfterMs > 0.0f) {
+            pros::delay(static_cast<std::uint32_t>(s.delayAfterMs));
+        }
+    }
+    gMotionActive = false;
+}
+
+}  // namespace
+
+EMSCRIPTEN_KEEPALIVE
+void sim_motion_clear() {
+    gMotionSteps.clear();
+    gMotionRecords.clear();
+}
+
+/// Append a motion. `type` is chad::MotionType as an int, so a test naming 9
+/// gets a swing and the record's own `type` -- which comes back off the
+/// library's telemetry -- says whether the library agrees.
+EMSCRIPTEN_KEEPALIVE
+void sim_motion_push(int type, float a, float b, float c) {
+    MotionStep s;
+    s.type = type;
+    s.a = a;
+    s.b = b;
+    s.c = c;
+    gMotionSteps.push_back(s);
+}
+
+/// Set a parameter on the most recently pushed motion.
+EMSCRIPTEN_KEEPALIVE
+void sim_motion_set(const char* name, float value) {
+    if (gMotionSteps.empty() || name == nullptr) return;
+    MotionStep& s = gMotionSteps.back();
+    const std::string k(name);
+    if      (k == "timeout")    s.timeout = value;
+    else if (k == "maxSpeed")   s.maxSpeed = value;
+    else if (k == "minSpeed")   s.minSpeed = value;
+    else if (k == "tolerance")  s.tolerance = value;
+    else if (k == "earlyExit")  s.earlyExit = value;
+    else if (k == "delayAfter") s.delayAfterMs = value;
+    else if (k == "back")       s.back = (value != 0.0f);
+    else if (k == "async")      s.async = (value != 0.0f);
+    else if (k == "holdWindow") s.holdWindow = (value != 0.0f);
+}
+
+EMSCRIPTEN_KEEPALIVE
+void sim_motion_run() {
+    if (gMotionSteps.empty()) return;
+    if (gRouteTask != sim::kInvalidTask) sim::sched().kill(gRouteTask);
+    gMotionRecords.clear();
+    gManualActive = false;
+    gMotionActive = true;
+    // Own fiber, so waitUntilSettled() and the blocking API behave exactly as
+    // they do on the brain and the caller keeps driving the clock.
+    gRouteTask = sim::sched().spawn([]() { execMotionProgram(); }, "motion");
+}
+
+EMSCRIPTEN_KEEPALIVE
+int sim_motion_running() { return (gMotionActive && sim_route_running()) ? 1 : 0; }
+
+EMSCRIPTEN_KEEPALIVE
+int sim_motion_done() { return static_cast<int>(gMotionRecords.size()); }
+
+/// Left and right drive command in volts, port signs undone. Zero here is the
+/// safety property every outcome except ChainedOut has to end with.
+EMSCRIPTEN_KEEPALIVE
+float sim_drive_cmd_left() { return sideCommandVolts(chad::drivetrain.leftMotors); }
+
+EMSCRIPTEN_KEEPALIVE
+float sim_drive_cmd_right() { return sideCommandVolts(chad::drivetrain.rightMotors); }
+
+EMSCRIPTEN_KEEPALIVE
+const char* sim_motion_json() {
+    std::string out = "[";
+    bool first = true;
+    for (const auto& r : gMotionRecords) {
+        char b[512];
+        std::snprintf(b, sizeof(b),
+            "%s{\"i\":%d,\"type\":%d,\"outcome\":%d,\"name\":\"%s\","
+            "\"arrived\":%s,\"settled\":%s,\"ms\":%.1f,\"toleranceMs\":%.1f,"
+            "\"ticks\":%d,\"vIn\":%.2f,\"vOut\":%.2f,\"cmdIn\":%.2f,"
+            "\"cmdOut\":%.2f,\"peakLat\":%.1f,\"peakAng\":%.1f,"
+            "\"x\":%.3f,\"y\":%.3f,\"h\":%.2f,\"trueX\":%.3f,\"trueY\":%.3f}",
+            first ? "" : ",", r.index, r.type, r.outcome,
+            chad::outcomeName(static_cast<chad::MotionOutcome>(r.outcome)),
+            r.arrived ? "true" : "false", r.settled ? "true" : "false",
+            r.ms, r.toleranceMs, r.ticks, r.vIn, r.vOut, r.cmdIn, r.cmdOut,
+            r.peakLat, r.peakAng, r.x, r.y, r.h, r.trueX, r.trueY);
+        out += b;
+        first = false;
+    }
+    out += "]";
+    gMotionJson = out;
+    return gMotionJson.c_str();
+}
+
+/// Cancel whatever is running through the library's own path, so the recorded
+/// outcome is the one a routine would see.
+EMSCRIPTEN_KEEPALIVE
+void sim_motion_cancel() { chad::chassis.cancelMotion(); }
+
+// ============================================================================
+// Fault injection and MCL seeding
+// ============================================================================
+
+/// Fault every drive encoder at once. 0 restores them, 1 makes every port
+/// report PROS_ERR, 2 makes every port report a valid constant zero -- the
+/// failure a scalar average cannot tell from standing still. Cleared by
+/// sim_reset.
+EMSCRIPTEN_KEEPALIVE
+void sim_kill_drive_encoders(int mode) {
+    gEncodersDead = (mode < 0 || mode > 2) ? 0 : mode;
+    applyDeadEncoders();
+}
+
+EMSCRIPTEN_KEEPALIVE
+int sim_drive_encoders_dead() { return gEncodersDead; }
+
+/// Reseed MCL's particle RNG without touching the world's. Same seed replays a
+/// divergence; a different one is an independent run against identical sensor
+/// data, which is the only way to tell a filter problem from a world problem.
+/// The cloud is re-scattered, or the run would still carry the old seed's
+/// initialisation.
+EMSCRIPTEN_KEEPALIVE
+void sim_mcl_seed(int seed) {
+    chad::chassis.mcl().setSeed(static_cast<std::uint32_t>(seed));
+    chad::chassis.mcl().setPose(chad::chassis.getPose());
 }
 
 // ============================================================================
@@ -978,12 +1762,23 @@ const char* sim_state_json() {
     const auto ekfSigma = chad::chassis.ekf().uncertainty();
     const float mclInject = chad::chassis.mcl().randomInjectFraction();
 
-    char buf[8192];
-    int n = std::snprintf(buf, sizeof(buf),
+    auto& ekfT = chad::chassis.ekf();
+    const auto ekfCfg = ekfT.config();
+    const auto ekfBeams = ekfT.beamStates();
+    const auto ekfInnov = ekfT.innovations();
+    auto& od = chad::chassis.odom();
+    const chad::EncoderAverage encPos = chad::drivetrain.averagePositionDegLive();
+    const chad::WheelReading encVel = chad::drivetrain.wheelVelocitiesLive();
+
+    auto& buf = jsonBuf();
+    buf.n = 0;
+    buf.addf(
         "{\"t\":%.3f,"
         "\"true\":{\"x\":%.3f,\"y\":%.3f,\"h\":%.2f},"
         "\"odom\":{\"x\":%.3f,\"y\":%.3f,\"h\":%.2f},"
-        "\"mcl\":{\"x\":%.3f,\"y\":%.3f,\"h\":%.2f,\"nEff\":%.1f},"
+        "\"mcl\":{\"x\":%.3f,\"y\":%.3f,\"h\":%.2f,\"nEff\":%.1f,"
+            "\"gen\":%u,\"resamples\":%u,\"mismatch\":%.3f,"
+            "\"fit\":%.2f,\"searchMis\":%.3f},"
         "\"rcl\":{\"x\":%.3f,\"y\":%.3f,\"h\":%.2f},"
         "\"ekf\":{\"x\":%.3f,\"y\":%.3f,\"h\":%.2f,\"sx\":%.3f,\"sy\":%.3f,"
             "\"st\":%.3f,\"beams\":%d,\"reloc\":%d},"
@@ -991,11 +1786,16 @@ const char* sim_state_json() {
         "\"err\":{\"dist\":%.3f,\"heading\":%.2f},"
         "\"vel\":{\"lin\":%.2f,\"ang\":%.2f,\"left\":%.2f,\"right\":%.2f},"
         "\"colliding\":%s,\"routeRunning\":%s,\"settled\":%s,"
-        "\"locMode\":%d,\"tasks\":%d,\"beams\":[",
+        "\"locMode\":%d,\"tasks\":%d,",
         sim::preciseMillis() / 1000.0,
         t.x, t.y, chad::stdRadToVexDeg(t.theta),
         odom.x, odom.y, chad::stdRadToVexDeg(odom.theta),
         mclRaw.x, mclRaw.y, chad::stdRadToVexDeg(mclRaw.theta), nEff,
+        chad::chassis.mcl().estimateGeneration(),
+        chad::chassis.mcl().resampleCount(),
+        chad::chassis.mcl().likelihoodMismatch(),
+        chad::chassis.mcl().fitSigmas(),
+        chad::chassis.mcl().searchMismatch(),
         rcl.x, rcl.y, chad::stdRadToVexDeg(rcl.theta),
         ekf.x, ekf.y, chad::stdRadToVexDeg(ekf.theta),
         ekfSigma.sigmaX, ekfSigma.sigmaY,
@@ -1009,11 +1809,63 @@ const char* sim_state_json() {
         chad::chassis.isSettled() ? "true" : "false",
         gLocMode, sim::sched().liveTaskCount());
 
+    // Diagnostics. Every filter here can fail by silently discarding what it is
+    // told, and a filter that rejects everything looks exactly like a healthy
+    // one from the pose alone. `gate` is the Mahalanobis threshold each family is
+    // being held to; the per-beam innovation and state are in "filters" below.
+    buf.addf(
+        "\"diag\":{"
+        "\"ekf\":{\"gateR\":%.2f,\"gateM\":%.2f,\"gateH\":%.2f,"
+            "\"rejR\":%u,\"rejH\":%u,\"rejM\":%u,"
+            "\"streakR\":%d,\"streakBlind\":%d,\"streakM\":%d,"
+            "\"noReturn\":%u,\"deadzoned\":%u,\"grazed\":%u,"
+            "\"imuSkips\":%u,\"repairs\":%u},"
+        "\"odom\":{\"faults\":%u,\"outages\":%u,\"jumps\":%u,\"hjumps\":%u,"
+            "\"imuFaults\":%u},"
+        "\"enc\":{\"live\":%d,\"faulted\":%d,\"valid\":%s,"
+            "\"velLive\":%d,\"velFaulted\":%d,\"velValid\":%s},"
+        "\"params\":{\"dirty\":%d,\"of\":%d}},",
+        ekfCfg.rangeGateChi2, ekfCfg.mclGateChi2, ekfCfg.imuGateChi2,
+        ekfT.rangeRejects(), ekfT.headingRejects(), ekfT.mclRejects(),
+        ekfT.rangeRejectStreak(), ekfT.rangeBlindStreak(), ekfT.mclRejectStreak(),
+        ekfT.rangeNoReturns(), ekfT.rangeDeadzoned(), ekfT.rangeGrazed(),
+        ekfT.imuSkips(), ekfT.covarianceRepairs(),
+        od.distanceFaults(), od.distanceOutages(), od.jumpRejects(),
+        od.headingJumpRejects(), od.imuFaults(),
+        encPos.live, encPos.faulted, encPos.valid() ? "true" : "false",
+        encVel.live, encVel.faulted, encVel.valid() ? "true" : "false",
+        countDirtyParams(liveParams()), restorableParamCount());
+
+    // The live motion outcome. Chassis::lastOutcome() and lastMotionArrived()
+    // were only reachable through sim_motion_json, i.e. only for a scripted
+    // motion program -- so a route, an auton or a trajectory follow reported
+    // nothing about how it ended. `toleranceAtMs` is when the settle test first
+    // passed on the CURRENT motion, in the same virtual ms as "t"; -1 means it
+    // never has, which is honest for a curved path that arrives off-tangent.
+    // cmdL/cmdR are the drive command with the port signs undone: nonzero after
+    // a motion returns is the chaining seam, and zero is a full stop.
+    buf.addf(
+        "\"motion\":{\"outcome\":%d,\"name\":\"%s\",\"arrived\":%s,"
+        "\"type\":%d,\"ticks\":%d,\"toleranceAtMs\":%.1f,"
+        "\"peakLat\":%.1f,\"peakAng\":%.1f,\"cmdL\":%.2f,\"cmdR\":%.2f,"
+        "\"records\":%d,\"trajRunning\":%s,\"mpcRunning\":%s},",
+        static_cast<int>(chad::chassis.lastOutcome()),
+        chad::outcomeName(chad::chassis.lastOutcome()),
+        chad::chassis.lastMotionArrived() ? "true" : "false",
+        gTraceType, gTraceTicks, gTraceFirstToleranceMs,
+        gTracePeakLat, gTracePeakAng,
+        sideCommandVolts(chad::drivetrain.leftMotors),
+        sideCommandVolts(chad::drivetrain.rightMotors),
+        static_cast<int>(gMotionRecords.size()),
+        sim_traj_running() ? "true" : "false",
+        sim_mpc_running() ? "true" : "false");
+
+    buf.add("\"beams\":[");
     bool first = true;
     for (int i = 0; i < chad::MAX_DISTANCE_SENSORS; i++) {
         const auto& b = sim::world().beam(i);
         if (!b.active) continue;
-        n += std::snprintf(buf + n, sizeof(buf) - n,
+        buf.addf(
             "%s{\"i\":%d,\"ox\":%.2f,\"oy\":%.2f,\"ex\":%.2f,\"ey\":%.2f,"
             "\"r\":%.2f,\"hit\":%s,\"dir\":%.2f,\"fov\":%.1f,"
             "\"conf\":%d,\"inc\":%.1f,"
@@ -1028,8 +1880,10 @@ const char* sim_state_json() {
     // Per-sensor filter view: what each estimator currently believes about the
     // same four sensors the world just synthesised. Comparing "the sim produced
     // a reading" against "MCL accepted it" is how a discarded-sensor bug becomes
-    // visible instead of just showing up as drift.
-    n += std::snprintf(buf + n, sizeof(buf) - n, "],\"filters\":[");
+    // visible instead of just showing up as drift. `ekfBeam` is EkfCore::BeamState
+    // and `ekfInnov` the beam's residual in inches, so a gate that is throwing
+    // away good measurements is visible per sensor rather than as drift.
+    buf.add("],\"filters\":[");
     const auto& mclValid = chad::chassis.mcl().validSensors();
     const auto& mclRead  = chad::chassis.mcl().sensorReadings();
     const auto& mclDead  = chad::chassis.mcl().deadzoneFraction();
@@ -1039,20 +1893,22 @@ const char* sim_state_json() {
     for (int i = 0; i < chad::MAX_DISTANCE_SENSORS; i++) {
         if (!sim::world().beam(i).active) continue;
         const auto& rs = rclSensors[i];
-        n += std::snprintf(buf + n, sizeof(buf) - n,
+        buf.addf(
             "%s{\"i\":%d,\"mclValid\":%s,\"mclIn\":%.2f,"
             "\"rclValid\":%s,\"rclIn\":%.2f,\"rclConf\":%d,\"mclDead\":%.2f,"
-            "\"rx\":%.2f,\"ry\":%.2f,\"rdx\":%.3f,\"rdy\":%.3f}",
+            "\"rx\":%.2f,\"ry\":%.2f,\"rdx\":%.3f,\"rdy\":%.3f,"
+            "\"ekfBeam\":%d,\"ekfInnov\":%.3f}",
             first ? "" : ",", i,
             mclValid[i] ? "true" : "false", mclRead[i],
             rs.valid ? "true" : "false", rs.readingInch, rs.confidence,
             mclDead[i],
-            rs.worldX, rs.worldY, rs.rayCos, rs.raySin);
+            rs.worldX, rs.worldY, rs.rayCos, rs.raySin,
+            static_cast<int>(ekfBeams[i]), ekfInnov[i]);
         first = false;
     }
-    std::snprintf(buf + n, sizeof(buf) - n, "]}");
+    buf.add("]}");
 
-    gStateJson.assign(buf);
+    gStateJson.assign(buf.data, static_cast<std::size_t>(buf.n));
     return gStateJson.c_str();
 }
 
@@ -1081,427 +1937,7 @@ const char* sim_field_json() {
     return gStateJson.c_str();
 }
 
-}  // extern "C"
-// ============================================================================
-// MPC / RTI study
-// ============================================================================
-//
-// Two separate surfaces:
-//
-//   sim_mpc_* run MpcPathFollower against the world, so tracking is measured
-//   through the same kinematics, device rates and quantisation as every other
-//   controller in the sim.
-//
-//   sim_mpc_bench_json times the QP solver on its own, closed-loop on the
-//   linear error plant with no world in the way. That is the number that decides
-//   feasibility, and it needs thousands of solves rather than the few hundred a
-//   path run provides.
-//
-// Wall time comes from emscripten_get_now(), NOT the virtual clock: the point is
-// how long the arithmetic takes on real silicon.
-
-namespace {
-
-double microsNow() { return emscripten_get_now() * 1000.0; }
-
-chad::MpcPathFollower* gMpc = nullptr;
-std::vector<chad::TrajectorySample> gMpcTraj;
-std::string gMpcJson;
-
-chad::MpcPathFollower::Config defaultMpcConfig() {
-    chad::MpcPathFollower::Config c;
-    c.mode = chad::MpcPathFollower::Mode::MpcRti;
-    c.horizon = 10;
-    c.maxIters = 400;
-    c.rtiIters = 1;
-    c.tol = 1e-6f;
-    c.weights = {1.0f, 40.0f, 4.0f, 1.0f, 0.25f};
-    c.dt = 0.01f;
-    c.constrainInputs = true;
-    c.wheelSpeedLimit = 1.887f;      // (12 V - ksStraight) / kV
-    c.slackToLinear = 0.5f;
-    c.maxVoltage = 12.0f;
-    c.speedBuckets = 16;
-    c.gains = gLtvGains;             // identical output stage to the LTV baseline
-    c.microsClock = &microsNow;
-    return c;
-}
-
-chad::MpcPathFollower::Config gMpcCfg = defaultMpcConfig();
-
-chad::MpcPathFollower& mpcFollower() {
-    if (gMpc == nullptr) {
-        gMpc = new chad::MpcPathFollower(chad::chassis, chad::drivetrain);
-    }
-    return *gMpc;
-}
-
-}  // namespace
-
-extern "C" {
-
 EMSCRIPTEN_KEEPALIVE
 int sim_collide_ticks() { return gCollideTicks; }
-
-EMSCRIPTEN_KEEPALIVE
-void sim_mpc_traj_clear() { gMpcTraj.clear(); }
-
-/// Append one trajectory sample. Position in INCHES, heading in standard math
-/// radians, v in inches/sec, w in rad/sec. Converted to metres here so the
-/// harness can work in field units.
-EMSCRIPTEN_KEEPALIVE
-void sim_mpc_traj_push(float x, float y, float theta, float v, float w) {
-    gMpcTraj.push_back({x * chad::INCH_TO_METER, y * chad::INCH_TO_METER, theta,
-                        v * chad::INCH_TO_METER, w});
-}
-
-EMSCRIPTEN_KEEPALIVE
-int sim_mpc_traj_count() { return static_cast<int>(gMpcTraj.size()); }
-
-EMSCRIPTEN_KEEPALIVE
-void sim_mpc_defaults() { gMpcCfg = defaultMpcConfig(); }
-
-EMSCRIPTEN_KEEPALIVE
-void sim_mpc_set(const char* name, float value) {
-    const std::string k(name);
-    using Mode = chad::MpcPathFollower::Mode;
-
-    if      (k == "mode")       gMpcCfg.mode = static_cast<Mode>(static_cast<int>(value));
-    else if (k == "horizon")    gMpcCfg.horizon = static_cast<int>(value);
-    else if (k == "maxIters")   gMpcCfg.maxIters = static_cast<int>(value);
-    else if (k == "rtiIters")   gMpcCfg.rtiIters = static_cast<int>(value);
-    else if (k == "tol")        gMpcCfg.tol = value;
-    else if (k == "solver")     gMpcCfg.solver =
-                                    static_cast<chad::MpcSolver>(static_cast<int>(value));
-    else if (k == "qx")         gMpcCfg.weights.qx = value;
-    else if (k == "qy")         gMpcCfg.weights.qy = value;
-    else if (k == "qth")        gMpcCfg.weights.qTheta = value;
-    else if (k == "rv")         gMpcCfg.weights.rv = value;
-    else if (k == "rw")         gMpcCfg.weights.rw = value;
-    else if (k == "dt")         gMpcCfg.dt = value;
-    else if (k == "constrain")  gMpcCfg.constrainInputs = (value != 0.0f);
-    else if (k == "wheelLimit") gMpcCfg.wheelSpeedLimit = value;
-    else if (k == "slackSplit") gMpcCfg.slackToLinear = value;
-    else if (k == "wheelBox")   gMpcCfg.wheelSpaceInputs = (value != 0.0f);
-    else if (k == "indepClip")  gMpcCfg.independentClip = (value != 0.0f);
-    else if (k == "maxVoltage") gMpcCfg.maxVoltage = value;
-    else if (k == "buckets")    gMpcCfg.speedBuckets = static_cast<int>(value);
-    else if (k == "kV")         gMpcCfg.gains.kV = value;
-    else if (k == "kS")         gMpcCfg.gains.ksStraight = value;
-    else if (k == "kP")         gMpcCfg.gains.kP = value;
-    else if (k == "timing")     gMpcCfg.microsClock = (value != 0.0f) ? &microsNow : nullptr;
-}
-
-EMSCRIPTEN_KEEPALIVE
-void sim_mpc_run() {
-    if (gMpcTraj.empty()) return;
-    gManualActive = false;
-    mpcFollower().follow(gMpcTraj, gMpcCfg);
-}
-
-EMSCRIPTEN_KEEPALIVE
-int sim_mpc_running() { return (gMpc != nullptr && gMpc->isRunning()) ? 1 : 0; }
-
-EMSCRIPTEN_KEEPALIVE
-void sim_mpc_cancel() { if (gMpc != nullptr) gMpc->cancel(); }
-
-EMSCRIPTEN_KEEPALIVE
-const char* sim_mpc_stats_json() {
-    static const chad::MpcPathFollower::Stats empty{};
-    const auto& s = (gMpc != nullptr) ? gMpc->stats() : empty;
-    const int ticks = (s.ticks > 0) ? s.ticks : 1;
-
-    char buf[1400];
-    std::snprintf(buf, sizeof(buf),
-        "{\"ticks\":%d,\"iters\":%d,\"maxIters\":%d,\"meanIters\":%.3f,"
-        "\"rebuilds\":%d,\"convergedTicks\":%d,"
-        "\"solveUsTotal\":%.1f,\"meanSolveUs\":%.4f,\"worstSolveUs\":%.4f,"
-        "\"worstTickUs\":%.4f,\"setupUs\":%.2f,"
-        "\"meanCrossM\":%.6f,\"peakCrossM\":%.6f,\"meanHeadingRad\":%.6f,"
-        "\"endErrorM\":%.6f,\"endHeadingRad\":%.6f,"
-        "\"satTicks\":%d,\"activeBoundTicks\":%d,"
-        "\"peakWheelDemand\":%.4f,\"peakClipRatio\":%.4f,"
-        "\"collideTicks\":%d,\"running\":%s}",
-        s.ticks, s.solverIterations, s.maxIterations,
-        static_cast<double>(s.solverIterations) / ticks,
-        s.rebuilds, s.convergedTicks,
-        s.solveMicros, s.solveMicros / ticks, s.worstSolveMicros,
-        s.worstTickMicros, s.setupMicros,
-        s.sumAbsCross / ticks, s.peakAbsCross, s.sumAbsHeading / ticks,
-        s.endError, s.endHeading,
-        s.satTicks, s.activeBoundTicks, s.peakWheelDemand, s.peakClipRatio,
-        gCollideTicks, sim_mpc_running() ? "true" : "false");
-    gMpcJson.assign(buf);
-    return gMpcJson.c_str();
-}
-
-// ----------------------------------------------------------------------------
-// Solver benchmark
-// ----------------------------------------------------------------------------
-//
-// Closed loop on the linear error plant, which is what makes the RTI warm start
-// honest: consecutive QPs differ by one tick of real plant motion, exactly as
-// they do on a robot. A benchmark that re-solves the same QP from the same warm
-// start measures nothing.
-//
-// A checksum is accumulated and reported so the optimiser cannot delete the
-// solve.
-
-namespace {
-
-/// Advance the plant one tick: x+ = Ad x + Bd u.
-void plantStep(const chad::DrivetrainPlant& p, float x[3], const float u[2]) {
-    float nx[3];
-    for (int i = 0; i < 3; i++) {
-        nx[i] = p.Ad[i][0] * x[0] + p.Ad[i][1] * x[1] + p.Ad[i][2] * x[2] +
-                p.Bd[i][0] * u[0] + p.Bd[i][1] * u[1];
-    }
-    x[0] = nx[0]; x[1] = nx[1]; x[2] = nx[2];
-}
-
-}  // namespace
-
-/// @param horizon      MPC horizon N
-/// @param solver       0 = fast gradient, 1 = projected Gauss-Seidel
-/// @param itersPerTick 0 = solve to convergence, >0 = fixed RTI budget
-/// @param constrained  1 = box active, 0 = unconstrained
-/// @param ticks        closed-loop ticks to run
-EMSCRIPTEN_KEEPALIVE
-const char* sim_mpc_bench_json(int horizon, int solver, int itersPerTick,
-                               int constrained, int ticks) {
-    if (horizon < 1) horizon = 1;
-    if (horizon > chad::MPC_MAX_HORIZON) horizon = chad::MPC_MAX_HORIZON;
-    if (ticks < 1) ticks = 1;
-
-    const chad::MpcWeights w = gMpcCfg.weights;
-    const float dt = gMpcCfg.dt;
-    const float vRef = 0.75f * gMpcCfg.wheelSpeedLimit;
-    const float wRef = 0.0f;
-
-    const chad::DrivetrainPlant plant = chad::DrivetrainPlant::discretize(vRef, dt);
-    const chad::LqrSolution lqr = chad::solveDiscreteLqr(plant, w);
-
-    static chad::CondensedMpc mpc;
-    mpc.solver = static_cast<chad::MpcSolver>(solver);
-
-    // Setup cost, averaged. Rebuilding the condensed matrices is the expensive
-    // half and happens only when the reference speed crosses a bucket edge, so
-    // it is priced separately from the per-tick solve.
-    const int setupReps = 32;
-    const double s0 = microsNow();
-    for (int i = 0; i < setupReps; i++) {
-        mpc.setup(plant, w, horizon, lqr.P);
-    }
-    const double setupUs = (microsNow() - s0) / setupReps;
-
-    float uMin[2], uMax[2];
-    if (constrained != 0) {
-        // Same inscribed-box construction as MpcPathFollower::inputBox().
-        const float halfTrack = 0.5f * chad::drivetrain.trackWidth * chad::INCH_TO_METER;
-        const float vNeed = std::fabs(vRef), wNeed = std::fabs(wRef) * halfTrack;
-        const float slack = std::fmax(0.0f, gMpcCfg.wheelSpeedLimit - vNeed - wNeed);
-        const float vBudget = vNeed + 0.5f * slack;
-        const float wBudget = (wNeed + 0.5f * slack) / halfTrack;
-        uMin[0] = -vBudget - vRef; uMax[0] = vBudget - vRef;
-        uMin[1] = -wBudget - wRef; uMax[1] = wBudget - wRef;
-    } else {
-        uMin[0] = uMin[1] = -1e6f;
-        uMax[0] = uMax[1] = 1e6f;
-    }
-
-    // Timing methodology: emscripten_get_now() crosses into JS, and at ~0.3 us a
-    // call it swamps a 1 us solve if called per solve. So the clock is read ONCE
-    // around the whole loop, and an identical loop with the solve removed is
-    // timed and subtracted. Its cost is measured, not assumed.
-    float x[3] = {0.02f, 0.06f, 0.12f};
-    mpc.zero();
-
-    double sumCross = 0.0, peakCross = 0.0, checksum = 0.0;
-    long iterSum = 0;
-    int convergedCount = 0, maxIters = 0;
-    // Whether the box actually BINDS. Without this the headline "MPC ties the
-    // clipped LQR" is vacuous -- an inactive constraint is trivially free.
-    int boundTicks = 0, mpcClipTicks = 0, lqrClipTicks = 0;
-    const double t0 = microsNow();
-
-    for (int k = 0; k < ticks; k++) {
-        // Keep the error alive: without a disturbance the loop settles to zero
-        // and every later solve starts from a perfect warm start, which flatters
-        // RTI.
-        if (k % 97 == 0) {
-            x[0] += 0.02f;
-            x[1] += 0.05f;
-            x[2] += 0.10f;
-        }
-
-        float u[2];
-        chad::MpcResult r;
-        if (itersPerTick > 0) {
-            if (k > 0) mpc.shift();
-            r = mpc.solve(x, uMin, uMax, itersPerTick, 0.0f);
-        } else {
-            mpc.zero();
-            r = mpc.solve(x, uMin, uMax, gMpcCfg.maxIters, gMpcCfg.tol);
-        }
-        mpc.firstMove(u);
-
-        iterSum += r.iterations;
-        if (r.iterations > maxIters) maxIters = r.iterations;
-        if (r.converged) convergedCount++;
-
-        // The box is a hard limit on what the drivetrain can do, so an
-        // unconstrained command would be clipped downstream anyway.
-        const float uApplied[2] = {chad::clamp(u[0], uMin[0], uMax[0]),
-                                   chad::clamp(u[1], uMin[1], uMax[1])};
-        if (r.activeBounds > 0) boundTicks++;
-        if (uApplied[0] != u[0] || uApplied[1] != u[1]) mpcClipTicks++;
-        plantStep(plant, x, uApplied);
-
-        const double c = std::fabs(x[1]);
-        sumCross += c;
-        if (c > peakCross) peakCross = c;
-        checksum += u[0] + u[1];
-    }
-    const double totalUs = microsNow() - t0;
-
-    // The same loop with the solve removed: disturbance, clamp, plant step,
-    // bookkeeping. Subtracted from totalUs so the reported cost is the solver.
-    float xh[3] = {0.02f, 0.06f, 0.12f};
-    double harnessChk = 0.0;
-    const double h0 = microsNow();
-    for (int k = 0; k < ticks; k++) {
-        if (k % 97 == 0) { xh[0] += 0.02f; xh[1] += 0.05f; xh[2] += 0.10f; }
-        const float u[2] = {mpc.solution()[0], mpc.solution()[1]};
-        const float ua[2] = {chad::clamp(u[0], uMin[0], uMax[0]),
-                             chad::clamp(u[1], uMin[1], uMax[1])};
-        plantStep(plant, xh, ua);
-        harnessChk += std::fabs(xh[1]) + u[0] + u[1];
-    }
-    const double harnessUs = microsNow() - h0;
-
-    // What one clock read costs, so the floor of this measurement is on record.
-    const double c0 = microsNow();
-    double clockChk = 0.0;
-    for (int k = 0; k < 20000; k++) clockChk += microsNow();
-    const double clockUs = (microsNow() - c0) / 20000.0;
-
-    // Same closed loop under the scheduled LQR, for a cost and tracking
-    // reference point. The LQR cannot see the box, so its command is clipped.
-    float xl[3] = {0.02f, 0.06f, 0.12f};
-    double lqrSum = 0.0, lqrPeak = 0.0, lqrChk = 0.0;
-    const double l0 = microsNow();
-    for (int k = 0; k < ticks; k++) {
-        if (k % 97 == 0) { xl[0] += 0.02f; xl[1] += 0.05f; xl[2] += 0.10f; }
-        float u[2];
-        for (int i = 0; i < 2; i++) {
-            u[i] = -(lqr.K[i][0] * xl[0] + lqr.K[i][1] * xl[1] + lqr.K[i][2] * xl[2]);
-        }
-        lqrChk += u[0] + u[1];
-        const float ua[2] = {chad::clamp(u[0], uMin[0], uMax[0]),
-                             chad::clamp(u[1], uMin[1], uMax[1])};
-        if (ua[0] != u[0] || ua[1] != u[1]) lqrClipTicks++;
-        plantStep(plant, xl, ua);
-        const double c = std::fabs(xl[1]);
-        lqrSum += c;
-        if (c > lqrPeak) lqrPeak = c;
-    }
-    const double lqrUs = ((microsNow() - l0) - harnessUs) / ticks;
-
-    // And the price of solving Riccati every tick instead of scheduling it.
-    const double r0 = microsNow();
-    double riccatiChk = 0.0;
-    long riccatiIters = 0;
-    for (int k = 0; k < ticks; k++) {
-        const chad::LqrSolution s =
-            chad::solveDiscreteLqr(chad::DrivetrainPlant::discretize(vRef, dt), w);
-        riccatiChk += s.K[0][0] + s.K[1][2];
-        riccatiIters += s.iterations;
-    }
-    const double riccatiUs = (microsNow() - r0) / ticks;
-
-    char buf[1800];
-    std::snprintf(buf, sizeof(buf),
-        "{\"horizon\":%d,\"vars\":%d,\"solver\":%d,\"itersPerTick\":%d,"
-        "\"constrained\":%d,\"ticks\":%d,"
-        "\"usPerSolve\":%.4f,\"usGross\":%.4f,\"harnessUs\":%.4f,"
-        "\"clockUs\":%.4f,\"maxIters\":%d,\"meanIters\":%.3f,"
-        "\"convergedFrac\":%.4f,\"setupUs\":%.3f,"
-        "\"flopsPerIter\":%ld,\"flopsSetup\":%ld,"
-        "\"meanCrossM\":%.6f,\"peakCrossM\":%.6f,"
-        "\"lqrUsPerTick\":%.4f,\"lqrMeanCrossM\":%.6f,\"lqrPeakCrossM\":%.6f,"
-        "\"riccatiUsPerTick\":%.4f,\"riccatiIters\":%.1f,"
-        "\"lambdaMax\":%.4f,\"powerIters\":%d,"
-        "\"checksum\":%.6f,\"lqrChecksum\":%.6f,"
-        "\"boundTicks\":%d,\"mpcClipTicks\":%d,\"lqrClipTicks\":%d,"
-        "\"uMin\":[%.4f,%.4f],\"uMax\":[%.4f,%.4f],\"vRef\":%.4f,"
-        "\"riccatiChecksum\":%.6f,\"harnessChecksum\":%.6f,\"clockChecksum\":%.6e}",
-        horizon, 2 * horizon, solver, itersPerTick, constrained, ticks,
-        (totalUs - harnessUs) / ticks, totalUs / ticks, harnessUs / ticks,
-        clockUs, maxIters, static_cast<double>(iterSum) / ticks,
-        static_cast<double>(convergedCount) / ticks, setupUs,
-        mpc.flopsPerIteration(), mpc.flopsSetup(),
-        sumCross / ticks, peakCross,
-        lqrUs, lqrSum / ticks, lqrPeak,
-        riccatiUs, static_cast<double>(riccatiIters) / ticks,
-        mpc.lipschitz(), mpc.powerIterations(),
-        checksum, lqrChk,
-        boundTicks, mpcClipTicks, lqrClipTicks,
-        uMin[0], uMin[1], uMax[0], uMax[1], vRef,
-        riccatiChk, harnessChk, clockChk);
-    gMpcJson.assign(buf);
-    return gMpcJson.c_str();
-}
-
-/// Correctness gate: with the DARE cost-to-go as terminal cost and no active
-/// constraints, the first move of the condensed QP must equal -K x exactly, for
-/// any horizon. If this drifts, the condensing or the terminal cost is wrong and
-/// no tracking number below it means anything.
-EMSCRIPTEN_KEEPALIVE
-const char* sim_mpc_check_json(int horizon) {
-    const chad::MpcWeights w = gMpcCfg.weights;
-    const float dt = gMpcCfg.dt;
-    const float vRef = 0.75f * gMpcCfg.wheelSpeedLimit;
-
-    const chad::DrivetrainPlant plant = chad::DrivetrainPlant::discretize(vRef, dt);
-    const chad::LqrSolution lqr = chad::solveDiscreteLqr(plant, w);
-
-    static chad::CondensedMpc mpc;
-    mpc.solver = chad::MpcSolver::GaussSeidel;
-    mpc.setup(plant, w, horizon, lqr.P);
-
-    const float lo[2] = {-1e6f, -1e6f};
-    const float hi[2] = {1e6f, 1e6f};
-
-    float worst = 0.0f;
-    float lqrU[2] = {0.0f, 0.0f}, mpcU[2] = {0.0f, 0.0f};
-    const float probes[4][3] = {
-        {0.05f, 0.10f, 0.20f},
-        {-0.03f, 0.02f, -0.15f},
-        {0.00f, -0.08f, 0.05f},
-        {0.12f, 0.00f, 0.00f},
-    };
-    for (const auto& x : probes) {
-        mpc.zero();
-        mpc.solve(x, lo, hi, 4000, 1e-12f);
-        mpc.firstMove(mpcU);
-        for (int i = 0; i < 2; i++) {
-            lqrU[i] = -(lqr.K[i][0] * x[0] + lqr.K[i][1] * x[1] + lqr.K[i][2] * x[2]);
-            const float d = std::fabs(lqrU[i] - mpcU[i]) / (std::fabs(lqrU[i]) + 1e-6f);
-            if (d > worst) worst = d;
-        }
-    }
-
-    char buf[480];
-    std::snprintf(buf, sizeof(buf),
-        "{\"horizon\":%d,\"worstRelErr\":%.3e,"
-        "\"lqrK\":[[%.5f,%.5f,%.5f],[%.5f,%.5f,%.5f]],"
-        "\"lastLqrU\":[%.6f,%.6f],\"lastMpcU\":[%.6f,%.6f],\"lqrIters\":%d}",
-        horizon, worst,
-        lqr.K[0][0], lqr.K[0][1], lqr.K[0][2],
-        lqr.K[1][0], lqr.K[1][1], lqr.K[1][2],
-        lqrU[0], lqrU[1], mpcU[0], mpcU[1], lqr.iterations);
-    gMpcJson.assign(buf);
-    return gMpcJson.c_str();
-}
 
 }  // extern "C"

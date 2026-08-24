@@ -5,9 +5,9 @@
 // Runs the real library off-robot and asserts the localization pipeline is
 // wired correctly. This is the same binary the browser loads, so it doubles as
 // a regression harness you can run in CI.
-import createChadSim from '../web/chad_sim.mjs';
+import { loadSim } from './harness.mjs';
 
-const M = await createChadSim();
+const M = await loadSim();
 
 const c = (name, ret, args) => M.cwrap(name, ret, args);
 const api = {
@@ -166,10 +166,19 @@ check('reading is held between refreshes and updates after one',
 
 // Cone vs pencil ray. The front sensor is placed 3.5 in off the centre post's
 // axis, so the centre ray misses it entirely and runs out of range, while a
-// wide cone clips the post and returns ~14 in.
+// wide cone clips the post and returns ~19 in.
+//
+// The mount offset is read back rather than assumed: this check previously
+// hard-coded "+6 forward", sensorMounts[0] is actually {1.0, -3.75}, and the
+// sensor landed 0.25 in off the post's axis -- so the pencil ray already hit it
+// and no FOV could change the answer. VEX heading 90 puts the robot frame on
+// the world frame, which is what makes one probe enough to locate the mount.
 api.setParam('distNoiseMm', 0);
-api.reset(-26, 3.5, 90);       // front mount is +6 forward -> sensor at (-20, 3.5)
 api.setParam('distFovDeg', 0.5);
+api.reset(0, 0, 90);
+run(60);
+const mount = { x: st().beams[0].ox, y: st().beams[0].oy };
+api.reset(-20 - mount.x, 3.5 - mount.y, 90);
 run(120);
 const narrow = st().beams[0];
 api.setParam('distFovDeg', 40);
@@ -270,11 +279,22 @@ check('path uploaded to the bridge', api.pathCount() === pathPts.length,
 const openPath = buildPath(parseRoute(
   'via(x:-40,y:-35); via(x:-20,y:-22); via(x:0,y:-35); followPath();').paths[0]);
 const openEnd = openPath.at(-1);
+// Unit vector along the last segment: overshoot is progress PAST the end
+// measured on it, which is the axis the profile is decelerating along.
+const openTangent = (() => {
+  const p0 = openPath.at(-2);
+  const n = Math.hypot(openEnd.x - p0.x, openEnd.y - p0.y) || 1;
+  return { x: (openEnd.x - p0.x) / n, y: (openEnd.y - p0.y) / n };
+})();
+const pastEnd = (q) =>
+  (q.x - openEnd.x) * openTangent.x + (q.y - openEnd.y) * openTangent.y;
 const uploadOpen = () => {
   api.pathClear();
   for (const q of openPath) api.pathPush(q.x, q.y, q.h);
 };
-// Drive it, returning the closest approach to the end and the peak speed.
+// Drive it. `nearest` answers "did it get there at all"; `overshoot` and
+// `finalErr` are the ones that can fail, because a run that sails past the end
+// still has a small closest approach on its way through.
 const runOpen = (startH, timeout, ticks = 700) => {
   uploadOpen();
   api.reset(openPath[0].x, openPath[0].y, startH);
@@ -283,19 +303,23 @@ const runOpen = (startH, timeout, ticks = 700) => {
   api.routeRun();
   run(50);
   const started = api.routeRunning() === 1;
-  let nearest = Infinity, peak = 0, collided = false, prev = st().true;
+  let nearest = Infinity, overshoot = 0, peak = 0, collided = false, prev = st().true;
   for (let i = 0; i < ticks; i++) {
     api.step(10);
     const q = st().true;
     nearest = Math.min(nearest, Math.hypot(q.x - openEnd.x, q.y - openEnd.y));
+    overshoot = Math.max(overshoot, pastEnd(q));
     peak = Math.max(peak, Math.hypot(q.x - prev.x, q.y - prev.y) / 0.01);
     collided = collided || st().colliding;
     prev = q;
     if (api.routeRunning() !== 1) break;
   }
   api.stopAuton();
-  run(200);
-  return { started, nearest, peak, collided };
+  run(400);
+  const rest = st().true;
+  overshoot = Math.max(overshoot, pastEnd(rest));
+  const finalErr = Math.hypot(rest.x - openEnd.x, rest.y - openEnd.y);
+  return { started, nearest, overshoot, finalErr, peak, collided };
 };
 
 // Started PARTWAY along the path, so the velocity profile is already above
@@ -307,14 +331,23 @@ api.routePush(13, 0, openPath.length, 0, 5000);
 api.routeRun();
 run(300);
 check('path route started', api.routeRunning() === 1);
-let nearestEnd = Infinity;
+let nearestEnd = Infinity, pastPartway = 0;
 for (let i = 0; i < 500; i++) {
   api.step(10);
   const q = st().true;
   nearestEnd = Math.min(nearestEnd, Math.hypot(q.x - openEnd.x, q.y - openEnd.y));
+  pastPartway = Math.max(pastPartway, pastEnd(q));
 }
-check('RAMSETE tracks the uploaded path to its end', nearestEnd < 3,
-      `closest approach to path end ${nearestEnd.toFixed(1)} in`);
+const partwayRest = st().true;
+const partwayErr = Math.hypot(partwayRest.x - openEnd.x, partwayRest.y - openEnd.y);
+// A closest approach is a MINIMUM over the run, so a robot that drives through
+// the end and keeps going scores as well as one that stops on it. What has to
+// hold is where it ENDS UP, and how far past the end it ever got.
+check('RAMSETE ends at the path end rather than passing through it',
+      partwayErr < 3 && pastPartway < 1.5,
+      `finished ${partwayErr.toFixed(2)} in out, ` +
+      `${pastPartway.toFixed(2)} in past the end (closest approach ` +
+      `${nearestEnd.toFixed(2)} in)`);
 api.stopAuton();
 run(200);
 
@@ -333,11 +366,19 @@ check('RAMSETE drives off the first point of its own path',
 // generateTrapezoidal left dAccel at its full-speed value on a triangular
 // profile, so the position axis jumped past `distance` and a position-keyed
 // lookup read peak velocity for the whole second half: the robot never
-// decelerated and sailed 20 in past the end.
+// decelerated and sailed 20 in past the end. A closest approach cannot see
+// that -- the robot passes through the end on its way -- so this is the peak
+// progress PAST the end, which is what overshooting means.
+//
+// 0.50 in measured at the sim's 70 ms response lag. That number is the lag, not
+// the gains: every RAMSETE term scales with the reference speed and a profile
+// ends at rest, so the last of the motion is an open-loop coast-down. Over
+// b = 12..96 and zeta = 0.70..0.95 it moves by under 0.12 in, while over a
+// 20..200 ms lag sweep it runs 0.00 -> 0.50 -> 2.1 -> 3.5 in.
 check('RAMSETE decelerates into the end instead of overshooting',
-      fromStart.nearest < 3,
-      `overshoot would leave the closest approach far short; got ` +
-      `${fromStart.nearest.toFixed(2)} in`);
+      fromStart.overshoot < 1.5,
+      `${fromStart.overshoot.toFixed(2)} in past the end, ` +
+      `finished ${fromStart.finalErr.toFixed(2)} in out`);
 
 // Peak speed must track the profile, not exceed it. A lookahead reference left
 // a standing e_x whose k*e_x term inflated every speed by roughly half.

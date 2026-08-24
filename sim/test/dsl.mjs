@@ -161,11 +161,19 @@ const expected = ['OP_SET_POSE', 'OP_MOVE_TO', 'OP_TURN_TO_HEADING', 'OP_TURN_TO
 check('bridge.cpp declares the ops in the expected order', eq(names, expected),
       names.join(' '));
 
+// Sorting by value and then asserting OP[jsOrder[i]] === i is true for ANY
+// bijection onto 0..n, so it cannot see a swap: DRIVE and SWING trading values
+// passed it. Compare the NAMES against the C++ order instead, which is what the
+// wire format actually depends on -- sim_route_push(op, ...) takes the int.
+const CPP_TO_JS = { OP_TURN_TO_HEADING: 'TURN_HEADING', OP_TURN_TO_POINT: 'TURN_POINT' };
+const jsExpected = expected.map(n => CPP_TO_JS[n] ?? n.replace(/^OP_/, ''));
 const jsOrder = Object.entries(OP).sort((a, b) => a[1] - b[1]).map(([k]) => k);
-check('JS opcode values are 0..n in the same order',
-      jsOrder.length === expected.length &&
-      jsOrder.every((_, i) => OP[jsOrder[i]] === i),
-      jsOrder.join(' '));
+check('JS opcode values match the C++ order position for position',
+      eq(jsOrder, jsExpected),
+      `${jsOrder.join(' ')}  (want ${jsExpected.join(' ')})`);
+check('and they are exactly 0..n with no gaps',
+      Object.values(OP).sort((a, b) => a - b).every((v, i) => v === i),
+      Object.values(OP).join(','));
 
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : failures + ' CHECK(S) FAILED'}\n`);
 process.exit(failures === 0 ? 0 : 1);

@@ -10,12 +10,9 @@
 // weighted sum walks straight to a configuration that tracks beautifully and can
 // never relocate. A candidate that recovers less often than the baseline is
 // rejected outright no matter how well it tracks.
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
-const here = dirname(fileURLToPath(import.meta.url));
-const createChadSim = (await import('file://' + join(here, '..', 'web', 'chad_sim.mjs'))).default;
+import { loadSim } from './harness.mjs';
 
-const M = await createChadSim();
+const M = await loadSim();
 const c = (n, r, a) => M.cwrap(n, r, a);
 const api = {
   init: c('sim_init', null, []), reset: c('sim_reset', null, ['number','number','number']),

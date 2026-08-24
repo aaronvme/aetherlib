@@ -26,7 +26,8 @@ public:
     }
 
     std::int32_t move_voltage(std::int32_t mv) const {
-        sim::bus().motors[idx()].commandedMv = clampMv(mv);
+        const double cmd = clampMv(mv);
+        sim::bus().motors[idx()].commandedMv = mReversed ? -cmd : cmd;
         return 1;
     }
     std::int32_t move(std::int32_t power) const {
@@ -57,7 +58,8 @@ public:
     double get_efficiency() const { return 100.0; }
     double get_torque() const { return 0.0; }
     std::int32_t get_voltage() const {
-        return static_cast<std::int32_t>(sim::bus().motors[idx()].commandedMv);
+        const auto& m = sim::bus().motors[idx()];
+        return static_cast<std::int32_t>(m.reversed ? -m.commandedMv : m.commandedMv);
     }
     std::int32_t is_over_temp() const { return 0; }
     std::int32_t is_over_current() const { return 0; }

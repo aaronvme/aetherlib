@@ -64,6 +64,8 @@
       <div class="row"><span>sensors</span><b id="hud-sensors">—</b></div>
       <div class="row"><span>N_eff</span><b id="hud-neff">—</b></div>
       <div class="row"><span>tasks</span><b id="hud-tasks">—</b></div>
+      <div class="row"><span>motion</span><b id="hud-motion">&mdash;</b></div>
+      <div class="row"><span>health</span><b id="hud-health">&mdash;</b></div>
     </div>
 
     <div id="transport">
@@ -100,6 +102,9 @@
 
     <div class="tabs">
       <button class="tab active" data-tab="route">Route</button>
+      <button class="tab" data-tab="motion">Motion</button>
+      <button class="tab" data-tab="traj">Traj</button>
+      <button class="tab" data-tab="mpc">MPC</button>
       <button class="tab" data-tab="plots">Plots</button>
       <button class="tab" data-tab="view">View</button>
     </div>
@@ -129,6 +134,117 @@
           <select id="auton"></select>
           <button id="btn-run-auton">Run auton</button>
         </div>
+      </div>
+    </div>
+
+    <!-- ---- motion outcomes ----
+         Runs a scripted list through the ordinary blocking Chassis API, on its
+         own fiber, and keeps one record per motion. The Route DSL cannot do
+         this: its commands carry no earlyExitRange or minSpeed, and it reports
+         nothing about how a motion ended. -->
+    <div class="tabpane" data-pane="motion">
+      <div class="card">
+        <h3>Motion program <small>real blocking Chassis API</small></h3>
+        <div class="row2">
+          <select id="mp-type"></select>
+          <button id="mp-add">Add</button>
+        </div>
+        <div class="row3">
+          <label>a <input id="mp-a" type="number" value="-24" step="1"></label>
+          <label>b <input id="mp-b" type="number" value="-60" step="1"></label>
+          <label>c <input id="mp-c" type="number" value="0" step="1"></label>
+        </div>
+        <div class="row3">
+          <label>timeout <input id="mp-timeout" type="number" value="3000" step="100"></label>
+          <label>tol <input id="mp-tol" type="number" value="-1" step="0.5"
+                 title="-1 uses the robot-wide tolerance from config.cpp"></label>
+          <label>early <input id="mp-early" type="number" value="0" step="1"
+                 title="earlyExitRange: exit this far out with the drive still running"></label>
+        </div>
+        <div class="row3">
+          <label>minSpd <input id="mp-min" type="number" value="0" step="1"></label>
+          <label>maxSpd <input id="mp-max" type="number" value="127" step="1"></label>
+          <label>delay <input id="mp-delay" type="number" value="0" step="50"
+                 title="pause after this motion, so a chaining seam is visible"></label>
+        </div>
+        <div class="layers">
+          <label><input id="mp-back" type="checkbox"> reverse</label>
+          <label><input id="mp-hold" type="checkbox"> hold for timeout</label>
+          <label><input id="mp-async" type="checkbox"> async</label>
+        </div>
+        <div id="mp-queue" class="rows"></div>
+        <div class="btnrow">
+          <button id="mp-run" class="primary">Run program</button>
+          <button id="mp-clear">Clear</button>
+          <button id="mp-cancel">Cancel</button>
+        </div>
+        <div id="mp-status" class="status"></div>
+      </div>
+
+      <div class="card grow">
+        <h3>Outcomes <small>and the chaining seam</small></h3>
+        <div id="mp-results" class="rows"></div>
+      </div>
+    </div>
+
+    <!-- ---- trajectory ----
+         Generation can legitimately FAIL here: config.cpp ships kaStraight = 0,
+         so ticking the wheel-voltage constraint returns UnusableConstraint. The
+         status line has to say that rather than leaving an empty field. -->
+    <div class="tabpane" data-pane="traj">
+      <div class="card">
+        <h3>Waypoints <small>x, y, heading° per line</small></h3>
+        <textarea id="tj-wps" rows="4" spellcheck="false"></textarea>
+        <div class="layers">
+          <label><input id="tj-drive" type="checkbox" checked> drivetrain constraints</label>
+          <label><input id="tj-volt" type="checkbox"> wheel-voltage constraint</label>
+          <label><input id="tj-cubic" type="checkbox"> clamped cubic</label>
+          <label><input id="tj-rev" type="checkbox"> reversed</label>
+        </div>
+        <div id="tj-params"></div>
+        <div class="btnrow">
+          <button id="tj-gen" class="primary">Generate</button>
+          <button id="tj-run">Follow</button>
+          <button id="tj-cancel">Cancel</button>
+        </div>
+        <div id="tj-status" class="status"></div>
+      </div>
+
+      <div class="card">
+        <h3>Profile</h3>
+        <div id="tj-facts" class="facts"></div>
+      </div>
+
+      <div class="card grow">
+        <h3>Audited from physics <small>not from the constraint classes</small></h3>
+        <div id="tj-audit" class="rows"></div>
+      </div>
+    </div>
+
+    <!-- ---- MPC ----
+         The number that decides whether this fits a 10 ms V5 tick is whether
+         the solve converges inside its budget, and worstPrimalResidual is the
+         only signal that fires on an infeasible corridor. -->
+    <div class="tabpane" data-pane="mpc">
+      <div class="card">
+        <h3>Constrained MPC <small>follows the generated trajectory</small></h3>
+        <div id="mpc-params"></div>
+        <div class="btnrow">
+          <button id="mpc-run" class="primary">Run</button>
+          <button id="mpc-cancel">Cancel</button>
+          <button id="mpc-rows">Row budget</button>
+        </div>
+        <div id="mpc-status" class="status"></div>
+      </div>
+
+      <div class="card">
+        <h3>Constraint diagnostics</h3>
+        <div id="mpc-diag" class="rows"></div>
+      </div>
+
+      <div class="card grow">
+        <h3>Row budget <small>accepted is not installed</small></h3>
+        <div id="mpc-budget" class="rows"></div>
       </div>
     </div>
 

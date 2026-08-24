@@ -270,7 +270,7 @@ input[type="range"] { accent-color: var(--accent); }
 
 /* ---------------- tabs ---------------- */
 
-.tabs { display: flex; gap: 0.3em; }
+.tabs { display: flex; flex-wrap: wrap; gap: 0.3em; }
 .tab {
   flex: 1;
   border-radius: 0.3em 0.3em 0 0;
@@ -368,6 +368,17 @@ input[type="range"] { accent-color: var(--accent); }
 .diag .warn { color: #e2b341; }
 .diag .off  { color: #4b5563; }
 .diag .hdr  { color: #6b7280; font-size: 0.85em; text-transform: uppercase; letter-spacing: .06em; }
+
+/* Same density and colours as .diag, but the column count follows the data
+   instead of the four sensors, so app.js sets grid-template-columns inline. */
+.rows { display: grid; gap: 0.22em 0.6em; font-size: 0.9em; }
+.rows .r    { text-align: right; }
+.rows .s    { color: var(--dim); }
+.rows .ok   { color: var(--true); }
+.rows .bad  { color: #f87171; }
+.rows .warn { color: #e2b341; }
+.rows .off  { color: #4b5563; }
+.rows .hdr  { color: #6b7280; font-size: 0.85em; text-transform: uppercase; letter-spacing: .06em; }
 
 .dimtext { color: var(--dim); margin-left: auto; }
 #replay-pos { width: 100%; margin-top: 0.45em; }

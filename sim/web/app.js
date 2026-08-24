@@ -4,6 +4,9 @@
 // file only drives the clock, renders state, and marshals control input.
 import createChadSim from './chad_sim.mjs';
 import { parseRoute, moveWaypoint, buildPath, DEFAULT_ROUTE } from './route_dsl.js';
+import {
+  locSummary, scrubState, seekFraction, fieldGeomText, parseFieldGeom,
+} from './view_panel.js';
 
 const M = await createChadSim();
 
@@ -47,8 +50,49 @@ const api = {
   recClear:     w('sim_record_clear', null, []),
   fieldClear:   w('sim_field_clear', null, []),
   fieldDefault: w('sim_field_default', null, []),
-  fieldAddSeg:  w('sim_field_add_segment', null, ['number', 'number', 'number', 'number']),
+  fieldAddSeg:  w('sim_field_add_segment_kind', null, ['number', 'number', 'number', 'number', 'number']),
   fieldAddCirc: w('sim_field_add_circle', null, ['number', 'number', 'number']),
+
+  // Parameter baseline. sim_reset does NOT restore these -- see sim/README.md --
+  // so `dirty` is how a stale knob from an earlier experiment becomes visible.
+  paramsRestore: w('sim_params_restore', null, []),
+  dirtyJson:     w('sim_params_dirty_json', 'string', []),
+
+  // Motion outcomes.
+  motionClear:   w('sim_motion_clear', null, []),
+  motionPush:    w('sim_motion_push', null, ['number', 'number', 'number', 'number']),
+  motionSet:     w('sim_motion_set', null, ['string', 'number']),
+  motionRun:     w('sim_motion_run', null, []),
+  motionRunning: w('sim_motion_running', 'number', []),
+  motionJson:    w('sim_motion_json', 'string', []),
+  motionCancel:  w('sim_motion_cancel', null, []),
+
+  // Trajectory generation and following.
+  trajClear:     w('sim_traj_clear', null, []),
+  trajWaypoint:  w('sim_traj_waypoint', null, ['number', 'number', 'number', 'number']),
+  trajDefaults:  w('sim_traj_defaults', null, []),
+  trajSet:       w('sim_traj_set', null, ['string', 'number']),
+  trajFollowSet: w('sim_traj_follow_set', null, ['string', 'number']),
+  trajGenerate:  w('sim_traj_generate', 'number', []),
+  trajCount:     w('sim_traj_count', 'number', []),
+  trajStride:    w('sim_traj_stride', 'number', []),
+  trajStatesPtr: w('sim_traj_states_ptr', 'number', []),
+  trajResample:  w('sim_traj_resample', 'number', ['number']),
+  trajSamplesPtr: w('sim_traj_samples_ptr', 'number', []),
+  trajResultJson: w('sim_traj_result_json', 'string', []),
+  trajModelJson: w('sim_traj_model_json', 'string', []),
+  trajRun:       w('sim_traj_run', null, ['number']),
+  trajCancel:    w('sim_traj_cancel', null, []),
+
+  // Constrained MPC.
+  mpcTrajClear:  w('sim_mpc_traj_clear', null, []),
+  mpcTrajPush:   w('sim_mpc_traj_push', null, ['number', 'number', 'number', 'number', 'number']),
+  mpcDefaults:   w('sim_mpc_defaults', null, []),
+  mpcSet:        w('sim_mpc_set', 'number', ['string', 'number']),
+  mpcRun:        w('sim_mpc_run', null, []),
+  mpcCancel:     w('sim_mpc_cancel', null, []),
+  mpcStatsJson:  w('sim_mpc_stats_json', 'string', []),
+  mpcRowsJson:   w('sim_mpc_rows_json', 'string', ['number', 'number', 'number', 'number']),
 };
 
 const START = { x: -48, y: -60, h: 90 };
@@ -118,6 +162,7 @@ const LAYERS = [
   ['plan',      'route preview', true],
   ['rcl',       'rcl pose & rays', true],
   ['ghost',     'replay ghost',  true],
+  ['traj',      'trajectory',    true],
 ];
 const layers = Object.fromEntries(LAYERS.map(([k, , v]) => [k, v]));
 
@@ -133,13 +178,19 @@ for (const [key, label, on] of LAYERS) {
 // Parameters
 // ============================================================================
 
-function buildParams(hostId, defs) {
+// `io` is which pair of bridge calls a panel talks to. The trajectory and MPC
+// configs have no getter -- sim_traj_set/sim_mpc_set are write-only by design,
+// their defaults living in sim_traj_defaults()/sim_mpc_defaults() -- so those
+// panels pass a getter that always declines and fall back to the markup value.
+const PARAM_IO = { get: (k) => api.getParam(k), set: (k, v) => api.setParam(k, v) };
+
+function buildParams(hostId, defs, io = PARAM_IO) {
   const host = document.getElementById(hostId);
   for (const d of defs) {
     // Start from what the library actually holds. The panel used to publish its
     // own markup default on load, which overwrote the tuned gains in
     // gamespecific/config.cpp the moment the page opened.
-    const live = api.getParam(d.key);
+    const live = io.get(d.key);
     const value = Number.isFinite(live) ? live : d.value;
 
     const row = document.createElement('div');
@@ -158,7 +209,7 @@ function buildParams(hostId, defs) {
       if (!Number.isFinite(v)) return;
       if (from !== 'slide') slide.value = v;
       if (from !== 'num') num.value = +v.toFixed(4);
-      api.setParam(d.key, v);
+      io.set(d.key, v);
     };
     slide.addEventListener('input', () => push(parseFloat(slide.value), 'slide'));
     // 'change' not 'input', so a half-typed "0.0" is not pushed as 0 mid-edit.
@@ -365,29 +416,23 @@ document.getElementById('btn-place').addEventListener('click', doReset);
 document.getElementById('chk-collide').addEventListener('change', e => {
   api.setParam('collideObstacles', e.target.checked ? 1 : 0);
 });
-// Localization is four independent switches. The bridge still takes a bitmask, so
-// it is assembled here rather than enumerated as one option per combination.
-const locBits = { 'loc-mcl': 1, 'loc-rcl': 2, 'loc-ekf': 4 };
+// Localization is four independent switches. The bridge still takes a bitmask,
+// so it is assembled in view_panel.js rather than enumerated as one option per
+// combination.
+const LOC_IDS = { mcl: 'loc-mcl', rcl: 'loc-rcl', ekf: 'loc-ekf' };
 const locLabelEl = document.getElementById('loc-label');
 
 function applyLoc() {
-  let mode = 0;
-  for (const [id, bit] of Object.entries(locBits)) {
-    if (document.getElementById(id).checked) mode |= bit;
+  const ticked = {};
+  for (const [key, id] of Object.entries(LOC_IDS)) {
+    ticked[key] = document.getElementById(id).checked;
   }
-  const names = [];
-  if (mode & 1) names.push('MCL');
-  if (mode & 2) names.push('RCL');
-  if (mode & 4) names.push('EKF');
-  locLabelEl.textContent = names.length ? names.join(' + ') : 'dead reckoning';
-  // The EKF owns the pose while it is up, so say that rather than implying the
-  // other two are still steering it.
-  locLabelEl.title = (mode & 4)
-    ? 'EKF owns the pose; MCL and RCL feed it'
-    : 'nothing ticked = IMU + motor encoders only';
-  api.setLoc(mode);
+  const s = locSummary(ticked);
+  locLabelEl.textContent = s.label;
+  locLabelEl.title = s.title;
+  api.setLoc(s.mode);
 }
-for (const id of Object.keys(locBits)) {
+for (const id of Object.values(LOC_IDS)) {
   document.getElementById(id).addEventListener('change', applyLoc);
 }
 document.getElementById('loc-pods').addEventListener('change', e => {
@@ -507,23 +552,17 @@ function showFieldGeom() {
   fieldFacts.innerHTML =
     `<div class="k">segments</div><div class="v">${fieldGeom.segments.length}</div>` +
     `<div class="k">circles</div><div class="v">${fieldGeom.circles.length}</div>`;
-  fieldJsonEl.value = JSON.stringify({
-    segments: fieldGeom.segments.map(s => s.slice(0, 4)),
-    circles: fieldGeom.circles.map(c => c.slice(0, 3)),
-  }, null, 1);
+  fieldJsonEl.value = fieldGeomText(fieldGeom);
 }
 showFieldGeom();
 
 document.getElementById('btn-field-apply').addEventListener('click', () => {
-  try {
-    const g = JSON.parse(fieldJsonEl.value);
-    api.fieldClear();
-    for (const s of g.segments || []) api.fieldAddSeg(s[0], s[1], s[2], s[3]);
-    for (const c of g.circles || []) api.fieldAddCirc(c[0], c[1], c[2]);
-    showFieldGeom();
-  } catch (err) {
-    alert('field JSON: ' + err.message);
-  }
+  const g = parseFieldGeom(fieldJsonEl.value);
+  if (g.error) { fieldFacts.textContent = 'field JSON: ' + g.error; return; }
+  api.fieldClear();
+  for (const s of g.segments) api.fieldAddSeg(s[0], s[1], s[2], s[3], s[4]);
+  for (const c of g.circles) api.fieldAddCirc(c[0], c[1], c[2]);
+  showFieldGeom();
 });
 document.getElementById('btn-field-reset').addEventListener('click', () => {
   api.fieldDefault();
@@ -688,18 +727,10 @@ function recordRow(i) {
 }
 
 function updateReplay() {
-  if (!replayOn.checked) {
-    replayRow = null;
-    replayT.textContent = 'live';
-    replayPos.disabled = true;
-    return;
-  }
-  replayPos.disabled = false;
-  const n = api.recCount();
-  if (n === 0) { replayRow = null; replayT.textContent = 'no data'; return; }
-  const idx = Math.round((parseFloat(replayPos.value) / 1000) * (n - 1));
-  replayRow = recordRow(idx);
-  replayT.textContent = replayRow ? `${replayRow.t.toFixed(2)} s` : 'live';
+  const s = scrubState(replayOn.checked, parseFloat(replayPos.value), api.recCount());
+  replayPos.disabled = s.disabled;
+  replayRow = s.index === null ? null : recordRow(s.index);
+  replayT.textContent = s.text ?? (replayRow ? `${replayRow.t.toFixed(2)} s` : 'live');
 }
 
 replayOn.addEventListener('change', () => {
@@ -714,7 +745,7 @@ plotCanvas.addEventListener('pointerdown', e => {
   if (n < 2) return;
   const r = plotCanvas.getBoundingClientRect();
   const x = (e.clientX - r.left) * (PW / r.width);
-  const frac = Math.max(0, Math.min(1, (x - 38) / (PW - 46)));
+  const frac = seekFraction(x, PW, 38, 8);
   replayOn.checked = true;
   running = false;
   btnPlay.textContent = 'Play';
@@ -744,6 +775,356 @@ document.getElementById('btn-export').addEventListener('click', () => {
   a.href = url; a.download = 'chad-sim-run.csv'; a.click();
   URL.revokeObjectURL(url);
 });
+
+// ============================================================================
+// Motion outcomes
+// ============================================================================
+//
+// The Route DSL runs motions and reports nothing about how they ended, and its
+// commands carry no earlyExitRange or minSpeed. This panel drives
+// sim_motion_*, which runs a scripted list through the ordinary BLOCKING
+// Chassis API on its own fiber and keeps one record per motion. All the
+// formatting and every colour decision live in motion_view.js so they are
+// testable; what is left here is DOM plumbing.
+import { motionRow, motionSummary } from './motion_view.js';
+
+/// chad::MotionType as an int, which is what sim_motion_push takes -- and the
+/// record's own `type` comes back off the library's telemetry, so a mismatch
+/// between what was asked for and what ran is visible in the table.
+const MP_TYPES = [
+  [2, 'moveToPoint (a,b = x,y)'],
+  [1, 'moveDistance (a = inches)'],
+  [3, 'turnToHeading (a = deg)'],
+  [4, 'turnToPoint (a,b = x,y)'],
+  [5, 'moveArc (a,b = x,y, c = radius)'],
+  [6, 'moveBoomerang (a,b = x,y, c = heading)'],
+  [9, 'swingToHeading (a = deg, b >= 0.5 -> right)'],
+];
+
+/// Render a `.rows` grid. The column template is set here rather than in the
+/// stylesheet because the column COUNT is a property of the data.
+function grid(el, template, cells) {
+  el.style.gridTemplateColumns = template;
+  el.innerHTML = cells
+    .map((c) => `<div class="${c.cls || ''}"${c.title ? ` title="${c.title}"` : ''}>${c.text}</div>`)
+    .join('');
+}
+
+const mpEl = (id) => document.getElementById('mp-' + id);
+const mpNum = (id) => parseFloat(mpEl(id).value) || 0;
+const mpStatus = mpEl('status');
+
+{
+  const sel = mpEl('type');
+  for (const [v, label] of MP_TYPES) {
+    const o = document.createElement('option');
+    o.value = v; o.textContent = label;
+    sel.appendChild(o);
+  }
+}
+
+// The bridge has no reader for the queued steps, so the queue is mirrored here
+// and replayed into sim_motion_push on Run.
+let mpQueue = [];
+
+function mpRenderQueue() {
+  grid(mpEl('queue'), 'auto minmax(0,1fr) auto',
+       mpQueue.length
+         ? mpQueue.flatMap((q, i) => [
+             { text: String(i), cls: 's' },
+             { text: (MP_TYPES.find(([v]) => v === q.type) || [0, '?'])[1].split(' ')[0]
+                     + ` ${q.a}${q.type >= 2 && q.type <= 6 ? `, ${q.b}` : ''}`
+                     + (q.back ? ' rev' : '') + (q.async ? ' async' : '') },
+             { text: `${q.timeout} ms`, cls: 'r off' },
+           ])
+         : [{ text: 'no motions queued', cls: 'off' }, { text: '' }, { text: '' }]);
+}
+mpRenderQueue();
+
+mpEl('add').addEventListener('click', () => {
+  mpQueue.push({
+    type: parseInt(mpEl('type').value, 10),
+    a: mpNum('a'), b: mpNum('b'), c: mpNum('c'),
+    timeout: mpNum('timeout'),
+    tolerance: mpNum('tol'),
+    earlyExit: mpNum('early'),
+    minSpeed: mpNum('min'),
+    maxSpeed: mpNum('max'),
+    delayAfter: mpNum('delay'),
+    back: mpEl('back').checked,
+    hold: mpEl('hold').checked,
+    async: mpEl('async').checked,
+  });
+  mpRenderQueue();
+});
+
+mpEl('clear').addEventListener('click', () => {
+  mpQueue = [];
+  api.motionClear();
+  mpRenderQueue();
+  mpStatus.textContent = '';
+  mpStatus.className = 'status';
+});
+
+mpEl('cancel').addEventListener('click', () => api.motionCancel());
+
+mpEl('run').addEventListener('click', () => {
+  if (!mpQueue.length) {
+    mpStatus.textContent = 'nothing queued';
+    mpStatus.className = 'status err';
+    return;
+  }
+  api.motionClear();
+  for (const q of mpQueue) {
+    api.motionPush(q.type, q.a, q.b, q.c);
+    api.motionSet('timeout', q.timeout);
+    api.motionSet('tolerance', q.tolerance);
+    api.motionSet('earlyExit', q.earlyExit);
+    api.motionSet('minSpeed', q.minSpeed);
+    api.motionSet('maxSpeed', q.maxSpeed);
+    api.motionSet('delayAfter', q.delayAfter);
+    api.motionSet('back', q.back ? 1 : 0);
+    api.motionSet('holdWindow', q.hold ? 1 : 0);
+    api.motionSet('async', q.async ? 1 : 0);
+  }
+  api.recClear();
+  api.motionRun();
+  mpStatus.textContent = `running ${mpQueue.length} motions`;
+  mpStatus.className = 'status ok';
+  running = true;
+  btnPlay.textContent = 'Pause';
+});
+
+const MP_COLS = 'auto auto minmax(0,1fr) auto auto auto auto auto';
+const MP_HEAD = ['#', 'type', 'outcome', 'took', 'settle', 'peak L/A', 'v in→out', 'seam'];
+
+function mpRenderResults() {
+  const recs = JSON.parse(api.motionJson());
+  if (!recs.length) {
+    grid(mpEl('results'), 'minmax(0,1fr)',
+         [{ text: 'run a program to see outcomes', cls: 'off' }]);
+    return;
+  }
+  const cells = MP_HEAD.map((h, i) => ({ text: h, cls: i >= 3 ? 'hdr r' : 'hdr' }));
+  for (const rec of recs) {
+    const r = motionRow(rec);
+    cells.push(
+      { text: String(r.i), cls: 's' },
+      { text: r.type, cls: 's' },
+      // The library's own name, coloured by the enum value -- ui.mjs checks the
+      // two against each other through a real run.
+      { text: r.outcome, cls: r.outcomeClass,
+        title: `drift from ground truth ${r.driftIn.toFixed(2)} in` },
+      { text: r.ms, cls: 'r' },
+      { text: r.settle, cls: 'r off',
+        title: 'when the settle test first passed, and how long it then held. '
+             + 'A curved path can arrive without ever passing tolerance.' },
+      { text: r.peak, cls: 'r off' },
+      { text: r.vSeam, cls: 'r off' },
+      { text: r.seam, cls: `r ${r.seamClass}`, title: r.cmdSeam });
+  }
+  grid(mpEl('results'), MP_COLS, cells);
+}
+mpRenderResults();
+
+// One poll per second of wall time, not per frame: the record list only changes
+// when a motion returns.
+let mpDone = -1;
+function mpPoll() {
+  const n = api.motionRunning();
+  const done = JSON.parse(api.motionJson()).length;
+  if (done !== mpDone) {
+    mpDone = done;
+    mpRenderResults();
+    if (!n && mpQueue.length && done === mpQueue.length) {
+      mpStatus.textContent = `${done} motions done`;
+      mpStatus.className = 'status ok';
+    }
+  }
+}
+
+// ============================================================================
+// Trajectory
+// ============================================================================
+//
+// Generation is allowed to FAIL, and that has to read as an answer rather than
+// as an empty canvas: config.cpp ships kaStraight = 0, so ticking the
+// wheel-voltage constraint returns UnusableConstraint with an empty trajectory.
+// generationVerdict() owns that message and ui.mjs drives it through the real
+// bridge.
+import { readStates, auditWheelVoltages, auditSpeedCeilings } from './traj.js';
+import {
+  generationVerdict, decimate, headingTicks, profileExtremes, auditRows,
+} from './traj_view.js';
+
+const tjEl = (id) => document.getElementById('tj-' + id);
+
+buildParams('tj-params', [
+  { key: 'maxVel', label: 'max vel in/s', min: 0, max: 80, step: 1, value: 0,
+    help: '0 uses the drive model’s free wheel speed' },
+  { key: 'maxAccel', label: 'max accel in/s²', min: 5, max: 200, step: 5, value: 60 },
+  { key: 'maxDx', label: 'sample maxDx in', min: 0.25, max: 8, step: 0.25, value: 5,
+    help: 'spline sampling tolerance; refining it once turned a feasible straight line infeasible' },
+  { key: 'kA', label: 'kA V per m/s²', min: 0, max: 3, step: 0.05, value: 0,
+    help: 'config.cpp ships 0, which makes the wheel-voltage constraint refuse' },
+  { key: 'kV', label: 'kV V per m/s', min: 1, max: 12, step: 0.1, value: 6.1287 },
+  { key: 'gripLimit', label: 'grip in/s² (0 = wheel type)', min: 0, max: 250, step: 5, value: 0,
+    help: 'the traction default of 200 never binds on this drivetrain; 60 does' },
+], { get: () => NaN, set: (k, v) => api.trajSet(k, v) });
+
+// Drawn on the field, so it lives at module scope next to the other layers.
+let trajStates = [];
+
+const DEFAULT_WPS = '-48, -48, 90\n0, -48, 90\n24, -24, 0';
+tjEl('wps').value = localStorage.getItem('chad-sim.traj') || DEFAULT_WPS;
+
+function tjWaypoints() {
+  return tjEl('wps').value.split('\n')
+    .map((l) => l.trim()).filter((l) => l && !l.startsWith('#'))
+    .map((l) => l.split(/[,\s]+/).map(Number))
+    .filter((v) => v.length >= 3 && v.every(Number.isFinite))
+    .map(([x, y, h]) => ({ x, y, headingDeg: h }));
+}
+
+function tjGenerate() {
+  localStorage.setItem('chad-sim.traj', tjEl('wps').value);
+  api.trajClear();
+  for (const wp of tjWaypoints()) api.trajWaypoint(wp.x, wp.y, wp.headingDeg, 0);
+  api.trajSet('driveConstraints', tjEl('drive').checked ? 1 : 0);
+  api.trajSet('voltageConstraint', tjEl('volt').checked ? 1 : 0);
+  api.trajSet('cubic', tjEl('cubic').checked ? 1 : 0);
+  api.trajSet('reversed', tjEl('rev').checked ? 1 : 0);
+  api.trajGenerate();
+
+  const res = JSON.parse(api.trajResultJson());
+  const model = JSON.parse(api.trajModelJson());
+  const verdict = generationVerdict(res);
+  tjEl('status').textContent = verdict.headline + (verdict.detail ? ' — ' + verdict.detail : '');
+  tjEl('status').className = 'status ' + verdict.cls;
+
+  trajStates = verdict.ok
+    ? readStates(M, api.trajStatesPtr(), api.trajCount(), api.trajStride())
+    : [];
+
+  if (!trajStates.length) {
+    tjEl('facts').innerHTML = '';
+    grid(tjEl('audit'), 'minmax(0,1fr)',
+         [{ text: 'nothing to audit — generation produced no states', cls: 'off' }]);
+    return;
+  }
+
+  const ex = profileExtremes(trajStates);
+  tjEl('facts').innerHTML = [
+    ['states', `${trajStates.length}`],
+    ['duration', `${res.totalTime.toFixed(2)} s`],
+    ['peak speed', `${ex.peakV.toFixed(1)} in/s`],
+    ['peak accel', `${ex.peakA.toFixed(0)} in/s²`],
+    ['tightest radius', Number.isFinite(ex.minRadiusIn)
+      ? `${ex.minRadiusIn.toFixed(1)} in` : 'straight'],
+    ['track width', `${model.trackWidth.toFixed(2)} in`],
+    ['wheel budget', `${model.effMaxWheelSpeed.toFixed(1)} in/s`],
+    ['grip limit', `${model.effGripLimit.toFixed(0)} in/s²`],
+  ].map(([k, v]) => `<div class="k">${k}</div><div class="v">${v}</div>`).join('');
+
+  // Audited from physics, not by re-calling the constraint classes. Differenced
+  // on the 10 ms grid the follower actually samples, because that is the demand
+  // the drivetrain sees.
+  const n = api.trajResample(0.01);
+  const sampled = n > 0
+    ? readStates(M, api.trajSamplesPtr(), n, api.trajStride())
+    : trajStates;
+  const audit = auditWheelVoltages(sampled, {
+    trackWidth: model.trackWidth, kS: model.kS, kV: model.kV, kA: model.kA,
+    maxVoltage: model.maxVoltage,
+  });
+  const ceilings = auditSpeedCeilings(trajStates, {
+    gripLimit: model.effGripLimit, maxWheelSpeed: model.effMaxWheelSpeed,
+    trackWidth: model.trackWidth,
+  }, res.maxVelocity);
+  const rows = auditRows(audit, ceilings);
+  grid(tjEl('audit'), 'minmax(0,1fr) auto',
+       rows.flatMap((r) => [{ text: r.k, cls: 's' }, { text: r.v, cls: `r ${r.cls}` }]));
+}
+
+tjEl('gen').addEventListener('click', tjGenerate);
+tjEl('run').addEventListener('click', () => {
+  if (!trajStates.length) { tjGenerate(); }
+  if (!trajStates.length) return;
+  api.recClear();
+  api.trajRun(15000);
+  running = true;
+  btnPlay.textContent = 'Pause';
+});
+tjEl('cancel').addEventListener('click', () => api.trajCancel());
+tjGenerate();
+
+// ============================================================================
+// Constrained MPC
+// ============================================================================
+//
+// The question is whether the solve converges inside its budget, and
+// worstPrimalResidual is the only signal that fires on an infeasible corridor --
+// no boolean diagnostic does. mpcVerdict() leads with that.
+import { mpcVerdict, constraintRows, rowBudgetRows } from './mpc_view.js';
+
+const mpcEl = (id) => document.getElementById('mpc-' + id);
+
+buildParams('mpc-params', [
+  { key: 'mode', label: 'mode (0-3)', min: 0, max: 3, step: 1, value: 3,
+    help: '0 scheduled LQR, 1 Riccati/tick, 2 MPC converged, 3 MPC RTI' },
+  { key: 'horizon', label: 'horizon', min: 1, max: 20, step: 1, value: 10 },
+  { key: 'rtiIters', label: 'RTI iters/tick', min: 1, max: 40, step: 1, value: 1 },
+  { key: 'corridor', label: 'cross-track corridor m', min: 0, max: 0.2, step: 0.005, value: 0,
+    help: '0 disables. Too tight is infeasible, and only the primal residual says so' },
+  { key: 'headCorr', label: 'heading corridor rad', min: 0, max: 0.5, step: 0.01, value: 0 },
+  { key: 'rateW', label: 'omega rate limit', min: 0, max: 1, step: 0.02, value: 0 },
+  { key: 'admmRho', label: 'ADMM rho (0 = auto)', min: 0, max: 50, step: 0.1, value: 0,
+    help: 'CondensedMpc picks rho itself at 0; this overrides it' },
+], { get: () => NaN, set: (k, v) => api.mpcSet(k, v) });
+
+function mpcRefresh() {
+  const stats = JSON.parse(api.mpcStatsJson());
+  const v = mpcVerdict(stats);
+  mpcEl('status').textContent = v.headline + (v.detail ? ' — ' + v.detail : '');
+  mpcEl('status').className = 'status '
+    + (v.cls === 'bad' ? 'err' : v.cls === 'ok' ? 'ok' : '');
+  const rows = constraintRows(stats);
+  grid(mpcEl('diag'), 'minmax(0,1fr) auto',
+       rows.length
+         ? rows.flatMap((r) => [{ text: r.k, cls: 's' }, { text: r.v, cls: `r ${r.cls}` }])
+         : [{ text: 'not run', cls: 'off' }, { text: '' }]);
+}
+
+mpcEl('run').addEventListener('click', () => {
+  if (!trajStates.length) {
+    mpcEl('status').textContent = 'generate a trajectory on the Traj tab first';
+    mpcEl('status').className = 'status err';
+    return;
+  }
+  // The follower consumes one sample per dt, so it gets the trajectory
+  // resampled on its own tick rather than on the spline's state grid.
+  const n = api.trajResample(0.01);
+  const samples = readStates(M, api.trajSamplesPtr(), n, api.trajStride());
+  api.mpcTrajClear();
+  for (const s of samples) api.mpcTrajPush(s.x, s.y, s.theta, s.v, s.v * s.k);
+  api.reset(samples[0].x, samples[0].y, 90 - (samples[0].theta * 180) / Math.PI);
+  api.recClear();
+  api.mpcRun();
+  running = true;
+  btnPlay.textContent = 'Pause';
+});
+mpcEl('cancel').addEventListener('click', () => api.mpcCancel());
+mpcEl('rows').addEventListener('click', () => {
+  // The corridor and the heading corridor as two specs over the whole horizon,
+  // which is the configuration addStateConstraint's row budget is tightest for.
+  const budget = JSON.parse(api.mpcRowsJson(20, 2, 2, 0));
+  const rows = rowBudgetRows(budget);
+  grid(mpcEl('budget'), 'minmax(0,1fr) auto',
+       rows.flatMap((r) => [{ text: r.k, cls: 's' }, { text: r.v, cls: `r ${r.cls}` }]));
+});
+grid(mpcEl('budget'), 'minmax(0,1fr)',
+     [{ text: 'press Row budget', cls: 'off' }]);
+mpcRefresh();
 
 // ============================================================================
 // Field rendering
@@ -867,6 +1248,33 @@ function drawBeams(s) {
   }
 }
 
+/// The generated trajectory, decimated for drawing rather than sampled again:
+/// this IS the state buffer the follower consumes, so nothing can drift between
+/// what is drawn and what is driven. Heading ticks use `theta` in standard
+/// radians -- the state buffer's convention, not the route DSL's VEX bearing.
+function drawTrajectory() {
+  if (trajStates.length < 2) return;
+  const pts = decimate(trajStates, 500);
+  ctx.strokeStyle = 'rgba(56,189,248,0.9)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  pts.forEach((q, i) => {
+    const [px, py] = toPx(q.x, q.y);
+    i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+  });
+  ctx.stroke();
+
+  ctx.strokeStyle = 'rgba(56,189,248,0.45)';
+  ctx.lineWidth = 1;
+  for (const tk of headingTicks(trajStates, Math.max(1, Math.round(trajStates.length / 24)))) {
+    const [px, py] = toPx(tk.x, tk.y);
+    ctx.beginPath();
+    ctx.moveTo(px, py);
+    ctx.lineTo(px + tk.dx * 8, py - tk.dy * 8);
+    ctx.stroke();
+  }
+}
+
 function drawPlan() {
   // Sampled RAMSETE trajectories, drawn as the continuous curve they are.
   for (const pts of sampledPaths) {
@@ -986,6 +1394,7 @@ function render(s) {
   if (layers.grid) drawGrid();
   if (layers.obstacles) drawObstacles();
   if (layers.plan) drawPlan();
+  if (layers.traj) drawTrajectory();
   if (layers.truePath) drawTrail(api.trailTruePtr, api.trailTrueCnt, 'rgba(74,222,128,0.5)');
   if (layers.odomPath) drawTrail(api.trailOdomPtr, api.trailOdomCnt, 'rgba(251,191,36,0.5)');
   if (layers.particles) drawParticles();
@@ -1003,7 +1412,7 @@ function render(s) {
 
 const hud = Object.fromEntries(
   ['t', 'true', 'odom', 'mcl', 'ekf', 'ekfsig', 'err', 'speed', 'sensors',
-   'neff', 'tasks']
+   'neff', 'tasks', 'motion', 'health']
     .map(k => [k, document.getElementById('hud-' + k)]));
 
 const diagEl = document.getElementById('sensor-diag');
@@ -1035,7 +1444,10 @@ function updateDiag(s) {
   diagEl.innerHTML = html;
 }
 
+import { healthText } from './health.js';
+
 const fmtPose = p => `${p.x.toFixed(2)}, ${p.y.toFixed(2)} @ ${p.h.toFixed(1)}°`;
+
 
 function updateHud(s) {
   hud.t.textContent = s.t.toFixed(2) + ' s';
@@ -1054,12 +1466,19 @@ function updateHud(s) {
   hud.sensors.textContent = `${valid}/${s.beams.length} valid`;
   // Injection above zero means the beam likelihoods stopped fitting -- the
   // cloud is being redrawn across the field to find the robot again.
+  // N_eff is now the measurement-weighted value, so it sits well below the
+  // particle count while healthy and climbs toward it when the cloud is lost --
+  // every particle equally wrong flattens the weights. Mismatch is the signal
+  // that actually rises on a kidnap.
   hud.neff.textContent = (s.locMode & 1)
     ? `${s.mcl.nEff.toFixed(0)} / 1024`
+      + (s.mcl.mismatch > 0.01 ? `  fit ${(s.mcl.mismatch * 100).toFixed(0)}%` : '')
       + (s.mclInject > 0.001 ? `  inject ${(s.mclInject * 100).toFixed(0)}%` : '')
     : '—';
   const ri = api.routeIndex();
   hud.tasks.textContent = `${s.tasks} live` + (ri >= 0 ? ` · cmd ${ri}` : '');
+  hud.motion.textContent = motionSummary(s);
+  hud.health.textContent = healthText(s);
   updateDiag(s);
 }
 
@@ -1070,6 +1489,7 @@ function updateHud(s) {
 let lastState = null;
 let lastFrame = performance.now();
 let plotTick = 0;
+let mpcWasRunning = false;
 
 function frame(now) {
   const wallDt = Math.min(now - lastFrame, 100);
@@ -1084,8 +1504,18 @@ function frame(now) {
   render(lastState);
   updateHud(lastState);
 
-  // Plots are cheap but not free; refresh a few times a second.
-  if (++plotTick % 6 === 0) { if (replayOn.checked) updateReplay(); drawPlots(); }
+  // Plots are cheap but not free; refresh a few times a second. The outcome
+  // table and the MPC stats are parsed JSON, so they follow the same tick --
+  // and both are no-ops unless the record count or the solver moved.
+  if (++plotTick % 6 === 0) {
+    if (replayOn.checked) updateReplay();
+    drawPlots();
+    mpPoll();
+    if (lastState.motion.mpcRunning || mpcWasRunning) {
+      mpcWasRunning = lastState.motion.mpcRunning;
+      mpcRefresh();
+    }
+  }
 
   requestAnimationFrame(frame);
 }

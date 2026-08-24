@@ -61,10 +61,16 @@ public:
     /// Distance only -- kept for callers that do not care about the normal.
     float raycast(float ox, float oy, float dc, float ds, float maxRange) const;
 
-    /// True when the point is outside the perimeter, or inside any circle when
-    /// `includeCircles`. Driving through posts is sometimes what you want while
-    /// testing a route, so it is switchable.
+    /// True when the disc at (x, y) is outside the loaded perimeter, or inside
+    /// any circle when `includeCircles`. Driving through posts is sometimes what
+    /// you want while testing a route, so it is switchable.
     bool collides(float x, float y, float radius, bool includeCircles = true) const;
+
+    /// How far the disc is inside geometry, 0 when clear. The world needs the
+    /// depth and not just the bit, so a pose that is ALREADY in penetration can
+    /// be told which way is out.
+    float penetration(float x, float y, float radius,
+                      bool includeCircles = true) const;
 
     const std::vector<Segment>& segments() const { return mSegments; }
     const std::vector<Circle>&  circles()  const { return mCircles; }
@@ -74,6 +80,15 @@ private:
                              const Segment& s, float maxRange);
     static RayHit rayCircle(float ox, float oy, float dc, float ds,
                             const Circle& c, float maxRange);
+
+    /// Bounding box of the kind-0 segments. Containment is tested against this
+    /// rather than the segments themselves, so a robot teleported outside is
+    /// driven back in instead of being free to leave.
+    struct Bounds {
+        bool  has{false};
+        float minX{0.0f}, minY{0.0f}, maxX{0.0f}, maxY{0.0f};
+    };
+    Bounds mPerimeter;
 
     std::vector<Segment> mSegments;
     std::vector<Circle>  mCircles;

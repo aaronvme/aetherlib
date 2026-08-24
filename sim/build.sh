@@ -5,6 +5,11 @@
 #   ./sim/build.sh debug      assertions + source maps
 #
 # Requires the Emscripten SDK. Set EMSDK to override the default location.
+#
+# CHAD_SIM_OUT=<dir> redirects the build to a private output directory. The
+# shared sim/web/ is a single pair of files, so two builds running at once
+# corrupt each other -- give every concurrent build its own directory, the same
+# way test/host/run.ps1 takes -OutDir.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -22,26 +27,24 @@ if ! command -v em++ >/dev/null 2>&1; then
 fi
 
 MODE="${1:-release}"
-OUT="sim/web/chad_sim.mjs"
+OUTDIR="${CHAD_SIM_OUT:-sim/web}"
+OUT="$OUTDIR/chad_sim.mjs"
 
-# The whole chad library, plus the game-specific config and routines, so the
-# sim runs the same code that ships to the brain. autonselector.cpp is replaced
-# by a non-LVGL stub; main.cpp is excluded because the bridge owns the entry
-# points instead of the competition control system.
+# The whole chad library, plus every game-specific source, so the sim runs the
+# same code that ships to the brain. Discovered rather than listed, because a
+# hand-written list silently stops building a routine the moment one is added.
+# autonselector.cpp is replaced by a non-LVGL stub; src/main.cpp is excluded
+# because the bridge owns the entry points, not the competition control system.
 SOURCES=(
     $(find src/chad -name '*.cpp' -not -path '*auton_selector*')
-    src/gamespecific/config.cpp
-    src/gamespecific/autons.cpp
-    src/gamespecific/lift.cpp
-    src/gamespecific/controls.cpp
-    src/gamespecific/tuning.cpp
+    $(find src/gamespecific -name '*.cpp')
     sim/platform/autonselector_sim.cpp
     sim/platform/pros_support.cpp
     sim/platform/sim_runtime.cpp
     sim/platform/sim_sched.cpp
     sim/world/field.cpp
     sim/world/world.cpp
-    sim/bridge/bridge.cpp
+    $(find sim/bridge -name '*.cpp')
 )
 
 FLAGS=(
@@ -66,9 +69,9 @@ else
     FLAGS+=(-O3 -sASSERTIONS=0)
 fi
 
-mkdir -p sim/web
+mkdir -p "$OUTDIR"
 echo "building ${#SOURCES[@]} sources -> $OUT ($MODE)"
 em++ "${SOURCES[@]}" "${FLAGS[@]}" -o "$OUT"
 
 echo "done:"
-ls -lh sim/web/chad_sim.mjs sim/web/chad_sim.wasm | awk '{printf "  %-28s %s\n", $9, $5}'
+ls -lh "$OUTDIR/chad_sim.mjs" "$OUTDIR/chad_sim.wasm" | awk '{printf "  %-28s %s\n", $9, $5}'
