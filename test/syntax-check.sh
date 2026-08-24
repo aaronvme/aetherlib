@@ -5,6 +5,14 @@
 #
 #     ./test/syntax-check.sh src/chad/chassis.cpp src/chad/tracking/ekf_tracking.cpp
 #     ./test/syntax-check.sh            # every src/**/*.cpp
+#
+# Windows MAX_PATH: liblvgl includes itself through a long chain of ../ and
+# the accumulated path is not canonicalised, so from a checkout more than
+# about 120 characters deep every LVGL-dependent source fails with
+# "../lv_conf_internal.h: No such file or directory". That is the checkout
+# location, not the code -- 20 sources failed from a 150-character path and
+# all of them passed from a 17-character one. Check where you are before
+# believing it.
 set -e
 cd "$(dirname "$0")/.."
 
