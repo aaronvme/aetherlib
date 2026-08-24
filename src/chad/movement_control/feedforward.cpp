@@ -1,6 +1,8 @@
 // Ported from FBLib - https://github.com/jiazegao/FBLib
 #include "chad/movement_control/feedforward.hpp"
 
+#include "chad/movement_control/trajectory_constraint.hpp"
+
 #include <cmath>
 #include <memory>
 #include <string>
@@ -9,6 +11,17 @@
 #include "chad/util/util.hpp"
 
 namespace chad {
+
+namespace {
+// The trajectory layer takes gains duck-typed, because its header has to stay
+// free of PROS. Instantiating it here against the real struct is what makes a
+// rename of kV, kaStraight or ksStraight a compile error rather than a silent
+// loss of the only intended integration point.
+[[maybe_unused]] WheelVoltageModel checkGainsAdapter(const FeedforwardGains& gains) {
+    return WheelVoltageModel::fromFeedforwardGains(gains);
+}
+}  // namespace
+
 
 FeedforwardController::FeedforwardController(const FeedforwardGains& gains, float trackWidth)
     : mGains(gains), mTrackWidth(trackWidth) {}

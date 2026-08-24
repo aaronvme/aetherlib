@@ -4,21 +4,24 @@
 #include "chad/drivetrain.hpp"
 
 #include <cmath>
-#include <vector>
+#include <cstdint>
 
 namespace chad {
 
 Drivetrain::Drivetrain(pros::MotorGroup* leftMotors, pros::MotorGroup* rightMotors,
                        float trackWidth, float wheelDiameter, float rpm,
                        pros::MotorGroup* leftSenseMotors,
-                       pros::MotorGroup* rightSenseMotors)
+                       pros::MotorGroup* rightSenseMotors,
+                       WheelType wheels, float gripLimitOverride)
     : leftMotors(leftMotors),
       rightMotors(rightMotors),
       leftSenseMotors(leftSenseMotors),
       rightSenseMotors(rightSenseMotors),
       trackWidth(trackWidth),
       wheelDiameter(wheelDiameter),
-      rpm(rpm) {
+      rpm(rpm),
+      wheels(wheels),
+      gripLimitOverride(gripLimitOverride) {
     // Odometry's motor-encoder fallback assumes positions are in DEGREES.
     // Enforce it — a user who set rotations/counts elsewhere would silently
     // corrupt distance measurements by a factor of 360.
@@ -26,6 +29,14 @@ Drivetrain::Drivetrain(pros::MotorGroup* leftMotors, pros::MotorGroup* rightMoto
                                 leftSenseMotors, rightSenseMotors}) {
         if (g != nullptr) g->set_encoder_units_all(pros::E_MOTOR_ENCODER_DEGREES);
     }
+}
+
+float Drivetrain::maxWheelSpeedInPerSec() const {
+    return (rpm / 60.0f) * PI * wheelDiameter;
+}
+
+DriveModel Drivetrain::model() const {
+    return {trackWidth, wheelDiameter, maxWheelSpeedInPerSec(), wheels, gripLimitOverride};
 }
 
 void Drivetrain::setLeftVoltage(float voltage) {
@@ -50,26 +61,49 @@ void Drivetrain::setBrakeMode(pros::motor_brake_mode_e mode) {
     if (rightMotors != nullptr) rightMotors->set_brake_mode(mode);
 }
 
+// A disconnected motor reports PROS_ERR (INT32_MAX, 2.1e9 "degrees"). One bad
+// reading would catapult the average -- and odometry with it -- thousands of
+// miles, so skip it and average the healthy motors.
+static bool readingUsable(double v) {
+    return std::isfinite(v) && std::fabs(v) < 2147483647.0;
+}
+
+void Drivetrain::accumulateVelocity(const pros::MotorGroup* g, double& sum, int& count,
+                                    int& faulted) {
+    if (g == nullptr) return;
+    const int n = g->size();
+    for (int i = 0; i < n; ++i) {
+        const double rpm = g->get_actual_velocity(static_cast<std::uint8_t>(i));
+        if (!readingUsable(rpm)) { faulted++; continue; }
+        sum += rpm;
+        count++;
+    }
+}
+
+void Drivetrain::accumulatePosition(const pros::MotorGroup* g, double& sum, int& count,
+                                    int& faulted) {
+    if (g == nullptr) return;
+    const int n = g->size();
+    for (int i = 0; i < n; ++i) {
+        const double pos = g->get_position(static_cast<std::uint8_t>(i));
+        if (!readingUsable(pos)) { faulted++; continue; }
+        sum += pos;
+        count++;
+    }
+}
+
+float Drivetrain::velocityFromRpm(double motorRpm) const {
+    return static_cast<float>(motorRpm * externalGearRatio() / 60.0 *
+                              3.14159265358979 * wheelDiameter);
+}
+
 float Drivetrain::groupVelocityInPerSec(const pros::MotorGroup* a,
                                        const pros::MotorGroup* b) const {
-    if (a == nullptr && b == nullptr) return 0.0f;
-
-    auto accumulate = [](const std::vector<double>& rpms, double& sum, int& count) {
-        for (double rpm : rpms) {
-            if (!std::isfinite(rpm) || std::fabs(rpm) >= 2147483647.0) continue;
-            sum += rpm;
-            count++;
-        }
-    };
-
     double sum = 0.0;
-    int count = 0;
-    if (a != nullptr) accumulate(a->get_actual_velocity_all(), sum, count);
-    if (b != nullptr) accumulate(b->get_actual_velocity_all(), sum, count);
-    if (count == 0) return 0.0f;
-
-    const double motorRpm = sum / count;
-    return static_cast<float>(motorRpm * externalGearRatio() / 60.0 * 3.14159265358979 * wheelDiameter);
+    int count = 0, faulted = 0;
+    accumulateVelocity(a, sum, count, faulted);
+    accumulateVelocity(b, sum, count, faulted);
+    return (count > 0) ? velocityFromRpm(sum / count) : 0.0f;
 }
 
 float Drivetrain::averageVelocityInPerSec() const {
@@ -84,48 +118,71 @@ float Drivetrain::rightVelocityInPerSec() const {
     return groupVelocityInPerSec(rightSense(), nullptr);
 }
 
-float Drivetrain::averagePositionDeg() const {
-    if (leftSense() == nullptr && rightSense() == nullptr) return 0.0f;
-
-    // A disconnected motor reports PROS_ERR (INT32_MAX ≈ 2.1e9 "degrees").
-    // One bad reading would catapult the average — and odometry with it —
-    // thousands of miles. Skip error readings; average the healthy motors.
-    auto accumulate = [](const std::vector<double>& positions,
-                         double& sum, int& count) {
-        for (double pos : positions) {
-            if (!std::isfinite(pos) || std::fabs(pos) >= 2147483647.0) continue;
-            sum += pos;
-            count++;
-        }
-    };
-
-    double sum = 0.0;
-    int count = 0;
-    if (leftSense() != nullptr)  accumulate(leftSense()->get_position_all(),  sum, count);
-    if (rightSense() != nullptr) accumulate(rightSense()->get_position_all(), sum, count);
-    return (count > 0) ? static_cast<float>(sum / count) : 0.0f;
+WheelSpeeds Drivetrain::wheelVelocitiesInPerSec() const {
+    return wheelVelocitiesLive().speeds;
 }
 
-float Drivetrain::groupPositionDeg(const pros::MotorGroup* g) const {
-    if (g == nullptr) return 0.0f;
+WheelReading Drivetrain::wheelVelocitiesLive() const {
+    WheelReading out;
     double sum = 0.0;
     int count = 0;
-    for (double pos : g->get_position_all()) {
-        if (!std::isfinite(pos) || std::fabs(pos) >= 2147483647.0) continue;
-        sum += pos;
-        count++;
-    }
-    return (count > 0) ? static_cast<float>(sum / count) : 0.0f;
+    accumulateVelocity(leftSense(), sum, count, out.faulted);
+    out.speeds.left = (count > 0) ? velocityFromRpm(sum / count) : 0.0f;
+    out.live += count;
+    sum = 0.0;
+    count = 0;
+    accumulateVelocity(rightSense(), sum, count, out.faulted);
+    out.speeds.right = (count > 0) ? velocityFromRpm(sum / count) : 0.0f;
+    out.live += count;
+    return out;
+}
+
+float Drivetrain::averagePositionDeg() const {
+    return averagePositionDegLive().value;
+}
+
+EncoderAverage Drivetrain::averagePositionDegLive() const {
+    EncoderAverage out;
+    double sum = 0.0;
+    int count = 0;
+    accumulatePosition(leftSense(), sum, count, out.faulted);
+    accumulatePosition(rightSense(), sum, count, out.faulted);
+    out.live = count;
+    out.value = (count > 0) ? static_cast<float>(sum / count) : 0.0f;
+    return out;
+}
+
+EncoderAverage Drivetrain::groupPositionDegLive(const pros::MotorGroup* g) const {
+    EncoderAverage out;
+    double sum = 0.0;
+    int count = 0;
+    accumulatePosition(g, sum, count, out.faulted);
+    out.live = count;
+    out.value = (count > 0) ? static_cast<float>(sum / count) : 0.0f;
+    return out;
+}
+
+EncoderAverage Drivetrain::groupPositionInLive(const pros::MotorGroup* g) const {
+    EncoderAverage out = groupPositionDegLive(g);
+    out.value = out.value / 360.0f * externalGearRatio() *
+                3.14159265358979f * wheelDiameter;
+    return out;
+}
+
+EncoderAverage Drivetrain::leftPositionInLive() const {
+    return groupPositionInLive(leftSense());
+}
+
+EncoderAverage Drivetrain::rightPositionInLive() const {
+    return groupPositionInLive(rightSense());
 }
 
 float Drivetrain::leftPositionIn() const {
-    return groupPositionDeg(leftSense()) / 360.0f * externalGearRatio() *
-           3.14159265358979f * wheelDiameter;
+    return leftPositionInLive().value;
 }
 
 float Drivetrain::rightPositionIn() const {
-    return groupPositionDeg(rightSense()) / 360.0f * externalGearRatio() *
-           3.14159265358979f * wheelDiameter;
+    return rightPositionInLive().value;
 }
 
 float Drivetrain::externalGearRatio() const {

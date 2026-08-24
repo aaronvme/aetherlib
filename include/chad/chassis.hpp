@@ -18,20 +18,25 @@
 #include "chad/movement_control/arc.hpp"
 #include "chad/movement_control/boomerang.hpp"
 #include "chad/movement_control/feedforward.hpp"
+#include "chad/movement_control/primitives.hpp"
 #include "chad/movement_control/ramsete.hpp"
+#include "chad/movement_control/settle_spec.hpp"
+#include "chad/movement_control/trajectory_follow.hpp"
 #include "chad/movement_control/velocity_profiles.hpp"
 #include "chad/tracking/ekf_tracking.hpp"
 #include "chad/tracking/mcl_tracking.hpp"
 #include "chad/tracking/odom_tracking.hpp"
 #include "chad/tracking/rcl_tracking.hpp"
 #include "chad/util/pid.hpp"
+#include "chad/util/settle.hpp"
 #include "chad/util/util.hpp"
 
 namespace chad {
 
-// ============================================================================
+// MotionType and MotionOutcome live in movement_control/settle_spec.hpp, with
+// the exit logic they belong to, so both are host-testable.
+
 // ChassisConfig — all configuration needed to construct a Chassis
-// ============================================================================
 
 struct ChassisConfig {
     PIDGains lateralGains{10.0f, 0.0f, 0.3f};
@@ -83,6 +88,31 @@ struct ChassisConfig {
     // trigger while still carrying velocity through the target.
     uint32_t settleTimeMs{0};
 
+    // Speed the robot must also be under to count as arrived, on top of the
+    // position tolerance. 0 tests position alone, which lets a motion exit while
+    // still carrying velocity through the target -- the next queued motion then
+    // starts from a pose that is already moving.
+    //
+    // The signal is a filtered rate of change of the settle error, so pose
+    // jitter sets a floor on what value can ever be met: too tight and the
+    // motion runs out its timeout instead.
+    float settleSpeedIn{0.0f};    // in/s, lateral motions
+    float settleSpeedDeg{0.0f};   // deg/s, turns and swings
+
+    // Below this the drivetrain has stopped turning, so the motion is not going
+    // to arrive: it gives up rather than hold voltage into a wall for the rest
+    // of its timeout. Measured on the wheels, not the pose, so a robot rotating
+    // in place does not read as stalled. stallSpeedIn 0 disables both.
+    float stallSpeedIn{0.5f};
+    // A turn's rest test is its turn rate, because the same wheel speed means a
+    // different thing about a turn: 0.5 in/s over an 11.9 in track is 4.8 deg/s,
+    // and a turn closing at 4.8 deg/s is converging, not stopped.
+    float stallSpeedDeg{2.0f};
+    uint32_t stallTimeMs{500};
+    // Suppressed for this long after a motion starts, or every standing start
+    // reads as a stall.
+    uint32_t stallGraceMs{300};
+
     // Tracking.
     //
     // Odometry always runs — it is the motion model every other filter predicts
@@ -104,30 +134,27 @@ struct ChassisSample {
     float x{0}, y{0}, thetaDeg{0};
     float targetX{0}, targetY{0};
     float lateralOut{0}, angularOut{0};
-    bool settled{false};
+    /// SettleMonitor::inTolerance(): inside every arrival test on THIS tick,
+    /// whether or not the hold has run out. Not "the motion finished" -- a
+    /// curved path can arrive with a heading residual outside tolerance, so it
+    /// settles without this ever going true. Use MotionOutcome for that.
+    bool inTolerance{false};
 };
 
-// ============================================================================
 // Chassis 
-// ============================================================================
 //
 // Composes tracking, motion control, and driver control into a single API.
-// ============================================================================
 
 class Chassis {
 public:
-    // ========================================================================
     // Construction
-    // ========================================================================
 
     Chassis(Drivetrain& drivetrain, const OdomSensors& sensors,
             const ChassisConfig& config = {});
 
     ~Chassis();
 
-    // ========================================================================
     // Calibration & Pose
-    // ========================================================================
 
     /// Calibrate IMU (robot must be stationary for ~2 seconds)
     void calibrate();
@@ -145,9 +172,7 @@ public:
     /// Get the current estimated pose
     Pose getPose() const;
 
-    // ========================================================================
     // Driver Control
-    // ========================================================================
 
     /// Tank drive: left and right joystick values (-127 to 127)
     void tank(float left, float right);
@@ -158,13 +183,10 @@ public:
     /// Curvature drive: like arcade but with better turn handling
     void curvature(float throttle, float steer);
 
-    // ========================================================================
     // Autonomous Movement (blocking by default, async overload available)
-    // ========================================================================
     //
     // All heading values are in VEX degrees (0–360, clockwise positive).
     // timeout in milliseconds — 0 = no timeout.
-    // ========================================================================
 
     /// Drive a specific distance forward/backward
     void moveDistance(float target, float timeout = 0, const MoveDistanceParams& params = {}, bool async = false);
@@ -188,16 +210,29 @@ public:
     /// Follow a path of poses using RAMSETE
     void moveRAMSETE(const std::vector<Pose>& path, float timeout = 0, const RAMSETEParams& params = {}, bool async = false);
 
+    /// Follow a time-parameterized trajectory from `generateTrajectory`. The
+    /// reference advances on the clock, so a trajectory whose speeds the
+    /// drivetrain cannot deliver will be raced rather than followed -- generate
+    /// it with the constraints from `Drivetrain::model()`.
+    void followTrajectory(const Trajectory& trajectory, float timeout = 0,
+                          const TrajectoryFollowParams& params = {}, bool async = false);
+
     /// Swing turn using one side of the drive
     /// @param thetaDeg  target heading in VEX degrees (0–360, clockwise positive)
     void swingToHeading(float thetaDeg, SwingSide side, float timeout = 0, const SwingParams& params = {}, bool async = false);
 
-    // ========================================================================
     // Motion Status
-    // ========================================================================
 
     /// True if the current movement has completed
     bool isSettled() const;
+
+    /// How the most recently finished motion ended. Only meaningful once
+    /// isSettled() is true for that motion.
+    MotionOutcome lastOutcome() const;
+
+    /// True if the last motion ended by reaching what it was asked to reach,
+    /// rather than by timing out, stalling or being cancelled.
+    bool lastMotionArrived() const;
 
     /// Cancel the current async movement
     void cancelMotion();
@@ -208,9 +243,7 @@ public:
     /// Wait until the robot has traveled at least `dist` inches
     void waitUntilDist(float dist);
 
-    // ========================================================================
     // Tracking Access (advanced use)
-    // ========================================================================
 
     OdomTracking& odom();
     RclTracking& rcl();
@@ -221,9 +254,7 @@ public:
     void startTracking();
     void stopTracking();
 
-    // ========================================================================
     // Tuning
-    // ========================================================================
 
     /// Re-apply gains, derivative smoothing, windup limits and the settle
     /// debounce from a config in one call. Tuning any of these separately from
@@ -241,9 +272,7 @@ public:
     /// Set/replace distance sensors for MCL/RCL tracking
     void setDistanceSensors(const std::array<pros::Distance*, MAX_DISTANCE_SENSORS>& sensors);
 
-    // ========================================================================
     // Dry-run mode (for Auton Selector path preview)
-    // ========================================================================
 
     /// Enable dry-run mode: movement commands record their paths but don't move motors
     void setDryRun(bool enabled);
@@ -255,52 +284,49 @@ public:
     /// Reset the dry-run path recording
     void resetDryRunPath();
 
-    // ========================================================================
     // Telemetry
-    // ========================================================================
 
     /// Empty by default. Set before starting motions - the motion task reads it.
     /// util/tuning.hpp has a hook that streams this to the SD card.
     void setTelemetry(std::function<void(const ChassisSample&)> callback);
 
 private:
-    // ========================================================================
     // Internal motion helpers
-    // ========================================================================
 
     void startMotion();
-    void endMotion();
+    /// @param brake  false leaves the motors running, which is what makes
+    ///               motion chaining a handover rather than a stop.
+    void endMotion(bool brake = true);
 
-    float computeLateralError(float targetX, float targetY) const;
-    float computeAngularError(float targetHeadingRad) const;
-    float computeAngularErrorToPoint(float targetX, float targetY) const;
-    // ========================================================================
+    /// Scale a chassis twist into the drivetrain's wheel-speed budget and emit
+    /// per-side motor output. The pair is scaled by one factor, never clipped
+    /// independently, because the ratio between the sides IS the commanded
+    /// curvature.
+    void emitTwist(float v, float w, float maxOut, bool velocityController,
+                   float vLeftMeas, float vRightMeas, float tickDt,
+                   float& outLeft, float& outRight);
     // Motion task (for async operation)
-    // ========================================================================
 
     void runMotionTask();
     void executeCurrentMotion();
     void ensureMotionTask();
 
-    enum class MotionType { None, Distance, Point, Heading, TurnPoint, Arc, Boomerang, RAMSETE, Swing };
-    struct MotionRequest {
+    /// The exit-test fields live in the PROS-free base, so settleSpecFor() can
+    /// be tested off the robot against the very struct the loop runs on.
+    struct MotionRequest : MotionSettleParams {
         uint32_t seq{0};                 // sequence id for blocking-completion wait
-        MotionType type{MotionType::None};
         float targetX{0}, targetY{0}, targetHeadingRad{0}, targetRadius{0};
         float targetDistance{0};         // raw distance for Distance motion (computed at exec time)
-        float timeout{0};                // milliseconds, 0 = no timeout
         uint32_t startTime{0};           // pros::millis() when motion began
-        MoveDistanceParams moveDistParams;
-        MoveToPointParams movePointParams;
-        TurntoHeadingParams turnHeadingParams;
-        TurnToPointParams turnPointParams;
-        ArcParams arcParams;
-        BoomerangParams boomerangParams;
         RAMSETEParams ramseteParams;
-        SwingParams swingParams;
         SwingSide swingSide{SwingSide::Left};
         std::vector<Pose> ramsetePath;
+        TrajectoryFollowParams trajParams;
+        chad::Trajectory trajectory;
     };
+
+    /// The subset of mConfig the exit test reads.
+    SettleConfig settleConfig() const;
 
     /// Enqueue a motion for the single motion task to execute. When async is
     /// false, blocks the caller until THIS motion completes (or is cancelled).
@@ -308,9 +334,7 @@ private:
     /// motors, PIDs, and mCurrentMotion are only ever touched by one thread.
     void enqueueMotion(MotionRequest& req, bool async);
 
-    // ========================================================================
     // Members
-    // ========================================================================
 
     Drivetrain& mDrivetrain;
     ChassisConfig mConfig;
@@ -335,6 +359,7 @@ private:
     std::atomic<bool> mTaskShouldStop{false};
     std::atomic<uint32_t> mMotionSeqCounter{0};  // last seq assigned at enqueue
     std::atomic<uint32_t> mCompletedSeq{0};      // last seq the task finished
+    std::atomic<MotionOutcome> mLastOutcome{MotionOutcome::None};
     MotionRequest mCurrentMotion;                // only touched by the motion task
     std::queue<MotionRequest> mMotionQueue;
     pros::Mutex mQueueMutex;
