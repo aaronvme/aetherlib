@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <vector>
@@ -21,6 +22,10 @@ struct StepMetrics {
     float overshootPct{0};
     float steadyState{0};
     float settleMs{0};
+    /// False when the error never entered the +-2% band, so settleMs is only the
+    /// length of the trace. Without it "settled at 1500 ms" and "never settled"
+    /// read the same.
+    bool settledInBand{false};
     int oscillations{0};
     float cost{0};
     bool valid{false};
@@ -28,9 +33,15 @@ struct StepMetrics {
 
 /// @param error  signed error over time, starting near +/-step and tending to 0
 /// @param step   magnitude of the commanded step
+/// @param band   error band the response must stay inside to count as settled,
+///               in the trace's own units. 0 uses 2% of the step, which on an
+///               8 in step is 0.16 in -- tighter than the drivetrain can hold,
+///               so every candidate tied at "never settled" and the settle
+///               weight stopped telling them apart.
 inline StepMetrics analyseStep(const std::vector<float>& t,
                                const std::vector<float>& error,
-                               float step, const StepWeights& w) {
+                               float step, const StepWeights& w,
+                               float band = 0.0f) {
     StepMetrics m;
     if (error.size() < 4 || t.size() != error.size() || step <= 0.0f) return m;
 
@@ -55,11 +66,13 @@ inline StepMetrics analyseStep(const std::vector<float>& t,
     }
 
     // Settle time is the last moment the error left the band.
-    const float tol = step * 0.02f;
+    const float tol = std::max(step * 0.02f, band);
     float settle = 0.0f;
+    bool settledInBand = true;
     for (std::size_t i = error.size(); i-- > 0;) {
         if (std::fabs(error[i]) > tol) {
             settle = (i + 1 < t.size()) ? t[i + 1] : t[i];
+            settledInBand = (i + 1 < t.size());
             break;
         }
     }
@@ -67,6 +80,7 @@ inline StepMetrics analyseStep(const std::vector<float>& t,
     m.overshootPct = (worstPast > 0.0f) ? (worstPast / step) * 100.0f : 0.0f;
     m.steadyState = std::fabs(error.back());
     m.settleMs = settle;
+    m.settledInBand = settledInBand;
     m.oscillations = oscillations;
     m.valid = true;
     m.cost = w.overshoot * m.overshootPct +

@@ -1,0 +1,256 @@
+#pragma once
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+
+namespace chad {
+
+/// Bounds how fast a signal may change, with separate limits for growing and
+/// shrinking magnitude. Asymmetry matters on a drivetrain: ramping a demand up
+/// gently protects traction, while cutting it off must stay immediate.
+class SlewRateLimiter {
+public:
+    SlewRateLimiter() = default;
+    SlewRateLimiter(float risePerSec, float fallPerSec, float initial = 0.0f)
+        : mRise(risePerSec), mFall(fallPerSec), mValue(initial) {}
+
+    explicit SlewRateLimiter(float ratePerSec) : SlewRateLimiter(ratePerSec, ratePerSec) {}
+
+    float calculate(float input, float dt) {
+        if (!std::isfinite(input) || !(dt > 0.0f)) return mValue;
+        const float delta = input - mValue;
+        const bool growing = std::fabs(input) >= std::fabs(mValue);
+        const float limit = (growing ? mRise : mFall) * dt;
+        if (limit <= 0.0f) return mValue = input;
+        mValue += std::clamp(delta, -limit, limit);
+        return mValue;
+    }
+
+    void reset(float value) { mValue = value; }
+    float value() const { return mValue; }
+
+    void setRates(float risePerSec, float fallPerSec) {
+        mRise = risePerSec;
+        mFall = fallPerSec;
+    }
+
+private:
+    float mRise{0.0f};   // <= 0 disables limiting
+    float mFall{0.0f};
+    float mValue{0.0f};
+};
+
+/// Fixed-window mean. O(1) per sample, no allocation.
+template <std::size_t N>
+class MovingAverage {
+    static_assert(N > 0, "window must be non-empty");
+
+public:
+    float calculate(float input) {
+        if (!std::isfinite(input)) return value();
+        if (mCount < N) {
+            mSum += input;
+            mBuf[mHead] = input;
+            mCount++;
+        } else {
+            mSum += input - mBuf[mHead];
+            mBuf[mHead] = input;
+        }
+        mHead = (mHead + 1) % N;
+        return value();
+    }
+
+    float value() const { return mCount == 0 ? 0.0f : mSum / static_cast<float>(mCount); }
+    bool full() const { return mCount >= N; }
+    std::size_t count() const { return mCount; }
+
+    void reset() {
+        mSum = 0.0f;
+        mHead = 0;
+        mCount = 0;
+        mBuf.fill(0.0f);
+    }
+
+private:
+    std::array<float, N> mBuf{};
+    float mSum{0.0f};
+    std::size_t mHead{0};
+    std::size_t mCount{0};
+};
+
+/// Fixed-window median. Rejects the single-sample spikes a distance sensor
+/// produces, which a mean only smears into the estimate.
+template <std::size_t N>
+class MedianFilter {
+    static_assert(N > 0, "window must be non-empty");
+
+public:
+    float calculate(float input) {
+        if (!std::isfinite(input)) return mLast;
+        mBuf[mHead] = input;
+        mHead = (mHead + 1) % N;
+        if (mCount < N) mCount++;
+
+        std::array<float, N> sorted = mBuf;
+        const auto begin = sorted.begin();
+        const auto end = begin + static_cast<std::ptrdiff_t>(mCount);
+        std::sort(begin, end);
+
+        const std::size_t mid = mCount / 2;
+        mLast = (mCount % 2 == 1) ? sorted[mid] : 0.5f * (sorted[mid - 1] + sorted[mid]);
+        return mLast;
+    }
+
+    float value() const { return mLast; }
+    bool full() const { return mCount >= N; }
+
+    void reset() {
+        mBuf.fill(0.0f);
+        mHead = 0;
+        mCount = 0;
+        mLast = 0.0f;
+    }
+
+private:
+    std::array<float, N> mBuf{};
+    std::size_t mHead{0};
+    std::size_t mCount{0};
+    float mLast{0.0f};
+};
+
+/// First-order low pass specified by time constant. Alpha is recomputed from the
+/// measured dt every sample: PROS task periods jitter, and a fixed alpha silently
+/// changes the cutoff whenever the loop slips.
+class LowPassFilter {
+public:
+    LowPassFilter() = default;
+    explicit LowPassFilter(float timeConstantSeconds) : mTau(timeConstantSeconds) {}
+
+    float calculate(float input, float dt) {
+        if (!std::isfinite(input)) return mValue;
+        if (!(dt > 0.0f) || mTau <= 0.0f) return mValue = input;
+        if (!mPrimed) {
+            mPrimed = true;
+            return mValue = input;
+        }
+        const float alpha = dt / (mTau + dt);
+        mValue += alpha * (input - mValue);
+        return mValue;
+    }
+
+    void setTimeConstant(float seconds) { mTau = seconds; }
+    float timeConstant() const { return mTau; }
+    float value() const { return mValue; }
+
+    void reset(float value = 0.0f) {
+        mValue = value;
+        mPrimed = false;
+    }
+
+private:
+    float mTau{0.0f};
+    float mValue{0.0f};
+    bool mPrimed{false};
+};
+
+/// Complement of LowPassFilter: passes change, rejects the steady level.
+class HighPassFilter {
+public:
+    HighPassFilter() = default;
+    explicit HighPassFilter(float timeConstantSeconds) : mLow(timeConstantSeconds) {}
+
+    float calculate(float input, float dt) {
+        return input - mLow.calculate(input, dt);
+    }
+
+    void setTimeConstant(float seconds) { mLow.setTimeConstant(seconds); }
+    void reset(float value = 0.0f) { mLow.reset(value); }
+
+private:
+    LowPassFilter mLow;
+};
+
+/// Backward difference with optional smoothing of the result.
+class Derivative {
+public:
+    Derivative() = default;
+    explicit Derivative(float timeConstantSeconds) : mSmooth(timeConstantSeconds) {}
+
+    float calculate(float input, float dt) {
+        if (!std::isfinite(input) || !(dt > 0.0f)) return mValue;
+        if (!mPrimed) {
+            mPrev = input;
+            mPrimed = true;
+            return mValue = 0.0f;
+        }
+        const float raw = (input - mPrev) / dt;
+        mPrev = input;
+        mValue = mSmooth.timeConstant() > 0.0f ? mSmooth.calculate(raw, dt) : raw;
+        return mValue;
+    }
+
+    float value() const { return mValue; }
+
+    void reset() {
+        mPrimed = false;
+        mValue = 0.0f;
+        mSmooth.reset();
+    }
+
+private:
+    LowPassFilter mSmooth;
+    float mPrev{0.0f};
+    float mValue{0.0f};
+    bool mPrimed{false};
+};
+
+/// Requires a boolean to hold its new state for `debounceSeconds` before
+/// reporting it. Stops a jam detector or a limit switch chattering.
+class Debouncer {
+public:
+    enum class Edge { Rising, Falling, Both };
+
+    Debouncer() = default;
+    explicit Debouncer(float debounceSeconds, Edge edge = Edge::Rising,
+                       bool initial = false)
+        : mDebounce(debounceSeconds), mEdge(edge), mState(initial) {}
+
+    bool calculate(bool input, float dt) {
+        if (input == mState) {
+            mElapsed = 0.0f;
+            return mState;
+        }
+        const bool watched = (mEdge == Edge::Both) ||
+                             (mEdge == Edge::Rising && input) ||
+                             (mEdge == Edge::Falling && !input);
+        if (!watched) {
+            mState = input;
+            mElapsed = 0.0f;
+            return mState;
+        }
+        if (dt > 0.0f) mElapsed += dt;
+        if (mElapsed >= mDebounce) {
+            mState = input;
+            mElapsed = 0.0f;
+        }
+        return mState;
+    }
+
+    bool value() const { return mState; }
+
+    void reset(bool state) {
+        mState = state;
+        mElapsed = 0.0f;
+    }
+
+private:
+    float mDebounce{0.0f};
+    Edge mEdge{Edge::Rising};
+    bool mState{false};
+    float mElapsed{0.0f};
+};
+
+}  // namespace chad

@@ -1,32 +1,36 @@
 // Ported from LemLib - https://github.com/LemLib/LemLib (MIT)
 #include "chad/util/exitcondition.hpp"
 
-#include <cmath>
-
 #include "pros/rtos.hpp"
 
 namespace chad {
 
-ExitCondition::ExitCondition(float range, int time) : mRange(range), mTime(time) {}
+namespace {
+SettleSpec specFor(float range, int time) {
+    SettleSpec spec;
+    spec.errorTolerance = range;
+    spec.holdMs = time > 0 ? static_cast<uint32_t>(time) : 0u;
+    spec.graceMs = 0;
+    return spec;
+}
+}  // namespace
 
-bool ExitCondition::getExit() const { return mDone; }
+ExitCondition::ExitCondition(float range, int time) : mMonitor(specFor(range, time)) {}
+
+bool ExitCondition::getExit() const { return mMonitor.done(); }
 
 bool ExitCondition::update(float input) {
-    const int now = pros::millis();
-    if (std::fabs(input) > mRange) {
-        mStartTime = -1;
-    } else if (mStartTime == -1) {
-        mStartTime = now;
-    } else if (now >= mStartTime + mTime) {
-        mDone = true;
+    const uint32_t now = pros::millis();
+    if (!mStarted) {
+        mMonitor.reset(now);
+        mStarted = true;
     }
-    return mDone;
+    return mMonitor.update(now, input, 0.0f) != SettleState::Running;
 }
 
 void ExitCondition::reset() {
-    mStartTime = -1;
-    mDone = false;
+    mMonitor.reset(pros::millis());
+    mStarted = true;
 }
 
 }  // namespace chad
-//dsfassadf

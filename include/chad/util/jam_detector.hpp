@@ -13,6 +13,7 @@
 
 #include "pros/motors.hpp"
 
+#include "chad/util/jam_state_machine.hpp"
 #include "chad/util/util.hpp"
 
 namespace chad {
@@ -25,6 +26,15 @@ struct JamDetectorConfig {
     uint32_t jamTriggerMs{150};       // continuous stall before unjamming
     uint32_t reverseDurationMs{250};  // how long to run in reverse
     uint32_t settleDurationMs{150};   // detection pause after a reversal
+
+    /// Suppresses detection for this long after a monitored motor's command
+    /// goes from stopped to moving, so the mechanism's own spin-up transient
+    /// (low efficiency before it reaches speed) is not read as a jam.
+    ///
+    /// EMPIRICAL default. A heavier mechanism can have a longer spin-up than
+    /// this; log get_efficiency() from a clean standing start before trusting
+    /// it, the same way jamEfficiencyLowPct/HighPct need checking below.
+    uint32_t graceMs{150};
 
     /// Above this, motors are held at zero and detection is skipped.
     float maxTempC{55.0f};
@@ -56,7 +66,7 @@ public:
     using Config = JamDetectorConfig;
 
     /// Normal — watching; Reversing — clearing a jam; Settling — detection paused
-    enum class State { Normal, Reversing, Settling };
+    using State = JamState;
 
     explicit JamDetector(const Config& config = {});
     JamDetector(const std::vector<pros::Motor*>& motors, const Config& config = {});
@@ -116,6 +126,9 @@ private:
     void applyCommands();
     void applyReverseCommands();
     bool detectJam() const;
+    /// True if any monitored motor's latched command is above the "running"
+    /// threshold. Used to notice a stopped -> moving edge for the grace timer.
+    bool anyMonitoredActive() const;
 
     /// Returns true if the thermal cutoff is active this tick.
     bool serviceThermalCutoff();
@@ -124,9 +137,10 @@ private:
     Config mConfig;
     std::function<void(const JamSample&)> mTelemetry;
 
+    // mJsm is only ever touched from the task calling update() -- not atomic.
+    // mState mirrors it for the cross-task getters below.
+    JamStateMachine mJsm;
     std::atomic<State> mState{State::Normal};
-    std::atomic<uint32_t> mStateStartMs{0};
-    std::atomic<uint32_t> mJamStartMs{0};   // 0 = not stalling
     std::atomic<bool> mEnabled{true};
     std::atomic<bool> mOverTemp{false};
     std::atomic<uint32_t> mJamCount{0};
