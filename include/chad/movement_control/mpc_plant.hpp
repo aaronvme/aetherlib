@@ -5,10 +5,12 @@
 
 #pragma once
 
+#include "chad/movement_control/drivetrain_plant.hpp"
+
 namespace chad {
 
-// Pose-error plant in the condensed form MPC needs. drivetrain_plant.hpp holds
-// the same discretisation for the plain LQR; this one keeps A^k and A^j B as
+// Pose-error plant in the condensed form MPC needs. The discretisation itself
+// lives in drivetrain_plant.hpp and is called from here; this one keeps A^k and A^j B as
 // methods, because condensing the QP asks for those powers directly and they
 // are closed form here -- A is nilpotent, so A^k differs from A only in the
 // cross-track term scaling by k.
@@ -31,14 +33,9 @@ struct DrivetrainPlant {
         p.vRef = v;
         p.dt = dt;
 
-        p.Ad[0][0] = 1.0f; p.Ad[0][1] = 0.0f; p.Ad[0][2] = 0.0f;
-        p.Ad[1][0] = 0.0f; p.Ad[1][1] = 1.0f; p.Ad[1][2] = v * dt;
-        p.Ad[2][0] = 0.0f; p.Ad[2][1] = 0.0f; p.Ad[2][2] = 1.0f;
-
-        p.Bd[0][0] = dt;   p.Bd[0][1] = 0.0f;
-        p.Bd[1][0] = 0.0f; p.Bd[1][1] = 0.5f * v * dt * dt;
-        p.Bd[2][0] = 0.0f; p.Bd[2][1] = dt;
-
+        // One owner for the closed form; [3][3] and [9] are the same row-major
+        // bytes, so this is the identical discretisation, not a second copy.
+        DrivetrainErrorPlant::discretise(v, dt, &p.Ad[0][0], &p.Bd[0][0]);
         return p;
     }
 

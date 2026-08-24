@@ -1,5 +1,7 @@
 #include "chad/movement_control/lqr.hpp"
 
+#include "chad/movement_control/riccati.hpp"
+
 #include <algorithm>
 #include <cmath>
 
@@ -103,20 +105,19 @@ LqrGain solveLqr(float v, float dt, const LqrWeights& w, int maxIters, float tol
     float Q[N], R[M];
     costs(w, Q, R);
 
-    float P[N * N] = {Q[0], 0, 0, 0, Q[1], 0, 0, 0, Q[2]};
+    // Doubling, not value iteration: it squares the error each step, so this
+    // converges in under ten where the sweep took hundreds. maxIters is still
+    // honoured as a cap, but a caller passing 600 is no longer paying for it.
+    const float Qm[N][N] = {{Q[0], 0.0f, 0.0f}, {0.0f, Q[1], 0.0f}, {0.0f, 0.0f, Q[2]}};
+    const float Rm[M][M] = {{R[0], 0.0f}, {0.0f, R[1]}};
+    const DareSolution<N, M> sol = solveDare<N, M>(
+        reinterpret_cast<const float (*)[N]>(A), reinterpret_cast<const float (*)[M]>(B),
+        Qm, Rm, maxIters, tol);
+
     LqrGain out;
-
-    for (int iter = 0; iter < maxIters; iter++) {
-        float prev[N * N], K[M * N];
-        for (int i = 0; i < N * N; i++) prev[i] = P[i];
-        if (!riccatiStep(A, B, Q, R, P, K)) break;
-
-        float delta = 0.0f;
-        for (int i = 0; i < N * N; i++) delta = std::max(delta, std::fabs(P[i] - prev[i]));
-        for (int i = 0; i < M * N; i++) out.k[i] = K[i];
-        if (delta < tol) break;
-    }
-    if (pOut != nullptr) for (int i = 0; i < N * N; i++) pOut[i] = P[i];
+    for (int i = 0; i < M * N; i++) out.k[i] = sol.K[i / N][i % N];
+    if (pOut != nullptr)
+        for (int i = 0; i < N * N; i++) pOut[i] = sol.P[i / N][i % N];
     return out;
 }
 

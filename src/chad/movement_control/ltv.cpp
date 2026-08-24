@@ -265,8 +265,16 @@ void LTVPathFollower::followPathImpl(const std::string& path_name, const ltvConf
         auto discAB = discretizeAB(A, B, measured_dt);
         Eigen::MatrixXf X = dareSolver(discAB.first, discAB.second, Q_mat, R_mat);
 
-        cached_K = (R_mat + discAB.second.transpose() * X * discAB.second).inverse() *
-                   discAB.second.transpose() * X * discAB.first;
+        // S = R + B'XB is symmetric positive definite whenever R is, so an LDLT
+        // solve is cheaper and better conditioned than forming S^-1. The check
+        // matters: an unguarded inverse sends inf gains straight to
+        // move_voltage the first time S loses rank.
+        const Eigen::MatrixXf S =
+            R_mat + discAB.second.transpose() * X * discAB.second;
+        const Eigen::LDLT<Eigen::MatrixXf> sLdlt(S);
+        if (sLdlt.info() == Eigen::Success && sLdlt.isPositive()) {
+            cached_K = sLdlt.solve(discAB.second.transpose() * X * discAB.first);
+        }
 
         Eigen::Vector2f u = cached_K * error.cast<float>();
 
@@ -368,7 +376,14 @@ Eigen::MatrixXf LTVPathFollower::dareSolver(const Eigen::MatrixXf& A, const Eige
         G_k += A_k * V_2 * A_k.transpose();
         H_k1 = H_k + V_1.transpose() * H_k * A_k;
         A_k *= V_1;
-        if ((H_k1 - H_k).norm() <= 1e-10f * H_k1.norm()) {
+        // Both iterates are symmetric in exact arithmetic and drift in float:
+        // W = I + G*H is a product of two symmetric matrices and is not itself
+        // symmetric, so the drift compounds without this.
+        G_k = (0.5f * (G_k + G_k.transpose())).eval();
+        H_k1 = (0.5f * (H_k1 + H_k1.transpose())).eval();
+        // 1e-10 relative is ~1000x below float32 epsilon, so the old test never
+        // fired and this ran its whole budget on every tick.
+        if ((H_k1 - H_k).norm() <= 1e-6f * H_k1.norm()) {
             break;
         }
     }
@@ -378,7 +393,6 @@ Eigen::MatrixXf LTVPathFollower::dareSolver(const Eigen::MatrixXf& A, const Eige
 
 std::pair<Eigen::MatrixXf, Eigen::MatrixXf> LTVPathFollower::discretizeAB(
     const Eigen::MatrixXf& contA, const Eigen::MatrixXf& contB, double dtSeconds) {
-    dtSeconds = 0.01;
     int states = contA.rows();
     int inputs = contB.cols();
     Eigen::MatrixXf M(states + inputs, states + inputs);

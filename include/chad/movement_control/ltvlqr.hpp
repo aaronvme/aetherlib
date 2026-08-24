@@ -18,6 +18,7 @@ struct LtvLqrParams {
     float maxSpeed{127.0f};
     float minSpeed{12.0f};
     float maxAccel{50.0f};
+    // Tracking authority, not grip -- see RAMSETEParams::maxLateralAccel.
     float maxLateralAccel{60.0f};
     float targetTolerance{1.0f};
     float headingTolerance{4.0f};

@@ -5,6 +5,8 @@
 
 #include "chad/movement_control/mpc_lqr.hpp"
 
+#include "chad/movement_control/riccati.hpp"
+
 #include <cmath>
 
 #include "chad/util/util.hpp"
@@ -15,130 +17,24 @@ namespace {
 constexpr int NS = DrivetrainPlant::N_STATES;
 constexpr int NI = DrivetrainPlant::N_INPUTS;
 
-/// out = A^T * P * A  (3x3)
-void atpa(const float A[NS][NS], const float P[NS][NS], float out[NS][NS]) {
-    float t[NS][NS];
-    for (int i = 0; i < NS; i++)
-        for (int j = 0; j < NS; j++) {
-            float s = 0.0f;
-            for (int k = 0; k < NS; k++) s += P[i][k] * A[k][j];
-            t[i][j] = s;
-        }
-    for (int i = 0; i < NS; i++)
-        for (int j = 0; j < NS; j++) {
-            float s = 0.0f;
-            for (int k = 0; k < NS; k++) s += A[k][i] * t[k][j];
-            out[i][j] = s;
-        }
-}
-
-/// out = B^T * P * A  (2x3)
-void btpa(const float B[NS][NI], const float P[NS][NS], const float A[NS][NS],
-          float out[NI][NS]) {
-    float t[NI][NS];
-    for (int i = 0; i < NI; i++)
-        for (int j = 0; j < NS; j++) {
-            float s = 0.0f;
-            for (int k = 0; k < NS; k++) s += B[k][i] * P[k][j];
-            t[i][j] = s;
-        }
-    for (int i = 0; i < NI; i++)
-        for (int j = 0; j < NS; j++) {
-            float s = 0.0f;
-            for (int k = 0; k < NS; k++) s += t[i][k] * A[k][j];
-            out[i][j] = s;
-        }
-}
-
-/// out = R + B^T * P * B  (2x2)
-void rbtpb(const float R[NI][NI], const float B[NS][NI], const float P[NS][NS],
-           float out[NI][NI]) {
-    float t[NI][NS];
-    for (int i = 0; i < NI; i++)
-        for (int j = 0; j < NS; j++) {
-            float s = 0.0f;
-            for (int k = 0; k < NS; k++) s += B[k][i] * P[k][j];
-            t[i][j] = s;
-        }
-    for (int i = 0; i < NI; i++)
-        for (int j = 0; j < NI; j++) {
-            float s = 0.0f;
-            for (int k = 0; k < NS; k++) s += t[i][k] * B[k][j];
-            out[i][j] = R[i][j] + s;
-        }
-}
-
-/// Closed-form 2x2 inverse. Falls back to a diagonal pseudo-inverse if the
-/// determinant collapses, which happens when v_ref == 0 leaves the angular
-/// channel uncoupled from the position states.
-void inv2(const float M[NI][NI], float out[NI][NI]) {
-    const float det = M[0][0] * M[1][1] - M[0][1] * M[1][0];
-    if (std::fabs(det) < 1e-12f) {
-        out[0][0] = (std::fabs(M[0][0]) > 1e-12f) ? 1.0f / M[0][0] : 0.0f;
-        out[1][1] = (std::fabs(M[1][1]) > 1e-12f) ? 1.0f / M[1][1] : 0.0f;
-        out[0][1] = out[1][0] = 0.0f;
-        return;
-    }
-    const float inv = 1.0f / det;
-    out[0][0] =  M[1][1] * inv;
-    out[0][1] = -M[0][1] * inv;
-    out[1][0] = -M[1][0] * inv;
-    out[1][1] =  M[0][0] * inv;
-}
-
 }  // namespace
 
 LqrSolution solveDiscreteLqr(const DrivetrainPlant& plant, const MpcWeights& w,
                              int maxIterations, float tol) {
-    LqrSolution out;
-
     const float Q[NS][NS] = {{w.qx, 0.0f, 0.0f}, {0.0f, w.qy, 0.0f}, {0.0f, 0.0f, w.qTheta}};
     const float R[NI][NI] = {{w.rv, 0.0f}, {0.0f, w.rw}};
 
-    float P[NS][NS];
+    const DareSolution<NS, NI> sol =
+        solveDare<NS, NI>(plant.Ad, plant.Bd, Q, R, maxIterations, tol);
+
+    LqrSolution out;
+    for (int i = 0; i < NI; i++)
+        for (int j = 0; j < NS; j++) out.K[i][j] = sol.K[i][j];
     for (int i = 0; i < NS; i++)
-        for (int j = 0; j < NS; j++) P[i][j] = Q[i][j];
-
-    float M[NI][NI], Minv[NI][NI], BPA[NI][NS], APA[NS][NS], Pn[NS][NS];
-
-    for (int it = 0; it < maxIterations; it++) {
-        rbtpb(R, plant.Bd, P, M);
-        inv2(M, Minv);
-        btpa(plant.Bd, P, plant.Ad, BPA);
-        atpa(plant.Ad, P, APA);
-
-        // K = M^-1 * B^T P A
-        for (int i = 0; i < NI; i++)
-            for (int j = 0; j < NS; j++) {
-                float s = 0.0f;
-                for (int k = 0; k < NI; k++) s += Minv[i][k] * BPA[k][j];
-                out.K[i][j] = s;
-            }
-
-        // P+ = Q + A^T P A - (B^T P A)^T K
-        float delta = 0.0f, mag = 0.0f;
-        for (int i = 0; i < NS; i++)
-            for (int j = 0; j < NS; j++) {
-                float s = 0.0f;
-                for (int k = 0; k < NI; k++) s += BPA[k][i] * out.K[k][j];
-                Pn[i][j] = Q[i][j] + APA[i][j] - s;
-                delta += std::fabs(Pn[i][j] - P[i][j]);
-                mag += std::fabs(Pn[i][j]);
-            }
-
-        for (int i = 0; i < NS; i++)
-            for (int j = 0; j < NS; j++) P[i][j] = 0.5f * (Pn[i][j] + Pn[j][i]);
-
-        out.iterations = it + 1;
-        if (delta <= tol * (mag + 1e-9f)) {
-            out.converged = true;
-            break;
-        }
-    }
-
-    for (int i = 0; i < NS; i++)
-        for (int j = 0; j < NS; j++) out.P[i][j] = P[i][j];
-
+        for (int j = 0; j < NS; j++) out.P[i][j] = sol.P[i][j];
+    out.iterations = sol.iterations;
+    out.converged = sol.converged;
+    out.residual = sol.residual;
     return out;
 }
 
@@ -154,6 +50,16 @@ void ScheduledLqr::build(const MpcWeights& w, float vMax, float dt, int points) 
         const float v = mVMax * static_cast<float>(i) / static_cast<float>(mCount - 1);
         mSpeeds[i] = v;
         mSolutions[i] = solveDiscreteLqr(DrivetrainPlant::discretize(v, dt), w);
+    }
+
+    // Lowest speed with a stabilising solution. The scan stops at the first
+    // converged point rather than taking the last non-converged one, because
+    // convergence is monotone in speed here and a gap would mean something else
+    // is wrong. mCount - 1 is the floor: if nothing converged, keep one point
+    // rather than an empty schedule, so a lookup still returns a defined gain.
+    mFirst = mCount - 1;
+    for (int i = 0; i < mCount; i++) {
+        if (mSolutions[i].converged) { mFirst = i; break; }
     }
 }
 
@@ -175,7 +81,9 @@ void locate(const float* speeds, int count, float v, int& i0, int& i1, float& f)
 bool ScheduledLqr::gainAt(float v, float K[2][3]) const {
     if (mCount == 0) return false;
     int i0, i1; float f;
-    locate(mSpeeds, mCount, v, i0, i1, f);
+    locate(mSpeeds + mFirst, mCount - mFirst, v, i0, i1, f);
+    i0 += mFirst;
+    i1 += mFirst;
     for (int i = 0; i < NI; i++)
         for (int j = 0; j < NS; j++)
             K[i][j] = mSolutions[i0].K[i][j] +
@@ -186,7 +94,9 @@ bool ScheduledLqr::gainAt(float v, float K[2][3]) const {
 bool ScheduledLqr::costToGoAt(float v, float P[3][3]) const {
     if (mCount == 0) return false;
     int i0, i1; float f;
-    locate(mSpeeds, mCount, v, i0, i1, f);
+    locate(mSpeeds + mFirst, mCount - mFirst, v, i0, i1, f);
+    i0 += mFirst;
+    i1 += mFirst;
     for (int i = 0; i < NS; i++)
         for (int j = 0; j < NS; j++)
             P[i][j] = mSolutions[i0].P[i][j] +

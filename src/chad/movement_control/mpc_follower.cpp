@@ -7,6 +7,7 @@
 
 #include <cmath>
 
+#include "chad/movement_control/riccati.hpp"
 #include "chad/util/util.hpp"
 
 namespace chad {
@@ -14,18 +15,42 @@ namespace chad {
 MpcPathFollower::MpcPathFollower(Chassis& chassis, Drivetrain& drivetrain)
     : mChassis(chassis), mDrivetrain(drivetrain) {}
 
+MpcPathFollower::~MpcPathFollower() {
+    cancel();
+    while (mRunning.load()) pros::delay(5);
+    reclaimTask();
+}
+
+/// Only the wrapper is ours. run() returns when the trajectory ends, and the
+/// FreeRTOS port sets a task's return address to task_clean_up, which is
+/// task_delete(NULL) -- so the task has already deleted itself by the time we
+/// get here and remove() would be a use-after-free on a freed TCB. Call only
+/// after joining on mRunning.
+void MpcPathFollower::reclaimTask() {
+    delete mTask;
+    mTask = nullptr;
+}
+
 void MpcPathFollower::follow(const std::vector<TrajectorySample>& traj, const Config& cfg) {
     if (mRunning.load()) {
         cancel();
         while (mRunning.load()) pros::delay(5);
     }
+    reclaimTask();
 
     mConfig = cfg;
     mTraj = traj;              // one copy, before the loop starts
     mStats = Stats{};
     mBucket = -1;
+    mHaveLast = false;
+    mLastCommand[0] = mLastCommand[1] = 0.0f;
+    mLastInput[0] = mLastInput[1] = 0.0f;
     mCancel = false;
     mRunning = true;
+
+    if (!(mConfig.wheelSpeedLimit > 1e-6f)) {
+        mConfig.wheelSpeedLimit = mDrivetrain.maxWheelSpeedInPerSec() * INCH_TO_METER;
+    }
 
     const double t0 = (mConfig.microsClock != nullptr) ? mConfig.microsClock() : 0.0;
     mSchedule.build(mConfig.weights, mConfig.wheelSpeedLimit, mConfig.dt, 9);
@@ -36,7 +61,10 @@ void MpcPathFollower::follow(const std::vector<TrajectorySample>& traj, const Co
     mRti.bind(&mMpc);
     mRti.config.iterationsPerTick = mConfig.rtiIters;
     mRti.config.tol = 0.0f;      // spend the budget; that is the point of RTI
-    mRti.config.shiftWarmStart = true;
+    mRti.config.shiftWarmStart = mConfig.shiftWarmStart;
+    mRti.config.certifyOptimality = mConfig.certifyOptimality;
+    mRti.config.trackPreviousInput = false;   // feedRateLimit owns the anchor
+    mMpc.certifyOptimality = mConfig.certifyOptimality;
 
     mTask = new pros::Task(trampoline, this, "MpcFollower");
     pros::delay(10);
@@ -57,11 +85,64 @@ void MpcPathFollower::rebuildFor(float vRef) {
     mBucket = b;
 
     const float vBucket = span * (static_cast<float>(b) + 0.5f) / static_cast<float>(buckets);
+    const DrivetrainPlant plant = DrivetrainPlant::discretize(vBucket, mConfig.dt);
+    condense(&plant, 1, vBucket);
+}
+
+void MpcPathFollower::rebuildForHorizon(int i) {
+    const int n = static_cast<int>(mTraj.size());
+    if (n == 0) return;
+
+    const int horizon = clamp(mConfig.horizon, 1, MPC_MAX_HORIZON);
+    const float span = (mConfig.wheelSpeedLimit > 1e-6f) ? mConfig.wheelSpeedLimit : 1.0f;
+    const int buckets = clamp(mConfig.speedBuckets, 1, 64);
+
+    auto speedAt = [&](int k) {
+        const int idx = clamp(i + k, 0, n - 1);
+        return std::fabs(mTraj[idx].v);
+    };
+    auto bucketOf = [&](float v) {
+        int b = static_cast<int>(v / span * static_cast<float>(buckets));
+        return clamp(b, 0, buckets - 1);
+    };
+
+    // Keyed on both ends of the horizon: one speed cannot distinguish cruising
+    // from braking, and braking is the case this exists for.
+    const int key = bucketOf(speedAt(0)) * 64 + bucketOf(speedAt(horizon - 1));
+    if (key == mBucket) return;
+    mBucket = key;
+
+    DrivetrainPlant stages[MPC_MAX_HORIZON];
+    for (int k = 0; k < horizon; k++) {
+        stages[k] = DrivetrainPlant::discretize(speedAt(k), mConfig.dt);
+    }
+    condense(stages, horizon, speedAt(horizon - 1));
+}
+
+/// Terminal cost from the DARE at the speed the horizon ends at. Gated on the
+/// solve actually converging, because cross-track is uncontrollable at zero
+/// reference speed with A[1][1] = 1: there is no stabilising solution there, and
+/// a value iteration run against it just accumulates qy into P[1][1] until its
+/// budget runs out. Weighting the terminal state by Q is the honest fallback.
+bool MpcPathFollower::terminalCost(float speed, float P[3][3]) const {
+    const MpcWeights& w = mConfig.weights;
+    const float Q[3][3] = {{w.qx, 0.0f, 0.0f}, {0.0f, w.qy, 0.0f}, {0.0f, 0.0f, w.qTheta}};
+    const float R[2][2] = {{w.rv, 0.0f}, {0.0f, w.rw}};
+    const DrivetrainPlant p = DrivetrainPlant::discretize(std::fabs(speed), mConfig.dt);
+    const DareSolution<3, 2> s = solveDare<3, 2>(p.Ad, p.Bd, Q, R);
+    if (!s.converged) return false;
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 3; j++) P[i][j] = s.P[i][j];
+    return true;
+}
+
+void MpcPathFollower::condense(const DrivetrainPlant* stages, int count,
+                               float terminalSpeed) {
     float P[3][3];
-    const bool haveP = mSchedule.costToGoAt(vBucket, P);
+    const bool haveP = terminalCost(terminalSpeed, P);
     mMpc.solver = mConfig.solver;
 
-    const DrivetrainPlant plant = DrivetrainPlant::discretize(vBucket, mConfig.dt);
+    const bool varying = count > 1;
     if (mConfig.wheelSpaceInputs) {
         const float bM = mDrivetrain.trackWidth * INCH_TO_METER;
         // R' = T' R T, so the cost is byte-for-byte the same objective as the
@@ -71,12 +152,122 @@ void MpcPathFollower::rebuildFor(float vRef) {
         const float d = 0.25f * mConfig.weights.rv + invB * invB * mConfig.weights.rw;
         const float o = 0.25f * mConfig.weights.rv - invB * invB * mConfig.weights.rw;
         const float R2[2][2] = {{d, o}, {o, d}};
-        mMpc.setup(plant.withWheelInputs(bM), mConfig.weights, mConfig.horizon,
-                   haveP ? P : nullptr, R2);
+
+        if (varying) {
+            DrivetrainPlant wheelStages[MPC_MAX_HORIZON];
+            for (int k = 0; k < count; k++) wheelStages[k] = stages[k].withWheelInputs(bM);
+            mMpc.setupVarying(wheelStages, count, mConfig.weights, haveP ? P : nullptr, R2);
+        } else {
+            mMpc.setup(stages[0].withWheelInputs(bM), mConfig.weights, mConfig.horizon,
+                       haveP ? P : nullptr, R2);
+        }
+    } else if (varying) {
+        mMpc.setupVarying(stages, count, mConfig.weights, haveP ? P : nullptr);
     } else {
-        mMpc.setup(plant, mConfig.weights, mConfig.horizon, haveP ? P : nullptr);
+        mMpc.setup(stages[0], mConfig.weights, mConfig.horizon, haveP ? P : nullptr);
     }
+    mMpc.admm.rho = mConfig.admmRho;
+    mMpc.admm.rhoScale = mConfig.admmRhoScale;
+    mMpc.admm.rhoStateWeight = mConfig.admmRhoStateWeight;
+    mMpc.admm.checkEvery = mConfig.admmCheckEvery;
+    applyConstraints();
     mStats.rebuilds++;
+}
+
+/// Per-tick DARE by structure-preserving doubling. This mode exists to price
+/// solving the Riccati equation on the robot instead of interpolating a table,
+/// so it has to use the solver you would actually ship -- value iteration needs
+/// hundreds of sweeps for the same answer and prices the wrong thing.
+DareSolution<3, 2> MpcPathFollower::riccatiGain(float speed, float K[2][3]) const {
+    const MpcWeights& w = mConfig.weights;
+    const float Q[3][3] = {{w.qx, 0.0f, 0.0f}, {0.0f, w.qy, 0.0f}, {0.0f, 0.0f, w.qTheta}};
+    const float R[2][2] = {{w.rv, 0.0f}, {0.0f, w.rw}};
+    const DrivetrainPlant p = DrivetrainPlant::discretize(speed, mConfig.dt);
+    const DareSolution<3, 2> s = solveDare<3, 2>(p.Ad, p.Bd, Q, R);
+    for (int i = 0; i < 2; i++)
+        for (int j = 0; j < 3; j++) K[i][j] = s.K[i][j];
+    return s;
+}
+
+void MpcPathFollower::applyConstraints() {
+    mMpc.clearConstraints();
+    if (mConfig.inputRateLimit[0] > 0.0f || mConfig.inputRateLimit[1] > 0.0f) {
+        mMpc.setInputRateLimit(mConfig.inputRateLimit);
+    }
+    // The return value matters: a spec is refused when its rows will not fit,
+    // and a corridor the caller believes it configured is worth reporting.
+    // Which spec index each corridor landed on, so its violation can be read
+    // back in the unit it was asked for. Not assumed: heading is spec 0 when
+    // cross-track is off.
+    mCrossSpec = -1;
+    mHeadSpec = -1;
+    if (mConfig.crossTrackCorridor > 0.0f) {
+        const float a[3] = {0.0f, 1.0f, 0.0f};
+        const int idx = mMpc.stateConstraints();
+        if (mMpc.addStateConstraint(a, -mConfig.crossTrackCorridor,
+                                    mConfig.crossTrackCorridor)) {
+            mCrossSpec = idx;
+        } else {
+            mStats.constraintsRejected = true;
+        }
+    }
+    if (mConfig.headingCorridor > 0.0f) {
+        const float a[3] = {0.0f, 0.0f, 1.0f};
+        const int idx = mMpc.stateConstraints();
+        if (mMpc.addStateConstraint(a, -mConfig.headingCorridor,
+                                    mConfig.headingCorridor)) {
+            mHeadSpec = idx;
+        } else {
+            mStats.constraintsRejected = true;
+        }
+    }
+}
+
+void MpcPathFollower::feedRateLimit(int i, float vRef, float wRef) {
+    if (!(mConfig.inputRateLimit[0] > 0.0f || mConfig.inputRateLimit[1] > 0.0f)) return;
+
+    const int horizon = clamp(mConfig.horizon, 1, MPC_MAX_HORIZON);
+    const float halfTrack = 0.5f * mDrivetrain.trackWidth * INCH_TO_METER;
+    float anchor[2] = {0.0f, 0.0f};
+    float delta[MPC_MAX_VARS]{};
+
+    if (!mConfig.rateLimitTotalCommand) {
+        // The reference is assumed smooth, so only the correction is bounded
+        // and the per-stage reference steps are irrelevant.
+        if (mHaveLast) { anchor[0] = mLastInput[0]; anchor[1] = mLastInput[1]; }
+        mMpc.setPreviousInput(anchor);
+        mMpc.setReferenceDeltas(nullptr, 0);
+        return;
+    }
+
+    if (mHaveLast) {
+        anchor[0] = mLastCommand[0] - vRef;
+        anchor[1] = mLastCommand[1] - wRef;
+    }
+    const int n = static_cast<int>(mTraj.size());
+    if (i >= 0 && n > 0) {
+        for (int k = 1; k < horizon; k++) {
+            const TrajectorySample& a = mTraj[clamp(i + k - 1, 0, n - 1)];
+            const TrajectorySample& b = mTraj[clamp(i + k, 0, n - 1)];
+            delta[2 * k + 0] = b.v - a.v;
+            delta[2 * k + 1] = b.w - a.w;
+        }
+    }
+
+    if (mConfig.wheelSpaceInputs) {
+        const float aL = anchor[0] - anchor[1] * halfTrack;
+        const float aR = anchor[0] + anchor[1] * halfTrack;
+        anchor[0] = aL;
+        anchor[1] = aR;
+        for (int k = 1; k < horizon; k++) {
+            const float dv = delta[2 * k + 0], dw = delta[2 * k + 1];
+            delta[2 * k + 0] = dv - dw * halfTrack;
+            delta[2 * k + 1] = dv + dw * halfTrack;
+        }
+    }
+
+    mMpc.setPreviousInput(anchor);
+    mMpc.setReferenceDeltas(delta, 2 * horizon);
 }
 
 void MpcPathFollower::inputBox(float vRef, float wRef, float uMin[2], float uMax[2]) const {
@@ -149,11 +340,10 @@ void MpcPathFollower::controlOnce(const float x0[3], float vRef, float wRef, flo
             break;
 
         case Mode::RiccatiPerTick: {
-            const LqrSolution s =
-                solveDiscreteLqr(DrivetrainPlant::discretize(std::fabs(vRef), mConfig.dt),
-                                 mConfig.weights);
+            float K[2][3];
+            riccatiGain(std::fabs(vRef), K);
             for (int i = 0; i < 2; i++) {
-                u[i] = -(s.K[i][0] * x0[0] + s.K[i][1] * x0[1] + s.K[i][2] * x0[2]);
+                u[i] = -(K[i][0] * x0[0] + K[i][1] * x0[1] + K[i][2] * x0[2]);
             }
             break;
         }
@@ -161,6 +351,7 @@ void MpcPathFollower::controlOnce(const float x0[3], float vRef, float wRef, flo
         case Mode::MpcConverged:
             rebuildFor(vRef);
             mMpc.zero();
+            feedRateLimit(-1, vRef, wRef);
             mMpc.solve(x0, uMin, uMax, mConfig.maxIters, mConfig.tol);
             mMpc.firstMove(u);
             toTwist(u);
@@ -168,6 +359,7 @@ void MpcPathFollower::controlOnce(const float x0[3], float vRef, float wRef, flo
 
         case Mode::MpcRti:
             rebuildFor(vRef);
+            feedRateLimit(-1, vRef, wRef);
             mRti.step(x0, uMin, uMax, u);
             toTwist(u);
             break;
@@ -228,25 +420,33 @@ void MpcPathFollower::run() {
                 mSchedule.control(std::fabs(ref.v), x0, u);
                 break;
             case Mode::RiccatiPerTick: {
-                const LqrSolution sol = solveDiscreteLqr(
-                    DrivetrainPlant::discretize(std::fabs(ref.v), mConfig.dt), mConfig.weights);
+                float K[2][3];
+                const DareSolution<3, 2> sol = riccatiGain(std::fabs(ref.v), K);
                 for (int k = 0; k < 2; k++) {
-                    u[k] = -(sol.K[k][0] * x0[0] + sol.K[k][1] * x0[1] + sol.K[k][2] * x0[2]);
+                    u[k] = -(K[k][0] * x0[0] + K[k][1] * x0[1] + K[k][2] * x0[2]);
                 }
                 r.iterations = sol.iterations;
                 r.converged = sol.converged;
                 break;
             }
             case Mode::MpcConverged:
-                rebuildFor(std::fabs(ref.v));
+                if (mConfig.timeVaryingHorizon) rebuildForHorizon(i);
+                else rebuildFor(std::fabs(ref.v));
                 mMpc.zero();
+                feedRateLimit(i, ref.v, ref.w);
                 r = mMpc.solve(x0, uMin, uMax, mConfig.maxIters, mConfig.tol);
                 mMpc.firstMove(u);
+                mLastInput[0] = u[0];
+                mLastInput[1] = u[1];
                 toTwist(u);
                 break;
             case Mode::MpcRti:
-                rebuildFor(std::fabs(ref.v));
+                if (mConfig.timeVaryingHorizon) rebuildForHorizon(i);
+                else rebuildFor(std::fabs(ref.v));
+                feedRateLimit(i, ref.v, ref.w);
                 r = mRti.step(x0, uMin, uMax, u);
+                mLastInput[0] = u[0];
+                mLastInput[1] = u[1];
                 toTwist(u);
                 break;
         }
@@ -262,9 +462,35 @@ void MpcPathFollower::run() {
         if (r.iterations > mStats.maxIterations) mStats.maxIterations = r.iterations;
         if (r.converged) mStats.convergedTicks++;
         if (r.activeBounds > 0) mStats.activeBoundTicks++;
+        if (r.usedAdmm) mStats.admmTicks++;
+        if (r.factorizationFailed) mStats.factorizationFailures++;
+        if (r.relaxedRows > 0) mStats.relaxedRowTicks++;
+        if (r.primalInfeasible) mStats.infeasibleTicks++;
+        if (r.droppedRows > 0) mStats.droppedRowTicks++;
+        if (r.constraintRows > mStats.constraintRows) mStats.constraintRows = r.constraintRows;
+        // A negative residual means NOT MEASURED. Folding it into a worst-case
+        // maximum would report a run that checked nothing as a perfect solve.
+        if (r.primalResidual >= 0.0f && r.primalResidual > mStats.worstPrimalResidual) {
+            mStats.worstPrimalResidual = r.primalResidual;
+        }
+        // Per corridor, in the unit that corridor was configured in.
+        if (mCrossSpec >= 0 && r.stateViolation[mCrossSpec] >
+                                   mStats.worstCrossTrackViolation) {
+            mStats.worstCrossTrackViolation = r.stateViolation[mCrossSpec];
+        }
+        if (mHeadSpec >= 0 && r.stateViolation[mHeadSpec] >
+                                  mStats.worstHeadingViolation) {
+            mStats.worstHeadingViolation = r.stateViolation[mHeadSpec];
+        }
+        if (r.dualResidual >= 0.0f && r.dualResidual > mStats.worstDualResidual) {
+            mStats.worstDualResidual = r.dualResidual;
+        }
 
         const float vCmd = ref.v + u[0];
         const float wCmd = ref.w + u[1];
+        mLastCommand[0] = vCmd;
+        mLastCommand[1] = wCmd;
+        mHaveLast = true;
 
         // What the twist asks of each wheel, before the voltage stage clips it.
         const float leftDemand = vCmd - wCmd * halfTrack;
