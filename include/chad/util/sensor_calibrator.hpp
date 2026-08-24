@@ -47,7 +47,10 @@ class Chassis;
 // Ordinary least squares gives slope and intercept; the NEGATED SLOPE is the
 // lateral mounting offset:
 //
-//     offsetIn == b == RclSensor::mountOffset.y   (left positive, inches)
+//     offsetIn == b == the offset ACROSS the beam, left of it positive,
+//     which is -mountOffset.x*sin(theta) + mountOffset.y*cos(theta) and so
+//     equals mountOffset.y only for a forward-pointing sensor. Write it
+//     back with tuning::applyMountOffset, never straight to .y.
 //
 // so the result drops straight into ChassisConfig::sensorMounts[i].y.
 //
@@ -81,7 +84,7 @@ constexpr float CALIBRATION_FAILED_SCORE = 999.9f;
 /// Result of calibrating one sensor.
 struct CalibrationResult {
     std::string name;          ///< echoed from the CalibrationConfig
-    float offsetIn{0.0f};      ///< solved lateral mount offset, inches, LEFT POSITIVE.
+    float offsetIn{0.0f};      ///< offset ACROSS the beam, in, left-of-beam positive.
                                ///< Assign to ChassisConfig::sensorMounts[i].y.
 
     /// Mean squared residual of the fit, in square inches.

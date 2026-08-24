@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "chad/api.hpp"
+#include "chad/util/mount_offset.hpp"
 #include "chad/util/sensor_calibrator.hpp"
 
 namespace chad {
@@ -61,9 +62,14 @@ void autonCalibrateMounts() {
             out.result("s%d FAILED n=%d", i, r.samplesUsed);
             continue;
         }
-        out.result("s%d y %+.2f was %+.2f r%.2f", i, r.offsetIn,
-                   sensorMounts[i].y, r.confidence);
-        sensorMounts[i].y = r.offsetIn;
+        // r.offsetIn is measured ACROSS the beam, so it is sensorMounts[i].y
+        // only for the theta = 0 sensor. Rotating it back keeps the
+        // tape-measured along-beam arm.
+        out.result("s%d across %+.2f r%.2f", i, r.offsetIn, r.confidence);
+        tuning::applyMountOffset(sensorMounts[i].theta, r.offsetIn,
+                                 &sensorMounts[i].x, &sensorMounts[i].y);
+        out.result("s%d -> x%+.2f y%+.2f", i, sensorMounts[i].x,
+                   sensorMounts[i].y);
         applied++;
     }
 
