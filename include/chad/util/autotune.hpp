@@ -38,7 +38,17 @@ struct AutoTuneConfig {
     /// kI is only attempted if steady-state error stays above this.
     float steadyStateTolDeg{1.5f};
     float steadyStateTolIn{0.75f};
-    float kiStep{0.01f};
+    // Relative to kP, like kdRatioStep, because kI/kP is a reciprocal time
+    // constant: 0.5 to 3.0 per second here, so Ti spans 2.0 s down to 0.33 s.
+    // An absolute step cannot reach either axis -- against a kP that grows to
+    // 20*1.5^5 = 152, a kI of 0.06 is a Ti of 2530 s inside a 1.5 s trial.
+    float kiRatioStep{0.5f};
+
+    // Off, matching RelayTuneConfig::includeIntegral: neither axis carries a
+    // standing load, and the loop has no windup range, so the integrator winds
+    // up over the whole approach and pays for it in overshoot. Fixing the ramp
+    // above without this would make a phase that was inert actively harmful.
+    bool includeIntegral{false};
 
     int maxIterations{6};
 

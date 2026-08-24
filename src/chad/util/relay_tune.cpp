@@ -128,9 +128,10 @@ RelayFit RelayAutoTuner::run(bool angular) {
     }
     // The swing is the band plus the overshoot past it, so this only has to
     // clear encoder noise.
-    if (fit.tu <= 0.0f || fit.amplitude < 1.3f * hyst) {
-        std::snprintf(msg, sizeof(msg), "chatter: a %.3f vs hyst %.3f",
-                      fit.amplitude, hyst);
+    if (fit.tu <= 0.0f || fit.amplitude < mConfig.minSwingRatio * hyst) {
+        std::snprintf(msg, sizeof(msg), "swing %.3f under %.1f dead bands, raise amplitude",
+                      fit.amplitude,
+                      static_cast<double>(mConfig.minSwingRatio));
         report(angular ? "angular" : "lateral", msg);
         return fit;
     }

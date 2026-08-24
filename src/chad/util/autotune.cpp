@@ -195,10 +195,11 @@ PIDGains PidAutoTuner::tuneAxis(bool angular) {
         }
 
         // kI: only if there is steady-state error left to remove.
-        if (mLast.valid && mLast.steadyState > ssTol) {
+        if (mConfig.includeIntegral && mLast.valid &&
+            mLast.steadyState > ssTol) {
             for (int i = 1; i <= mConfig.maxIterations && !mCancelled; ++i) {
                 PIDGains trial = best;
-                trial.kI = mConfig.kiStep * static_cast<float>(i);
+                trial.kI = best.kP * mConfig.kiRatioStep * static_cast<float>(i);
 
                 const StepMetrics m = evaluate(trial, angular, step);
                 if (!m.valid) { report("no trace", trial, m); break; }

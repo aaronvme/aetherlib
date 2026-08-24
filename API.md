@@ -725,7 +725,8 @@ applied to the chassis and returned; **nothing is persisted** — copy them into
 | `oscillationLimit` | `3` | |
 | `kdRatioStep` | `0.05` | kD searched as a multiple of kP |
 | `steadyStateTolDeg` / `steadyStateTolIn` | `1.5` / `0.75` | kI only attempted above this |
-| `kiStep` | `0.01` | |
+| `kiRatioStep` | `0.5` | kI as a multiple of kP, so per second. Live only with `includeIntegral` |
+| `includeIntegral` | `false` | The kI phase. Off: no standing load, and no windup range |
 | `maxIterations` | `6` | Per stage |
 | `weights` | see below | Cost function |
 | `onProgress` | empty | `void(const char* stage, PIDGains, float cost)` |
