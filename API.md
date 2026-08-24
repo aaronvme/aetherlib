@@ -170,7 +170,7 @@ default.
 | `defaultMoveDistance` etc. | — | Per-motion-type parameter defaults |
 | `distanceSensors` | `{}` | For MCL/RCL |
 | `sensorMounts` | `{}` | Robot-frame mount poses, index-matched to the above |
-| `settleTimeMs` | `0` | Settle condition must hold this long before exiting. `0` exits on the first in-tolerance sample, which can fire while still carrying velocity through the target |
+| `settleTimeMs` | `0` | Settle condition must hold this long before exiting. `0` exits on the first in-tolerance sample, which can fire while still carrying velocity through the target. `config.cpp` ships `110`. |
 | `useMclTracking` / `useRclTracking` | `false` | |
 | `mclConfig` / `rclConfig` | — | See [Tracking](#tracking) |
 
@@ -185,34 +185,34 @@ about. Tolerances are inches for lateral motions, VEX degrees for turns.
 struct MoveDistanceParams {
     bool  forwards{true};
     float maxSpeed{127}, minSpeed{0};
-    float targetTolerance{1.0};      // inches
+    float targetTolerance{-1.0};     // inches, negative = ChassisConfig
     float earlyExitRange{0.0};       // exit early within this range; 0 = off
 };
 
 struct MoveToPointParams {           // + lead
     bool  forwards{true};
     float maxSpeed{127}, minSpeed{0};
-    float targetTolerance{1.0}, earlyExitRange{0.0};
+    float targetTolerance{-1.0}, earlyExitRange{0.0};
     float lead{0.0};                 // carrot-point lead for curved approaches
 };
 
 struct TurntoHeadingParams {
     TurnDirection direction{TurnDirection::SHORTEST};
     float maxSpeed{127}, minSpeed{0};
-    float targetTolerance{2.0};      // VEX degrees
+    float targetTolerance{-1.0};     // VEX degrees, negative = ChassisConfig
 };
 
 struct TurnToPointParams {           // + offset
     TurnDirection direction{TurnDirection::SHORTEST};
     float maxSpeed{127}, minSpeed{0};
-    float targetTolerance{2.0};
+    float targetTolerance{-1.0};
     float offset{0.0};               // angular offset, VEX degrees
 };
 
 struct SwingParams {                 // same shape as TurntoHeadingParams
     TurnDirection direction{TurnDirection::SHORTEST};
     float maxSpeed{127}, minSpeed{0};
-    float targetTolerance{2.0};
+    float targetTolerance{-1.0};
 };
 
 struct ArcParams {
@@ -231,10 +231,10 @@ struct BoomerangParams {
 };
 
 struct RAMSETEParams {
-    float b{2.0};                    // aggressiveness, b > 0
-    float zeta{0.7};                 // damping, 0 < zeta < 1
+    float b{48.0};                    // aggressiveness, b > 0
+    float zeta{0.85};                 // damping, 0 < zeta < 1
     float maxSpeed{127}, minSpeed{0};
-    float targetTolerance{1.0};      // inches
+    float targetTolerance{-1.0};     // inches, negative = ChassisConfig
     float headingTolerance{2.0};     // VEX degrees
     float lookaheadDist{10.0};       // inches
     bool  useVelocityProfile{true};
@@ -578,16 +578,16 @@ void setDistSyncProp(float);
 |---|---|---|
 | `particleCount` | `1024` | |
 | `resampleThreshold` | `512` | Resample when N_eff drops below |
-| `maxSensorRange` | `100.0` | inches |
+| `maxSensorRange` | `100.0` | inches `config.cpp` ships `140`. |
 | `distResampleVariance` | `1.5` | inches of jitter per resample |
 | `thetaResampleVariance` | `0.01` | radians |
 | `maxThetaDeviation` | `0.08` | radians, clamp vs IMU |
 | `trackingWheelVariance` | `0.08` | dead wheels |
-| `imeVariance` | `0.12` | motor encoders — more slip |
+| `imeVariance` | `0.12` | motor encoders — more slip `config.cpp` ships `0.004`. |
 | `imuVariance` | `0.005` | |
-| `rangeSigmaCloseIn` | `0.787` | beam sigma at or below 200 mm |
+| `rangeSigmaCloseIn` | `0.787` | beam sigma at or below 200 mm `config.cpp` ships `0.068`. |
 | `rangeSigmaProp` | `0.05` | fraction of the reading beyond that |
-| `horizDependentVarianceProp` | `0.03` | × \|dVert\|, lateral slip |
+| `horizDependentVarianceProp` | `0.03` | × \|dVert\|, lateral slip `config.cpp` ships `0.004`. |
 | `horizConstantNoise` | `0.03` | inches/update baseline |
 | `distSyncProp` / `thetaSyncProp` | `0.06` / `0.001` | Lerp toward chassis; inert when the EKF is on |
 | `updatePeriodMs` | `25.0` | |
@@ -632,9 +632,9 @@ const std::array<BeamState, SENSOR_COUNT>& beamStates() const;
 
 | `Config` field | Default | |
 |---|---|---|
-| `vertNoiseProp` | `0.045` | sigma per inch of along-track travel |
+| `vertNoiseProp` | `0.045` | sigma per inch of along-track travel `config.cpp` ships `0.004`. |
 | `horizNoiseProp` | `0.045` | per inch of cross-track |
-| `slipNoiseProp` | `0.035` | lateral sigma per inch driven |
+| `slipNoiseProp` | `0.035` | lateral sigma per inch driven `config.cpp` ships `0.004`. |
 | `slipNoiseFloor` | `0.010` | lateral sigma per update |
 | `vertBiasProp` | `0.06` | systematic along-track scale error |
 | `slipBiasProp` | `0.05` | systematic cross-track error |
@@ -644,7 +644,7 @@ const std::array<BeamState, SENSOR_COUNT>& beamStates() const;
 | `posNoiseFloor` | `0.015` | inches per update |
 | `thetaNoiseFloor` | `0.0004` | radians per update |
 | `useRangeUpdates` | `true` | |
-| `rangeSigmaBase` | `0.60` | inches, fixed part |
+| `rangeSigmaBase` | `0.60` | inches, fixed part `config.cpp` ships `0.068`. |
 | `rangeSigmaProp` | `0.030` | fraction of the reading |
 | `rangeGateChi2` | `9.0` | 1 dof, 3 sigma |
 | `maxIncidenceRad` | `1.15` | past 66 deg off normal a ToF return is junk |
@@ -770,7 +770,7 @@ drivetrain leaves the PID less to do.
 
 ```cpp
 struct CharacterizeConfig {
-    float rampVoltsPerSec{0.6f};   // quasistatic ramp, kV/kS
+    float rampVoltsPerSec{2.0f};   // quasistatic ramp, kV/kS
     float maxVolts{9.0f};
     float stepVolts{7.0f};         // separate step, kA
     float stepMs{700.0f};
