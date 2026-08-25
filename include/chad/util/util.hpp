@@ -67,39 +67,45 @@ struct Pose {
 // ============================================================================
 
 /// Wrap angle to [-PI, PI]
+///
+/// Reduced in one step, not by repeated subtraction. Past about 2^27 the gap
+/// between adjacent floats exceeds 2π, so `rad -= TWO_PI` rounds straight back
+/// to `rad` and the loop never ends -- a hard freeze, not a wrong answer. The
+/// non-finite guard alone does not cover it: 1e9 is perfectly finite. Above
+/// that magnitude a float no longer resolves the angle anyway, so the reduction
+/// is only meaningful in the range where it is also exact.
 inline float wrapRad(float rad) {
-    // Guard non-finite input: a subtractive loop on +inf never terminates
-    // (inf - 2π == inf), which hard-freezes the brain. IMU errors surface as
-    // PROS_ERR_F (== INFINITY), so this guard is load-bearing.
+    // PROS_ERR_F is INFINITY, so a dead IMU lands here.
     if (!std::isfinite(rad)) return 0.0f;
-    while (rad > PI) rad -= TWO_PI;
-    while (rad < -PI) rad += TWO_PI;
+    if (rad >= -PI && rad <= PI) return rad;   // the usual case
+    rad = std::fmod(rad, TWO_PI);
+    if (rad > PI) rad -= TWO_PI;
+    else if (rad < -PI) rad += TWO_PI;
     return rad;
 }
 
-/// Wrap angle to [0, TWO_PI)
+/// Wrap angle to [0, TWO_PI). One step, for the reason wrapRad gives.
 inline float wrapRadPositive(float rad) {
     if (!std::isfinite(rad)) return 0.0f;
-    while (rad >= TWO_PI) rad -= TWO_PI;
-    while (rad < 0.0f) rad += TWO_PI;
-    return rad;
+    if (rad >= 0.0f && rad < TWO_PI) return rad;
+    rad = std::fmod(rad, TWO_PI);
+    if (rad < 0.0f) rad += TWO_PI;
+    // fmod of a tiny negative can round to TWO_PI exactly; the range is half open.
+    return rad < TWO_PI ? rad : 0.0f;
 }
 
-/// Wrap degrees to [0, 360)
+/// Wrap degrees to [0, 360). One step, for the reason wrapRad gives.
 inline float wrapDeg(float deg) {
     if (!std::isfinite(deg)) return 0.0f;
-    while (deg >= 360.0f) deg -= 360.0f;
-    while (deg < 0.0f) deg += 360.0f;
-    return deg;
+    if (deg >= 0.0f && deg < 360.0f) return deg;
+    deg = std::fmod(deg, 360.0f);
+    if (deg < 0.0f) deg += 360.0f;
+    return deg < 360.0f ? deg : 0.0f;
 }
 
 /// Shortest signed angular difference from `from` to `to` (radians)
 inline float angleDiffRad(float from, float to) {
-    float diff = to - from;
-    if (!std::isfinite(diff)) return 0.0f;
-    while (diff > PI) diff -= TWO_PI;
-    while (diff < -PI) diff += TWO_PI;
-    return diff;
+    return wrapRad(to - from);
 }
 
 /// Shortest absolute angular distance (radians)
@@ -207,10 +213,9 @@ inline float stdRadToVexDeg(float stdRad) {
 /// Convert robot-centric bearing to trig angle for field-frame math
 /// Robot 0 = forward, 90 = left. Trig 0 = +X, +PI/2 = +Y.
 inline float botHeadingToTrig(float botDeg) {
-    float result = 90.0f - botDeg;
-    while (result > 360.0f) result -= 360.0f;
-    while (result < 0.0f) result += 360.0f;
-    return result;
+    // This one had no finite guard at all, so PROS_ERR_F froze it outright:
+    // 90 - inf is -inf, and -inf + 360 is -inf.
+    return wrapDeg(90.0f - botDeg);
 }
 
 // ============================================================================

@@ -298,9 +298,16 @@ float angleDiffRad(float from, float to);   // shortest signed
 float angleDistRad(float from, float to);   // shortest absolute
 ```
 
-All four guard non-finite input and return `0`. That matters: IMU errors surface
-as `PROS_ERR_F` (`INFINITY`), and a subtractive wrap loop on infinity never
-terminates — it hard-freezes the brain.
+All of these — and `botHeadingToTrig` below — guard non-finite input and return
+`0`. That matters: IMU errors surface as `PROS_ERR_F` (`INFINITY`), and a
+subtractive wrap loop on infinity never terminates. It hard-freezes the brain.
+
+They also reduce in **one step** rather than by repeated subtraction, which is a
+second freeze and not the same one. Past about 2^27 the gap between adjacent
+floats exceeds `2*PI`, so `rad -= TWO_PI` rounds straight back to `rad` and the
+loop never ends — and `1e9` is a perfectly finite value that the non-finite
+guard waves through. Above that magnitude a `float` no longer resolves the angle
+anyway, so the reduction is only exact over the range where it is meaningful.
 
 ### Conversions
 
