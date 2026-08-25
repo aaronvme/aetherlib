@@ -778,22 +778,38 @@ drivetrain leaves the PID less to do.
 
 ```cpp
 struct CharacterizeConfig {
-    float rampVoltsPerSec{2.0f};   // quasistatic ramp, kV/kS
+    int   staircaseLevels{11};          // quasistatic dwells, kS and kV
     float maxVolts{9.0f};
-    float stepVolts{7.0f};         // separate step, kA
-    float stepMs{700.0f};
+    float breakawayVoltsPerSec{2.0f};   // creep rate, breakawayVolts()
+    float dwellMs{900.0f};
+    float holdMs{400.0f};               // averaged, at the tail of each dwell
+    float stepVolts{7.0f};              // steps, kA
+    float stepMs{550.0f};
+    float slopeWindowMs{200.0f};
+    int   stepReps{6};
     float sampleMs{10.0f};
     float minSpeedInPerSec{3.0f};  // below this the fit reads stiction as slope
+    float maxTravelIn{60.0f};      // room needed either side of the start
+    float minR2{0.9f};
+    float maxKaSpread{0.5f};
+    float freeSpeedLo{0.55f};
+    float freeSpeedHi{1.15f};
     int   spinRotations{6};
     float parkSeconds{6.0f};
     std::function<void(const char* stage, const char* detail)> onProgress;
 };
 
 struct FeedforwardFit {
-    float kV, kS, kA;   // volts per m/s, volts, volts per m/s^2
-    float r2;           // under 0.9 is unusable
-    int   samples;
-    bool  valid;
+    float kV, kS, kA;        // volts per m/s, volts, volts per m/s^2
+    float r2;                // straightness of the staircase
+    float kaSpread;          // (max - min) / kA across step reps
+    float freeSpeedRatio;    // fitted no-load speed / what rpm implies
+    float speedSpanInPerSec;
+    int   samples;           // staircase levels that held steady
+    int   stepReps;          // step reps that produced a kA
+    bool  valid;             // kS and kV usable
+    bool  kaValid;           // kA usable; kA is left as fitted either way
+    bool  drivetrainSuspect;
 };
 
 struct NoiseFit {
@@ -831,11 +847,65 @@ public:
 };
 ```
 
-The robot drives itself. `feedforward(false)` shuttles back and forth over
-`maxTravelIn` (60 in by default) rather than driving one way: reaching
-`maxVolts` at `rampVoltsPerSec` takes about 36 ft of travel, and a field is 12.
-`measureScale()` and `measureOdomDrift()` need a clear lane of 24 and 36 in
-respectively. The rest spin on the spot.
+The robot drives itself. `feedforward()` runs two phases, and the split is not
+an accident of history -- a single voltage ramp **cannot** identify `kA` at all.
+Solving `kS + kV*v + kA*a = c*t` for a ramp rate `c` gives `a = c/kV` once the
+opening transient has passed, so the acceleration column is constant, its only
+variation is the noise in a differenced encoder velocity, and least squares
+attenuates `kA` toward zero while `kS` absorbs the `kA*c/kV` it dropped. Against
+a first-order plant with 200 rpm cartridge quantisation the joint ramp fit
+returned `kA` **with the wrong sign in 100 of 100 trials** and `kS` 32% high --
+at `r2 = 0.997`, which is why `r2` is not the only gate.
+
+So:
+
+1. **Quasistatic staircase** for `kS` and `kV`. Dwell at each of
+   `staircaseLevels` voltages for `dwellMs`, average the last `holdMs`, and fit
+   `volts = kS + kV*speed` over the dwells that reached steady state. `a` is
+   zero by construction rather than fitted. The lowest level sits just above
+   the measured `breakawayVolts()`, which matters more than it sounds: `kS` is
+   an intercept, and starting from a fixed voltage instead makes it an
+   extrapolation, worth 15-25% of error against 8% when anchored.
+2. **Steps** for `kA`. `stepReps` runs from rest at `stepVolts`, each giving one
+   `kA = (volts - kS - kV*speed) / accel`, with `accel` a least squares slope
+   over `slopeWindowMs` starting where the robot actually broke away. The
+   median is taken, so a rep that slipped moves it one place instead of
+   dragging a mean. In simulation this lands `kA` within 2%.
+
+Direction alternates so the robot oscillates about its start rather than
+walking away, but a high level still covers `dwellMs` at full speed: give it
+`maxTravelIn` either side. Levels that cannot fit their hold window inside that
+are skipped, and `samples` reports how many survived. `measureScale()` and
+`measureOdomDrift()` need a clear lane of 24 and 36 in respectively. The rest
+spin on the spot.
+
+Three gates, because they fail independently:
+
+| Gate | Covers | Fails when |
+|---|---|---|
+| `r2` vs `minR2` | staircase straightness | a motor stalls mid-run, the surface changes |
+| `kaSpread` vs `maxKaSpread` | agreement between step reps | one rep slipped or never broke away |
+| `freeSpeedRatio` in `[freeSpeedLo, freeSpeedHi]` | the drivetrain itself | a dead motor, wrong `externalGearRatio`, wrong `wheelDiameter` |
+
+The third is the one worth having. A drivetrain that is merely *weaker* than
+configured still produces a perfectly straight line: with half the motors
+pulling, `r2` stays at 0.98 and `kaSpread` at 0.05 while every constant is 70-85%
+wrong. Only comparing the fitted no-load speed `(12 - kS)/kV` against what
+`rpm` and `wheelDiameter` claim catches it -- measured 0.66-1.00 across healthy
+plants against 0.39-0.40 for a halved drivetrain or a doubled wheel diameter.
+
+`kA` is returned as fitted even when `kaValid` is false, so you can see what it
+was; `autonCharacterize1Drive` writes `0` into `ffGains` in that case, since a
+baseless `kA` feeds the velocity loop a voltage proportional to commanded
+acceleration and the old ramp fit could make it negative.
+
+One thing none of the gates catch, because it is not an error: on a drivetrain
+with real quadratic drag, the fit returns the best *linear* model over the speed
+range it saw. `FeedforwardGains` has no quadratic term to hold anything else.
+
+The maths is PROS-free in `chad/util/characterize_fit.hpp` (`fitVelocity`,
+`fitAccel`, `slopeOverWindow`, `freeSpeedRatio`), so a whole fit runs on the
+host against a plant model rather than only on a robot.
 
 ```cpp
 chad::tuning::CharacterizeConfig cfg;
@@ -845,7 +915,7 @@ cfg.onProgress = [](const char* stage, const char* detail) {
 chad::tuning::Characterizer ch(chassis, drivetrain, cfg);
 
 float width = ch.trackWidth();          // spins ~6 turns
-auto  ff    = ch.feedforward(false);    // straight-line kV/kS/kA
+auto  ff    = ch.feedforward(false);    // staircase + steps, kV/kS/kA
 auto  turn  = ch.feedforward(true);     // turning friction
 auto  noise = ch.localizationNoise();   // parked, with your race config
 
@@ -855,7 +925,7 @@ chad::RAMSETEParams p;
 p.useVelocityController = true;
 p.ffGains.kV            = ff.kV;
 p.ffGains.ksStraight    = ff.kS;
-p.ffGains.kaStraight    = ff.kA;
+p.ffGains.kaStraight    = ff.kaValid ? ff.kA : 0.0f;
 p.ffGains.ksTurn        = turn.kS;
 p.ffGains.kP            = 12.0f;    // then sweep in the sim
 p.ffGains.integralClamp = 2.0f;

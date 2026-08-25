@@ -12,89 +12,6 @@ namespace {
 
 constexpr float kVoltsPerPower = 12.0f / 127.0f;
 
-struct Sample {
-    float volts;
-    float speed;   // in/s
-};
-
-// Least squares on volts = kS + kV*speed + kA*accel. Fitting acceleration rather
-// than assuming it away is what lets the ramp be fast, and yields kA for free.
-struct Dyn { float speed, accel, volts; };
-
-bool fitDynamic(const std::vector<Dyn>& s, float& kv, float& ks, float& ka,
-                float& r2) {
-    if (s.size() < 16) return false;
-    // Normal equations for [1, speed, accel].
-    double A[3][4] = {};
-    double sy = 0.0;
-    for (const Dyn& p : s) {
-        const double x[3] = {1.0, p.speed, p.accel};
-        for (int i = 0; i < 3; i++) {
-            for (int j = 0; j < 3; j++) A[i][j] += x[i] * x[j];
-            A[i][3] += x[i] * p.volts;
-        }
-        sy += p.volts;
-    }
-    // Gauss-Jordan with partial pivoting.
-    for (int c = 0; c < 3; c++) {
-        int piv = c;
-        for (int r = c + 1; r < 3; r++) {
-            if (std::fabs(A[r][c]) > std::fabs(A[piv][c])) piv = r;
-        }
-        if (std::fabs(A[piv][c]) < 1e-12) return false;
-        if (piv != c) for (int k = 0; k < 4; k++) std::swap(A[c][k], A[piv][k]);
-        const double d = A[c][c];
-        for (int k = 0; k < 4; k++) A[c][k] /= d;
-        for (int r = 0; r < 3; r++) {
-            if (r == c) continue;
-            const double f = A[r][c];
-            for (int k = 0; k < 4; k++) A[r][k] -= f * A[c][k];
-        }
-    }
-    ks = static_cast<float>(A[0][3]);
-    kv = static_cast<float>(A[1][3]);
-    ka = static_cast<float>(A[2][3]);
-
-    const double mean = sy / static_cast<double>(s.size());
-    double ssRes = 0.0, ssTot = 0.0;
-    for (const Dyn& p : s) {
-        const double pred = ks + kv * p.speed + ka * p.accel;
-        ssRes += (p.volts - pred) * (p.volts - pred);
-        ssTot += (p.volts - mean) * (p.volts - mean);
-    }
-    r2 = ssTot > 0.0 ? static_cast<float>(1.0 - ssRes / ssTot) : 0.0f;
-    return true;
-}
-
-// Least squares on volts = kS + kV * speed.
-bool fitLine(const std::vector<Sample>& s, float& slope, float& intercept,
-             float& r2) {
-    if (s.size() < 8) return false;
-    double sx = 0, sy = 0, sxx = 0, sxy = 0;
-    const double n = static_cast<double>(s.size());
-    for (const Sample& p : s) {
-        sx += p.speed; sy += p.volts;
-        sxx += static_cast<double>(p.speed) * p.speed;
-        sxy += static_cast<double>(p.speed) * p.volts;
-    }
-    const double den = n * sxx - sx * sx;
-    if (std::fabs(den) < 1e-9) return false;
-    const double m = (n * sxy - sx * sy) / den;
-    const double b = (sy - m * sx) / n;
-
-    double ssTot = 0, ssRes = 0;
-    const double mean = sy / n;
-    for (const Sample& p : s) {
-        const double pred = m * p.speed + b;
-        ssRes += (p.volts - pred) * (p.volts - pred);
-        ssTot += (p.volts - mean) * (p.volts - mean);
-    }
-    slope = static_cast<float>(m);
-    intercept = static_cast<float>(b);
-    r2 = (ssTot > 1e-9) ? static_cast<float>(1.0 - ssRes / ssTot) : 0.0f;
-    return true;
-}
-
 }  // namespace
 
 Characterizer::Characterizer(Chassis& chassis, Drivetrain& drivetrain,
@@ -109,78 +26,163 @@ void Characterizer::drive(float volts, bool spin) {
     const float power = volts / kVoltsPerPower;
     mDrivetrain.setVoltage(power, spin ? -power : power);
 }
+namespace {
+
+// Speed the sides report, in the sign convention the fit wants. Spinning, the
+// sides oppose, so magnitudes give wheel speed and the chassis speed is 0.
+float wheelSpeed(Drivetrain& dt, bool spin, float dir) {
+    const float l = dt.leftVelocityInPerSec();
+    const float r = dt.rightVelocityInPerSec();
+    return spin ? 0.5f * (std::fabs(l) + std::fabs(r)) : dir * 0.5f * (l + r);
+}
+
+}  // namespace
 
 FeedforwardFit Characterizer::feedforward(bool spinInPlace) {
     FeedforwardFit fit;
-    std::vector<Dyn> samples;
     char msg[96];
 
-    report("feedforward", spinInPlace ? "ramping (spin)" : "ramping (straight)");
-
     const float dt = mConfig.sampleMs / 1000.0f;
-    float dir = 1.0f;
-    float legStart = mDrivetrain.averagePositionDeg();
+    const int holdN = static_cast<int>(mConfig.holdMs / mConfig.sampleMs);
+    const int dwellN = static_cast<int>(mConfig.dwellMs / mConfig.sampleMs);
+    if (dt <= 0.0f || holdN < 2 || dwellN <= holdN) {
+        report("feedforward", "dwellMs must exceed holdMs, both over sampleMs");
+        return fit;
+    }
     const float degPerIn = 360.0f /
         (mDrivetrain.externalGearRatio() * PI * mDrivetrain.wheelDiameter);
 
-    // Velocity is quantised, so consecutive differences are mostly noise.
-    constexpr int kAccelSpan = 5;
-    std::vector<float> speedHist;
-    int skipAfterReversal = 0;
+    // Anchoring the lowest level just above breakaway is worth as much as
+    // anything else here: kS is an intercept, and starting from a fixed 1.5 V
+    // makes it an extrapolation from whatever speed that happens to be, which
+    // cost 15-25% on kS in simulation against 8% when anchored.
+    const float vLo = breakawayVolts(spinInPlace) + 0.3f;
+    report("feedforward", spinInPlace ? "staircase (spin)" : "staircase (straight)");
 
-    for (float v = 0.0f; v <= mConfig.maxVolts; v += mConfig.rampVoltsPerSec * dt) {
-        drive(v * dir, spinInPlace);
-        pros::delay(static_cast<uint32_t>(mConfig.sampleMs));
-        const float l = mDrivetrain.leftVelocityInPerSec();
-        const float r = mDrivetrain.rightVelocityInPerSec();
-        // Spinning, the sides oppose: magnitudes give wheel speed, which is what
-        // the fit needs. The chassis speed is 0.
-        const float speed = spinInPlace ? 0.5f * (std::fabs(l) + std::fabs(r))
-                                        : dir * 0.5f * (l + r);
-        speedHist.push_back(speed);
+    std::vector<VelocityPoint> levels;
+    std::vector<float> hold;
+    const float startDeg = mDrivetrain.averagePositionDeg();
+    int skipped = 0;
 
-        if (skipAfterReversal > 0) {
-            --skipAfterReversal;
-        } else if (static_cast<int>(speedHist.size()) > kAccelSpan &&
-                   speed > mConfig.minSpeedInPerSec) {
-            const float prev = speedHist[speedHist.size() - 1 - kAccelSpan];
-            const float accel = (speed - prev) / (dt * kAccelSpan);
-            samples.push_back({speed, accel, v});
-        }
+    for (int i = 0; i < mConfig.staircaseLevels; i++) {
+        const float frac =
+            mConfig.staircaseLevels > 1
+                ? static_cast<float>(i) /
+                      static_cast<float>(mConfig.staircaseLevels - 1)
+                : 0.0f;
+        const float v = vLo + frac * (mConfig.maxVolts - vLo);
+        if (v <= 0.0f) continue;
 
-        if (!spinInPlace) {
-            const float travelIn =
-                std::fabs(mDrivetrain.averagePositionDeg() - legStart) / degPerIn;
-            if (travelIn > mConfig.maxTravelIn) {
-                mDrivetrain.setVoltage(0.0f, 0.0f);
-                pros::delay(350);
-                dir = -dir;
-                legStart = mDrivetrain.averagePositionDeg();
-                // A step in every quantity being fitted.
-                skipAfterReversal = 2 * kAccelSpan;
-                speedHist.clear();
+        // Drive back toward where we started, so the staircase oscillates about
+        // the start instead of walking off the field.
+        const float net = (mDrivetrain.averagePositionDeg() - startDeg) / degPerIn;
+        const float dir = spinInPlace ? 1.0f : (net > 0.0f ? -1.0f : 1.0f);
+        const float legStart = mDrivetrain.averagePositionDeg();
+
+        hold.clear();
+        bool ranOutOfRoom = false;
+        for (int k = 0; k < dwellN; k++) {
+            drive(v * dir, spinInPlace);
+            pros::delay(static_cast<uint32_t>(mConfig.sampleMs));
+            if (k >= dwellN - holdN) {
+                hold.push_back(wheelSpeed(mDrivetrain, spinInPlace, dir));
+            }
+            if (!spinInPlace) {
+                const float travel =
+                    std::fabs(mDrivetrain.averagePositionDeg() - legStart) / degPerIn;
+                if (travel > mConfig.maxTravelIn) { ranOutOfRoom = true; break; }
             }
         }
-    }
-    drive(0.0f, spinInPlace);
-    pros::delay(400);
+        mDrivetrain.setVoltage(0.0f, 0.0f);
+        pros::delay(250);
 
-    float kvPerIn = 0.0f, ks = 0.0f, kaPerIn = 0.0f, r2 = 0.0f;
-    if (!fitDynamic(samples, kvPerIn, ks, kaPerIn, r2)) {
-        report("feedforward", "not enough motion to fit -- raise maxVolts");
+        // A dwell cut short has not reached steady state, so its mean is not a
+        // quasistatic point and cannot go in the fit.
+        if (ranOutOfRoom || static_cast<int>(hold.size()) < holdN) {
+            skipped++;
+            continue;
+        }
+        const float mean = meanOverWindow(hold.data(), static_cast<int>(hold.size()));
+        if (mean <= mConfig.minSpeedInPerSec) { skipped++; continue; }
+        levels.push_back({mean, v});
+    }
+
+    const VelocityFit vel =
+        fitVelocity(levels.data(), static_cast<int>(levels.size()), mConfig.minR2);
+    if (vel.levels < 4) {
+        std::snprintf(msg, sizeof(msg), "only %d steady levels of %d -- more room?",
+                      vel.levels, mConfig.staircaseLevels);
+        report("feedforward", msg);
         return fit;
     }
-    // Per in/s to per m/s divides by INCH_TO_METER; same for in/s^2.
-    fit.kV = kvPerIn / INCH_TO_METER;
-    fit.kA = kaPerIn / INCH_TO_METER;
-    fit.kS = ks;
-    fit.r2 = r2;
-    fit.samples = static_cast<int>(samples.size());
-    fit.valid = fit.kV > 0.0f && fit.r2 > 0.5f;
 
-    std::snprintf(msg, sizeof(msg), "kV %.3f kS %.3f kA %.4f r2 %.3f n=%d",
-                  fit.kV, fit.kS, fit.kA, fit.r2, fit.samples);
+    // Steps for kA. A least squares slope over slopeWindowMs, taken from where
+    // the robot actually broke away rather than from the command, so a rep that
+    // sat in stiction for 50 ms does not report that as low acceleration.
+    report("feedforward", "steps");
+    const int slopeN = static_cast<int>(mConfig.slopeWindowMs / mConfig.sampleMs);
+    const int stepN = static_cast<int>(mConfig.stepMs / mConfig.sampleMs);
+    std::vector<StepSample> steps;
+    std::vector<float> trace;
+
+    for (int rep = 0; rep < mConfig.stepReps && rep < MAX_STEP_REPS; rep++) {
+        const float net = (mDrivetrain.averagePositionDeg() - startDeg) / degPerIn;
+        const float dir = spinInPlace ? 1.0f : (net > 0.0f ? -1.0f : 1.0f);
+        trace.clear();
+        for (int k = 0; k < stepN; k++) {
+            drive(mConfig.stepVolts * dir, spinInPlace);
+            pros::delay(static_cast<uint32_t>(mConfig.sampleMs));
+            trace.push_back(wheelSpeed(mDrivetrain, spinInPlace, dir));
+        }
+        mDrivetrain.setVoltage(0.0f, 0.0f);
+        pros::delay(400);
+
+        int first = -1;
+        for (int k = 0; k < static_cast<int>(trace.size()); k++) {
+            if (trace[k] > mConfig.minSpeedInPerSec) { first = k; break; }
+        }
+        if (first < 0 || first + slopeN > static_cast<int>(trace.size())) continue;
+        const float* w = trace.data() + first;
+        steps.push_back({meanOverWindow(w, slopeN),
+                         slopeOverWindow(w, slopeN, dt), mConfig.stepVolts});
+    }
+
+    const AccelFit acc = fitAccel(steps.data(), static_cast<int>(steps.size()),
+                                  vel.kS, vel.kV, mConfig.maxKaSpread);
+
+    // Per in/s to per m/s divides by INCH_TO_METER; same for in/s^2.
+    fit.kV = vel.kV / INCH_TO_METER;
+    fit.kA = acc.kA / INCH_TO_METER;
+    fit.kS = vel.kS;
+    fit.r2 = vel.r2;
+    fit.kaSpread = acc.spread;
+    fit.speedSpanInPerSec = vel.speedSpan;
+    fit.samples = vel.levels;
+    fit.stepReps = acc.reps;
+    fit.valid = vel.valid;
+    fit.kaValid = vel.valid && acc.valid;
+
+    const float rated = mDrivetrain.rpm / 60.0f * PI * mDrivetrain.wheelDiameter;
+    fit.freeSpeedRatio = freeSpeedRatio(vel.kS, vel.kV, rated);
+    fit.drivetrainSuspect = fit.freeSpeedRatio < mConfig.freeSpeedLo ||
+                            fit.freeSpeedRatio > mConfig.freeSpeedHi;
+
+    std::snprintf(msg, sizeof(msg), "kV %.4f kS %.3f r2 %.3f lev %d/%d", fit.kV,
+                  fit.kS, fit.r2, vel.levels, vel.levels + skipped);
     report("feedforward", msg);
+    if (fit.kaValid) {
+        std::snprintf(msg, sizeof(msg), "kA %.4f spread %.2f over %d reps", fit.kA,
+                      acc.spread, acc.reps);
+    } else {
+        std::snprintf(msg, sizeof(msg), "kA UNFIT (%.4f spread %.2f, %d reps)",
+                      fit.kA, acc.spread, acc.reps);
+    }
+    report("feedforward", msg);
+    if (fit.drivetrainSuspect) {
+        std::snprintf(msg, sizeof(msg), "free speed %.0f%% of rated -- check motors",
+                      100.0f * fit.freeSpeedRatio);
+        report("feedforward", msg);
+    }
     return fit;
 }
 
@@ -386,7 +388,7 @@ float Characterizer::breakawayVolts(bool spinInPlace) {
     report("breakaway", "ramping from rest");
     const float dt = mConfig.sampleMs / 1000.0f;
     float volts = 0.0f;
-    for (float v = 0.0f; v <= mConfig.maxVolts; v += mConfig.rampVoltsPerSec * dt) {
+    for (float v = 0.0f; v <= mConfig.maxVolts; v += mConfig.breakawayVoltsPerSec * dt) {
         drive(v, spinInPlace);
         pros::delay(static_cast<uint32_t>(mConfig.sampleMs));
         const float l = mDrivetrain.leftVelocityInPerSec();

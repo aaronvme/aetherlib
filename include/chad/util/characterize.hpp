@@ -5,6 +5,7 @@
 #include "chad/chassis.hpp"
 #include "chad/drivetrain.hpp"
 #include "chad/movement_control/feedforward.hpp"
+#include "chad/util/characterize_fit.hpp"
 
 namespace chad::tuning {
 
@@ -12,22 +13,38 @@ namespace chad::tuning {
 // needs a known field position, except measureScale(). Run before PidAutoTuner.
 
 struct CharacterizeConfig {
-    // The fit carries an acceleration term, so the ramp need not be quasistatic.
-    // That assumption used to cost 36 ft of travel and a separate step for kA.
-    float rampVoltsPerSec{2.0f};
+    // kS and kV come from a quasistatic staircase: hold a voltage until the
+    // speed stops changing, so the acceleration term is zero by construction
+    // rather than fitted. The first level sits just above the measured
+    // breakaway, which is what keeps kS from being a long extrapolation.
+    int staircaseLevels{11};
     float maxVolts{9.0f};
+    float breakawayVoltsPerSec{2.0f};   // creep rate, breakawayVolts()
+    float dwellMs{900.0f};
+    float holdMs{400.0f};   // averaged, at the tail of each dwell
 
-    float stepVolts{7.0f};   // unused now; kA comes out of the ramp fit
-    float stepMs{700.0f};
+    // kA comes from steps, where acceleration is large instead of constant.
+    float stepVolts{7.0f};
+    float stepMs{550.0f};
+    float slopeWindowMs{200.0f};
+    int stepReps{6};
 
     float sampleMs{10.0f};
 
     // Below this the fit reads stiction as slope.
     float minSpeedInPerSec{3.0f};
 
-    // The ramp shuttles, reversing past this. Samples around a reversal are
-    // discarded, so a shorter span just wastes more of them.
-    float maxTravelIn{30.0f};
+    // Room needed either side of the start. Levels that cannot fit their hold
+    // window inside it are skipped, and direction alternates to stay near the
+    // start rather than walking away from it.
+    float maxTravelIn{60.0f};
+
+    // Gates. r2 alone passes a fit whose kA is wrong by 100%, so it is not the
+    // only one; see FeedforwardFit.
+    float minR2{0.9f};
+    float maxKaSpread{0.5f};
+    float freeSpeedLo{0.55f};
+    float freeSpeedHi{1.15f};
 
     int spinRotations{6};
     float parkSeconds{6.0f};
@@ -35,15 +52,23 @@ struct CharacterizeConfig {
     std::function<void(const char* stage, const char* detail)> onProgress;
 };
 
-// Units FeedforwardGains expects. r2 under ~0.9 means the ramp outran the
-// drivetrain, the surface changed, or a motor is not pulling.
+// Units FeedforwardGains expects. Three gates rather than one, because they
+// fail independently: r2 covers the straightness of the staircase, kaSpread the
+// agreement between step reps, and freeSpeedRatio the one fault the other two
+// cannot see -- a drivetrain that is simply weaker than configured.
 struct FeedforwardFit {
     float kV{0.0f};
     float kS{0.0f};
     float kA{0.0f};
     float r2{0.0f};
-    int samples{0};
-    bool valid{false};
+    float kaSpread{0.0f};        // (max - min) / kA over step reps
+    float freeSpeedRatio{0.0f};  // fitted no-load speed / what rpm implies
+    float speedSpanInPerSec{0.0f};
+    int samples{0};              // staircase levels that held steady
+    int stepReps{0};             // step reps that produced a kA
+    bool valid{false};           // kS and kV usable
+    bool kaValid{false};         // kA usable; kA is left as fitted either way
+    bool drivetrainSuspect{false};
 };
 
 // Odometry error per inch: the robot ends where it began, so whatever odometry
@@ -85,7 +110,7 @@ public:
     Characterizer(Chassis& chassis, Drivetrain& drivetrain,
                   const CharacterizeConfig& config = {});
 
-    /// One ramp, fitting kS, kV and kA together. spinInPlace fits turning
+    /// Staircase for kS and kV, then steps for kA. spinInPlace fits turning
     /// friction and inertia instead of straight-line, and needs no room.
     FeedforwardFit feedforward(bool spinInPlace = false);
 
