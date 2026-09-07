@@ -115,6 +115,11 @@ public:
         return sim::bus().motors[mPorts[index]].currentMa;
     }
 
+    std::int32_t get_voltage(const std::uint8_t index = 0) const {
+        if (index >= mPorts.size()) return PROS_ERR;
+        return static_cast<std::int32_t>(sim::bus().motors[mPorts[index]].commandedMv);
+    }
+
     std::int32_t move_velocity(const std::int32_t rpm) const {
         const double free = gearsetRpm(mGears);
         return move_voltage(static_cast<std::int32_t>((rpm / free) * 12000.0));
