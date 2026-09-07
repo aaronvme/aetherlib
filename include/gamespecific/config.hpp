@@ -6,16 +6,15 @@
 #include "chad/api.hpp"
 #include "chad/tracking/rcl_tracking.hpp"
 
-
 namespace chad {
-
 extern pros::Controller master;
 
 extern pros::MotorGroup leftMotors;
 extern pros::MotorGroup rightMotors;
 extern pros::Motor frontMotor;
 extern pros::Motor leverMotor;
-extern pros::Motor armMotor;
+
+extern pros::MotorGroup liftMotor;
 
 extern ScaledIMU imu;
 extern pros::Optical frontOptic;
@@ -44,7 +43,7 @@ extern AutonSelector selector;
 
 void registerFieldObstacles();
 
+void clearFieldObstacles();
+
 void registerAutonDisableLine(float lifetimeMs = 16000.0f);
-
-}  // namespace chad
-
+}
