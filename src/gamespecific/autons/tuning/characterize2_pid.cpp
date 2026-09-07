@@ -1,16 +1,17 @@
 #include "gamespecific/autons.hpp"
 #include "gamespecific/autons/tuning/support.hpp"
 
+#include <cstring>
+#include <string>
+
 #include "chad/api.hpp"
 #include "chad/util/autotune.hpp"
 #include "chad/util/relay_tune.hpp"
 
 namespace chad {
-
 using namespace autons;
 
 namespace {
-
 void applyGains(bool angular, const PIDGains& g) {
     if (angular) chassis.setAngularGains(g);
     else chassis.setLateralGains(g);
@@ -25,6 +26,13 @@ PIDGains refineGains(tuning::PidAutoTuner& t, Report& out, bool angular,
     for (int i = 0; i < 6; ++i) {
         applyGains(angular, g);
         const StepMetrics m = t.measureAt(angular, amp);
+
+        if (t.lastTiltAborted()) {
+            out("%s TILT CUT kP=%.0f t=%.1f", tag, g.kP, t.lastPeakTilt());
+            if (g.kP > 0.4f * kp0) { g.kP *= 0.85f; continue; }
+            out("%s: tilting at the kP floor", tag);
+            break;
+        }
         if (!m.valid) {
             out("%s refine: no trace", tag);
             break;
@@ -52,20 +60,27 @@ PIDGains refineGains(tuning::PidAutoTuner& t, Report& out, bool angular,
     applyGains(angular, g);
     return g;
 }
-
-}  // namespace
+}
 
 void autonCharacterize2Pid() {
     Report out;
     out("phase 2: relay, then refine");
     if (!headingOk(out)) return;
     out("about a minute. no sweep");
+    out("needs ~60 in of clear lane");
     setFilters(false);
 
     tuning::RelayTuneConfig rcfg;
+
     rcfg.abortIn = 24.0f;
+
+    rcfg.amplitudeLateral = 127.0f;
     Report* sink = &out;
-    rcfg.onProgress = [sink](const char* stage, const char* detail) {
+
+    std::string angWhy, latWhy;
+    rcfg.onProgress = [sink, &angWhy, &latWhy](const char* stage,
+                                               const char* detail) {
+        (std::strcmp(stage, "angular") == 0 ? angWhy : latWhy) = detail;
         (*sink)("[%s] %s", stage, detail);
     };
     tuning::RelayAutoTuner tuner(chassis, drivetrain, rcfg);
@@ -74,9 +89,9 @@ void autonCharacterize2Pid() {
     const tuning::RelayFit lat = tuner.tuneLateral();
 
     if (!ang.valid || !lat.valid) {
-        out.result("no limit cycle on %s",
-                   !ang.valid ? "angular" : "lateral");
-        out.result("raise amplitude, rerun");
+        const bool angBad = !ang.valid;
+        out.result("relay failed on %s", angBad ? "angular" : "lateral");
+        out.result("%s", (angBad ? angWhy : latWhy).c_str());
         return;
     }
 
@@ -85,12 +100,15 @@ void autonCharacterize2Pid() {
     acfg.reps = 1;
     acfg.trialMs = 2000.0f;
     acfg.tiltDeg = tiltProbe();
+
+    acfg.tiltAbortDeg = kTiltLimitDeg;
     tuning::PidAutoTuner refiner(chassis, acfg);
 
     const PIDGains angFinal =
         refineGains(refiner, out, true, {ang.kP, ang.kI, ang.kD}, 90.0f, 1.5f);
+
     const PIDGains latFinal =
-        refineGains(refiner, out, false, {lat.kP, lat.kI, lat.kD}, 24.0f, 0.5f);
+        refineGains(refiner, out, false, {lat.kP, lat.kI, lat.kD}, 48.0f, 0.5f);
 
     out.result("APPLIED. copy into config.cpp:");
     out.result("angular {%.3ff,%.4ff,%.3ff}", angFinal.kP, angFinal.kI,
@@ -99,5 +117,4 @@ void autonCharacterize2Pid() {
                latFinal.kD);
     out.result("relay gave kP %.0f/%.0f", ang.kP, lat.kP);
 }
-
-}  // namespace chad
+}
