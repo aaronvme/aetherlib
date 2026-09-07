@@ -103,9 +103,14 @@ finish, not merely for the queue to drain.
 ```cpp
 bool isSettled() const;
 void cancelMotion();
+void abortMotion();
 void waitUntilSettled();
 void waitUntilDist(float dist);   // inches travelled
 ```
+
+`cancelMotion` returns once the motion has stopped and the drive is off, so it
+cannot be called from the motion task. `setTelemetry`'s callback runs on that
+task; use `abortMotion` there, which stops the motion and returns immediately.
 
 ### Tracking access
 
@@ -124,6 +129,15 @@ void setLateralGains(const PIDGains&);
 void setAngularGains(const PIDGains&);
 void setThrottleCurve(const DriveCurve&);
 void setSteerCurve(const DriveCurve&);
+
+// Settle tolerances every motion falls back to when its own is negative,
+// plus the moveToPoint steering hold radius. A negative argument leaves that
+// one alone. setPidTuning does NOT touch these -- damping and tolerance are
+// not the same knob, and a caller changing gains should not silently move
+// where its motions stop.
+void setSettleTolerances(float toleranceIn, float toleranceDeg,
+                         float bearingHoldDist = -1.0f);
+void setLateralSlew(float unitsPerSec);
 void setBrakeMode(pros::motor_brake_mode_e);
 void setDistanceSensors(const std::array<pros::Distance*, MAX_DISTANCE_SENSORS>&);
 ```
@@ -216,23 +230,44 @@ struct SwingParams {                 // same shape as TurntoHeadingParams
 };
 
 struct ArcParams {
-    bool  forwards{true};
+    bool  forwards{true};          // not read by the controller
     float maxSpeed{127}, minSpeed{0};
-    float targetTolerance{1.0};
+    float targetTolerance{-1.0};     // inches, negative = ChassisConfig
     float lead{0.0};
 };
 
 struct BoomerangParams {
-    bool  forwards{true};
+    bool  forwards{true};          // not read by the controller
     float maxSpeed{127}, minSpeed{0};
-    float targetTolerance{1.0};
+    float targetTolerance{-1.0};     // inches, negative = ChassisConfig
     float headingTolerance{2.0};     // VEX degrees
     float lead{0.5}, leadDecay{0.5};
 };
 
+`minSpeed` on a boomerang is not a speed floor. The controller scales its
+along-track output by `min(distToTarget / 6, 1)`, so inside 6 in the approach
+is throttled quadratically and crawls; `minSpeed / maxSpeed` is the floor on
+that SCALE. Raising it restores terminal authority without stopping the motion
+from converging, because the output is still proportional to the error.
+
+Setting it equal to `maxSpeed` switches the throttle off entirely. That is
+worth knowing because the throttle is there to prevent an overshoot a
+well-damped lateral loop does not have: on the simulator, off it, the same
+boomerang finishes 0.18 in out in 3.0 s instead of 0.22 in out in 4.5 s, with
+zero overshoot either way. It is what makes boomerang twice as slow as
+`moveToPoint` over the same distance. Whether your lateral loop is damped
+enough to do without it is a hardware question.
+
+Arc and boomerang were the only two motions that ignored
+`ChassisConfig::targetToleranceIn` -- both shipped a hard `1.0`, so raising or
+lowering the robot-wide tolerance silently did nothing to them. They now take
+the same `-1.0` fallback as everything else. The default is unchanged for a
+caller that leaves `ChassisConfig` alone, since that is 1.0 too.
+
 struct RAMSETEParams {
     float b{48.0};                    // aggressiveness, b > 0
     float zeta{0.85};                 // damping, 0 < zeta < 1
+    float smoothSpacingIn{2.0};      // resample the path; 0 = take as given
     float maxSpeed{127}, minSpeed{0};
     float targetTolerance{-1.0};     // inches, negative = ChassisConfig
     float headingTolerance{2.0};     // VEX degrees
@@ -244,6 +279,35 @@ struct RAMSETEParams {
 
 `b` and `zeta` use the conventional metre-based RAMSETE parameterization; the
 controller rescales to inches internally, so the textbook defaults work as-is.
+
+**The path you pass is control points, not the trajectory.** `moveRAMSETE`
+resamples it along a Catmull-Rom spline every `smoothSpacingIn` inches before
+the controller sees it, so three corner points describe a curve:
+
+```cpp
+std::vector<Pose> path = {{-24.0f, -24.0f, 0.0f},
+                          {0.0f, -40.0f, 0.0f},
+                          {24.0f, -24.0f, 0.0f}};
+chassis.moveRAMSETE(path, 5000);        // drives the curve, not the polyline
+```
+
+Without it those three poses are a polyline: RAMSETE cuts the corners, and
+the profile has no curvature to slow for because consecutive headings barely
+differ. The resampling also computes tangent headings, which is what
+`maxLateralAccel` reads — a hand-written list of zero headings is how the
+cornering limit gets switched off by accident.
+
+Set `smoothSpacingIn = 0` to drive a path exactly as given. An already-dense
+path resampled at 2 in comes back as very nearly itself, so the default is
+safe for one.
+
+`chad::splinePath(controls, spacingIn)` in
+`chad/movement_control/spline.hpp` is the same function, if you want the
+poses in hand. It is header-only and PROS-free; `test/host/spline_test.cpp`
+covers endpoints, interior interpolation, spacing, tangents, coincident
+controls, degenerate input and a closed loop. The browser preview's
+`buildPath()` matches it deliberately, down to the minimum of two samples per
+segment, so the sim draws the curve it drives.
 
 ```cpp
 enum class TurnDirection { CCW, CW, SHORTEST };
@@ -678,6 +742,16 @@ filter's own state is exact either way. A relocation bypasses it and lands in
 one write. Measure the noise it is smoothing with
 `Characterizer::localizationNoise()`.
 
+Phase 4 calls it **twice**, and the difference matters. The first call runs
+with the filters off, so its `sigmaThetaDeg` is the IMU on its own — that is
+what `mcl.imuVariance` and `ekf.imuSigmaRad` are, both sigmas in radians
+despite `imuVariance`'s name. The second runs with the filters on and measures
+the fused pose, which is the right thing for `suggestTolerance` and the wrong
+thing for the heading sigmas: feeding the EKF's own output back as its
+measurement noise would be circular. The written value is floored at 0.01 deg,
+the IMU's own resolution, because a zero sigma would give the filter infinite
+confidence and a singular update.
+
 ---
 
 ## Auton selector
@@ -715,10 +789,41 @@ const StepMetrics& m = tuner.lastMetrics();
 ```
 
 Each axis runs kP (grow until an overshoot or oscillation limit, keep best cost)
-→ kD (as a multiple of kP, stop when cost stops improving) → kI (only if
-steady-state error remains). Gains carry forward between step sizes. Results are
+→ kD (upward from the seed, stop when cost stops improving) → kI (off by
+default). kP carries forward between step sizes as a floor; kD and kI are
+re-searched, because the amplitude they were chosen at has changed. Results are
 applied to the chassis and returned; **nothing is persisted** — copy them into
 `ChassisConfig` yourself.
+
+### Why the ladder carries derivative
+
+The kP ladder runs with `kdSeedRatio * kP` of derivative already in place. That
+is not a detail — it is what makes the ladder work at all. Undamped, a good kP
+overshoots and oscillates, the cost function punishes exactly that, so a weak kP
+outscores a strong one and the ladder stops on its first rung. The kD phase then
+searches around the wrong kP and cannot recover: kD trades overshoot for settle
+time, it does not raise the proportional gain it was handed.
+
+Swept over 80 plant/step combinations (five response time constants × four
+friction levels × two axes × two amplitudes) against an exhaustive grid over kP
+and kD:
+
+| `kdSeedRatio` | mean excess | median | 90th pct | worst | ladder stuck on rung 1 | trials |
+|---|---|---|---|---|---|---|
+| `0` | +120% | +55% | +268% | +879% | 39/80 | 5.4 |
+| `0.05` | +43% | +28% | +96% | +234% | 16/80 | 6.3 |
+| **`0.075`** | **+39%** | **+24%** | **+84%** | +234% | **7/80** | 6.8 |
+| `0.10` | +46% | +29% | +96% | +237% | 2/80 | 7.0 |
+
+The plateau from 0.035 to 0.10 all lands near +40%, so the default is a
+mid-plateau choice rather than a knife edge. It buys that for 6.8 trials per
+step size against 5.4.
+
+The plant model this was swept on includes the derivative filter
+`PID::update` applies, and it has to: unfiltered, a large kD chatters on a 10 ms
+grid — 54 zero crossings on an otherwise settled trace — which trips
+`oscillationLimit` and stops the ladder for a reason that does not exist on the
+robot. Sweeping without it inverts the result and makes the seed look harmful.
 
 | `AutoTuneConfig` field | Default | |
 |---|---|---|
@@ -726,23 +831,77 @@ applied to the chassis and returned; **nothing is persisted** — copy them into
 | `distanceStepsIn` | `{24, 48}` | |
 | `trialMs` | `1500` | Each trial runs the full window |
 | `reps` | `2` | Out-and-back pairs per candidate, averaged |
-| `kpStart` / `kpStartLateral` | `20` / `4` | |
+| `kpStart` / `kpStartLateral` | `20` / `4` | Floors: the ladder only climbs |
 | `kpGrowth` | `1.5` | |
 | `overshootLimitPct` | `20` | Stop growing kP past this |
 | `oscillationLimit` | `3` | |
-| `kdRatioStep` | `0.05` | kD searched as a multiple of kP |
+| `kdSeedRatio` | `0.075` | kD carried while kP climbs — a derivative time in seconds |
+| `kdRatioStep` | `0.05` | kD then searched upward from the seed, in multiples of kP |
 | `steadyStateTolDeg` / `steadyStateTolIn` | `1.5` / `0.75` | kI only attempted above this |
 | `kiRatioStep` | `0.5` | kI as a multiple of kP, so per second. Live only with `includeIntegral` |
 | `includeIntegral` | `false` | The kI phase. Off: no standing load, and no windup range |
 | `maxIterations` | `6` | Per stage |
 | `weights` | see below | Cost function |
-| `onProgress` | empty | `void(const char* stage, PIDGains, float cost)` |
+| `tiltDeg` | empty | `float()` returning absolute chassis tilt |
+| `tiltAbortDeg` | `0.0` | Cut the trial when tilt passes this. 0 disables |
+| `onProgress` | empty | `void(const char* stage, PIDGains, const StepMetrics&)` |
+
+`tiltDeg` alone only records the peak, which `lastPeakTilt()` reports after
+the trial. That is enough to stop a kP *ladder* from climbing into a tip,
+because the next candidate is lower. It is not enough for a single trial at
+gains already too hot for the step size — and the step size is what is worth
+raising, since the linear region is always the last `127/kP` inches whatever
+the step, so a longer one enters it faster. `tiltAbortDeg` calls `abortMotion`
+from inside the telemetry callback, which the motion loop calls on its own
+task, so the flag it sets is the one the loop is about to test. `cancelMotion`
+is the wrong call there and deadlocks the motion task — see Motion status.
+
+An aborted trial's metrics describe a motion that did not finish, so check
+`lastTiltAborted()` **before** `StepMetrics::valid` — otherwise a tip reads as
+"no trace" and a refinement loop stops instead of backing the gain off.
 
 Each trial forces `targetTolerance = 0` so the motion cannot settle early. Without
 that the motion exits the instant it reaches tolerance and the overshoot is never
 observed.
 
-Budget roughly 3.5 minutes per axis at defaults.
+Budget about 6.8 trials per step size, so roughly 14 per axis at the two default
+amplitudes — each trial being `reps` out-and-back pairs of `trialMs`.
+
+### The search itself
+
+`chad/util/autotune_core.hpp` — PROS-free and allocation-free, so a whole tune
+runs on the host against a plant model rather than only on a robot. That is how
+the table above was measured.
+
+```cpp
+GainSearch search;
+search.reset(GainSearchConfig{}, {kpStart, 0, 0});
+for (float step : steps) {
+    search.beginStep();                      // kP carries, kD/kI re-search
+    while (!search.stepDone()) {
+        TrialRequest t = search.request();   // gains and phase to run next
+        search.submit(measure(t.gains, step));
+    }
+}
+PIDGains best = search.best();
+const StepMetrics& m = search.bestMetrics();  // the measurement of best()
+int trials = search.trials();
+```
+
+A request/submit state machine rather than a loop with a callback, because the
+caller owns the motion — the same search drives a real drivetrain, a simulated
+one, or an exhaustive grid comparison, with no duplicated logic.
+
+`bestMetrics()` is written in the same branch as `best()` and cleared by
+`beginStep`, so the kI gate can only read a measurement of the gains in hand at
+the current step size — never the previous amplitude. An invalid trial advances
+the phase instead of retrying, so a drivetrain that stops responding ends the
+search rather than hanging it.
+
+`MetricsAverage` averages the reps: a rejected rep is left out of the mean
+rather than contributing a zero, and if every rep is rejected the result is
+invalid but still carries the first rejection's opening error — which is the
+only clue to why a trial produced nothing.
 
 ### Step-response analysis
 
@@ -767,6 +926,239 @@ struct StepMetrics {
     bool  valid;      // false for empty, <4 samples, mismatched lengths, step <= 0
 };
 ```
+
+---
+
+## Localization autotuning
+
+`chad/util/localization_fit.hpp` — fits the MCL and EKF settings that used to
+be numbers off a simulator sweep. Driven by `autonCalibrateLocalization`
+(phase 5), which never drives the robot: you hand place it, it measures.
+
+**What is on the field decides how it measures, and what it can measure at
+all.** `kFieldIsClear` in `gamespecific/autons/tuning/support.hpp` says which.
+
+Wall truth from an opposing beam pair brackets an obstacle, and pays for that
+by needing both opposing walls in reach at once: on a 140.4 in span against a
+V5 sensor's roughly 79 in, only within 8.8 in of a centre line. On a bare
+field `solveAxisSingle` takes one beam per axis and the near wall is never
+more than half the span away, so the whole field is usable — at the cost of
+no blockage detection, which is why it is declared and not detected.
+
+The beam mixture is the one fit a bare field **cannot** do. Its short term
+describes an occluded reading; with nothing on the field there is no tail, EM
+drives `shortWeight` to nearly zero, and a filter with no occlusion allowance
+is what the first robot to stand in front of a sensor annihilates. Phase 5
+declines to touch `shortWeight`, `shortDecaySigmas` and `randWeight` when the
+field is declared clear, and warns if it sees a tail anyway — that is the
+field disagreeing with you. The resample-variance choice and MCL's sigma
+calibration do not care what is on the field and still run.
+
+A registered obstacle that is not physically there is worse than none:
+`clearFieldObstacles()` exists because MCL deadzones any beam a particle can
+point at one, so every phantom post is somewhere a wrong particle hides
+instead of explaining its reading.
+
+```cpp
+struct BeamMixture {
+    float hitWeight{1.0f};
+    float shortWeight{0.50f};
+    float shortDecaySigmas{1.2f};
+    float randWeight{0.0008f};
+};
+
+struct BeamMixtureFit {
+    BeamMixture params;
+    float hitFraction, shortFraction, randFraction;   // sum to 1
+    float meanLogLik;      // per sample
+    int   samples, iterations;
+    bool  valid;
+};
+
+BeamMixtureFit fitBeamMixture(const float* u, int n,
+                              float span = BEAM_SPAN_SIGMAS,
+                              int maxIters = 200, float tol = 1e-7f);
+BeamMixture    perBeamFromPair(const BeamMixture&);
+float          opposingPairSum(float fieldSpanIn, float alongA, float alongB);
+float          mountAlongAxis(float mx, float my, float thetaRad, bool xAxis);
+float          beamSigmaBase(float readingIn, float closeIn, float prop);
+```
+
+### The truth signal needs no pose
+
+Reading off the `+axis` wall gives `c = half - d_a - o_a`; off the `-axis` wall,
+`c = -half + d_b - o_b`. Setting them equal cancels the pose entirely:
+
+```
+d_a + d_b = span - o_a + o_b
+```
+
+So two opposing beams must sum to a constant fixed by the field span and the two
+mount offsets resolved along that axis — **wherever the robot happens to be**.
+No tape measure, no IMU position, and placement error cannot contaminate it,
+because placement never enters. That is what makes a hand-placed routine as
+good as a driven one for this particular fit.
+
+### Why EM and not a moment fit
+
+The mixture `MclTracking::buildGaussianLUT` evaluates, on the standardised
+residual `u = (measured - expected) / sigma`:
+
+```
+p(u) = hitWeight * exp(-u^2/2) + randWeight
+                 + [u < 0] * shortWeight * exp(u / shortDecaySigmas)
+```
+
+A short reading and an underestimated sigma both fatten the residual spread, so
+no moment separates them; the uniform floor is invisible in any moment low
+enough to estimate from a few hundred samples. Expectation maximisation instead
+assigns each residual a responsibility per component, so the tail is identified
+by the residuals *only* the tail can explain. Against planted parameters it
+recovers the mixture proportions to within 0.05 and the decay to within 0.35
+sigmas, and the fitted weights beat the shipped guess on the filter's own log
+likelihood — which is the only comparison that matters, since it is the filter
+that has to use them.
+
+The filter's form is unnormalised, because it only ranks particles against each
+other. Fitting needs comparable responsibilities, so the components are
+normalised over `[-span, span]` and converted back with `hitWeight` pinned at 1.
+`hitWeight` is therefore never reported: it sets the scale the other three are
+measured against.
+
+`perBeamFromPair` converts a fit made on pair sums to a single beam. The pair
+residual is `e_a + e_b`, so its Gaussian core is `sqrt(2)` wider while the tail
+keeps its own scale — an obstacle blocks one beam, essentially never both at
+once. The decay converts; the weights do not.
+
+### EKF trust in MCL, and recovery
+
+```cpp
+SigmaCalibration calibrateMclSigma(const float* reported, const float* errorIn,
+                                   int n, float floorQuantile = 0.9f);
+RecoveryScore    scoreRecovery(const RecoveryTrial*, int n);
+bool             recoveryBetterThan(const RecoveryScore&, const RecoveryScore&);
+```
+
+Particle spread is not a covariance: it measures agreement *between particles*,
+which collapses as they converge whether or not they converged on the truth. So
+`mean(err^2 / sigma^2)` comes out well above the 1.0 a calibrated filter would
+give, and `mclSigmaScale` is the square root of it. It never goes below 1 —
+scaling down would have the EKF trust MCL more than MCL has earned.
+
+`mclSigmaFloor` cannot come from the same average: a sigma collapsing toward
+zero makes individual terms enormous while barely moving the mean. It is a high
+quantile of the observed error instead.
+
+Recovery is scored on medians, and a trial that never reconverges counts as a
+failure rather than as a large time — letting it contribute one drags the
+comparison toward whichever setting failed most interestingly. `recoveryBetterThan`
+ranks convergence *rate* first: a setting that recovers slowly still recovers.
+
+### What one pass measures
+
+The hand move **is** the kidnap — MCL is still at the previous placement — so
+one pass of placements yields all three groups at once, and the two resample
+settings are rotated across placements so the run is a search rather than a
+single measurement.
+
+| Setting | How |
+|---|---|
+| `mcl.shortWeight`, `mcl.shortDecaySigmas`, `mcl.randWeight` | EM on pair residuals, filters off |
+| `ekf.mclSigmaScale`, `ekf.mclSigmaFloor` | reported sigma vs actual error while reconverging |
+| `mcl.distResampleVariance`, `mcl.thetaResampleVariance` | best of 3 candidates by recovery rate, then speed |
+
+Park square-ish with two walls in view, or no opposing pair exists and the
+placement is skipped. The tail fraction is only as good as the number of
+placements: each contributes the same sample count, so it estimates the fraction
+of *placements* with a blocked beam, and 15 of them resolve that to about ±0.11.
+
+`ekf.vertBiasProp`, `ekf.slipBiasProp` and `ekf.biasDecorrIn` are not fitted
+here — they are per inch driven, so a parked robot produces no signal. They are
+`autonCalibrateOdomBias`'s job, below.
+
+### Obstacles are assumed present
+
+Nothing in either routine assumes a clear field, because the field cannot be
+cleared. The truth solve uses `solveAxisBracketed`, which rejects an axis whose
+opposing pair disagrees by more than 3 sigma of combined beam noise — the
+signature of a blocked beam. Tolerance comes from the readings' own sigmas
+rather than a constant, since at 40 in a beam's sigma is already 2 in and a
+fixed threshold would either reject every clean pair up close or miss every
+obstacle far away.
+
+Blocked placements still contribute to the **beam mixture** — a blocked beam is
+precisely the tail the mixture exists to describe. They are excluded only from
+the truth-dependent parts.
+
+---
+
+## Odometry bias
+
+`autonCalibrateOdomBias` (phase 6). Fits the systematic part of odometry error
+from one-way legs with a wall solve at both ends. Needs **24 in** and nothing
+more.
+
+```cpp
+struct BiasLeg  { float lengthIn, alongErrIn, crossErrIn; };
+struct BiasFit {
+    float vertBiasProp, slipBiasProp;
+    float alongPerRootIn, crossPerRootIn;   // what is actually observable
+    float growthExponent;                   // 0.5 is the assumed shape
+    int   legs, groups;
+    bool  valid, shapeSuspect;
+};
+BiasFit fitOdomBias(const BiasLeg*, int n, float biasDecorrIn);
+```
+
+### biasDecorrIn is not identifiable, at any distance
+
+The EKF charges `vertBiasProp^2 * |ds| * biasDecorrIn` of variance per tick,
+accumulating to `vertBiasProp^2 * L * biasDecorrIn` over a leg of length `L`.
+`biasDecorrIn` occurs **nowhere else in the filter** — one line, multiplying both
+bias props. So double it, divide both props by `sqrt(2)`, and the filter behaves
+identically. Three settings, two degrees of freedom.
+
+This is why `fitOdomBias` takes `biasDecorrIn` as an argument rather than
+fitting it: only the products `vertBiasProp^2 * biasDecorrIn` and
+`slipBiasProp^2 * biasDecorrIn` are observable. Pass the convention you intend
+to keep — the routine passes whatever `config.cpp` already has — and the props
+come out consistent with it. **A fitted prop is meaningless without the
+`biasDecorrIn` it was fitted against**, which is why phase 6 prints both.
+
+A useful consequence: the 24 in ceiling costs nothing. The quantity that would
+have wanted long legs cannot be measured over any distance.
+
+### Root mean square, not variance
+
+The term exists to cover *systematic* error, and `P` has to cover the total
+error including its mean. So the fit uses `rms` of the signed error;
+subtracting the sample mean, as a variance would, removes exactly the part
+being measured. A pure wheel-scale error — identical on every leg, zero
+standard deviation — is the case that makes this concrete: a variance-based fit
+reports no bias at all, which is the one answer that cannot be right.
+
+`E[e^2 / L]` is the same for every leg length under the model, so its mean is
+the estimator. Regressing `e^2` on `L` would overweight the long legs, whose
+`e^2` has the largest spread.
+
+### Why one-way, and what the three lengths are for
+
+Out-and-back cancels a systematic error by construction: a 1% scale error
+over-reports both directions, the signed errors cancel, and the endpoint says
+nothing. That is exactly why `Characterizer::measureOdomDrift` (phase 3)
+measures the *random walk* and not this. A one-way leg with truth at both ends
+does not cancel.
+
+The three lengths (8, 16, 24 in) are a **model check**, not an identification.
+`growthExponent` regresses `log(rms)` on `log(L)`; the filter's `sqrt(L)` shape
+is 0.5, while an error that never decorrelates over this range would be 1.0.
+Outside 0.25 of 0.5 the fit sets `shapeSuspect` and the routine says so rather
+than quietly reporting a number fitted to the wrong shape.
+
+Every drive is a measurement and the direction alternates, so the robot
+oscillates inside its 24 in rather than walking away. A leg whose wall-solved
+length disagrees with the commanded one by more than half is thrown out, as is
+any leg where either end could not be pinned.
 
 ---
 
@@ -820,8 +1212,8 @@ struct NoiseFit {
 };
 
 struct OdomDriftFit {
-    float alongPerIn, lateralPerIn;   // residual error per inch driven
-    float thetaPerRad;
+    float alongPerIn, lateralPerIn;   // sigma per inch driven
+    float thetaPerIn;                 // heading sigma, radians per inch
     float distanceIn;
     int   reps;
     bool  valid;
@@ -846,6 +1238,18 @@ public:
         const std::array<pros::Distance*, MAX_DISTANCE_SENSORS>& sensors);
 };
 ```
+
+All three `OdomDriftFit` residuals are **sigmas**. The out-and-back sums
+`|residual|` because a signed sum would cancel, but every filter field they
+feed expects a standard deviation, and `E|X| = sigma * sqrt(2/pi)` for a
+zero-mean Gaussian — so `sigmaFromMeanAbs` multiplies by `sqrt(pi/2)`. Without
+it the figures handed to the filter are 20% low, which is the direction that
+makes a filter gate out the corrections it needs.
+
+`thetaPerIn` is per inch **driven**, not per radian turned: the legs are
+straight, so there is no rotation to divide by. It feeds
+`ekf.thetaNoisePerInch`. Nothing measures `ekf.thetaNoiseProp`, which is per
+radian actually turned and would need a routine that turns.
 
 The robot drives itself. `feedforward()` runs two phases, and the split is not
 an accident of history -- a single voltage ramp **cannot** identify `kA` at all.
@@ -997,10 +1401,60 @@ python -m http.server -d sim/web 8000    # localhost:8000
 ```
 
 ```sh
-bash sim/test/run.sh          # smoke: tracking, sensors, determinism
-node sim/test/tune.mjs        # sweeps below
-node sim/test/mpc.mjs         # experimental branch only
+bash sim/test/run.sh              # rebuild, then all three suites
+bash sim/test/run.sh --no-build   # against whatever is already built
+node sim/test/tune.mjs            # sweeps below
+node sim/test/mpc.mjs             # experimental branch only
 ```
+
+`run.sh` rebuilds by default. It used to build only with `--build`, and
+`test/verify.sh` called it with an `--out` flag it silently ignored — so the
+"simulator builds" gate never built anything, and passed for several commits
+against a stale wasm while `sim/build.sh` was broken and the current sources
+failed eight checks. Unknown flags are now an error for that reason.
+
+### Routing an auton
+
+The sim's route editor holds **real auton C++** — the same text you paste into
+`src/gamespecific/autons/`, executed against the real `Chassis` API on its own
+fiber through the same motion queue.
+
+```cpp
+chassis.setPose(Pose::fromVex(-48.0f, -60.0f, 90.0f));
+chassis.moveToPoint(-24.0f, -60.0f, 2500, {.maxSpeed = 90.0f, .lead = 4.0f});
+chassis.moveDistance(-12.0f, 1500);
+
+std::vector<Pose> path = {{-24.0f, -24.0f, 0.0f},   // control points; the sim
+                          {0.0f, -40.0f, 0.0f},     // splines through them
+                          {24.0f, -24.0f, 0.0f}};
+chassis.moveRAMSETE(path, 5000, {.b = 48.0f, .zeta = 0.85f}, true);
+```
+
+Designated initializers are applied per motion by name, and a trailing `true`
+runs the motion async. Anything the sim cannot apply is counted and shown
+rather than dropped — a `.lead` that the preview ignored would make it a
+different motion from the code it was handed.
+
+It refuses two things the compiler would also refuse: a field the struct does
+not declare, and designated initializers out of declaration order. Statements
+it cannot route (a lift call, a loop) are skipped and listed, never silently
+dropped. A misspelled `chassis` method is an error, because that is a typo.
+
+After a run it reports, per motion: duration, whether the timeout cut it off,
+how far it ended from its target, the closest the footprint came to a wall or
+post, and the localization error at that moment — plus the total against the
+15 s limit. None of that is visible in the drawn path, which is the point: a
+motion that sat out its timeout looks exactly like one that settled.
+
+Two conventions the parser follows because the library does. `Pose::theta` is
+standard-math radians, so `setPose({0, 0, 0})` faces +X (VEX 90) — and
+`moveDistance(-12.0f)` drives backward, because `Chassis::moveDistance` flips
+`forwards` itself for a negative target.
+
+`sim/test/auton_cpp.mjs` reads every params struct out of
+`include/chad/movement_control/*.hpp` and fails if the parser's field lists
+drift, then parses the autons that actually ship — `example.cpp` included,
+which exercises every motion type with a full params block on each.
 
 Gains that need a known true pose cannot be scored on hardware, so they are
 swept here.
@@ -1448,17 +1902,56 @@ you can see what `kG` is contributing.
 motion times out. Under MCL: 1 in against 1.5 in error failed 3/3, 3 in passed.
 Pick it with `localizationNoise()`.
 
+`lateralGains.kP` has a ceiling that has nothing to do with stability margin.
+`moveDistance` and `moveToPoint` have **no velocity profile** -- they are P+D
+against the drivetrain, so the only thing that stops them is the output leaving
+saturation in time to decelerate. `127/kP` is how far from the target that
+happens; the stopping distance is roughly speed times the drivetrain's response
+time. Once `127/kP` is the smaller of the two the robot sails through its
+waypoint and reverses out, and no tolerance or debounce can fix it. On the
+simulator's 70 ms lag the turn is sharp: 0.00 in of overshoot up to kP 14,
+0.40 in at 15, 1.22 in with seven reversals at 16, 3.5 in at 20. Your lag is
+not 70 ms, so measure it -- but the shape of the limit is real, and a final
+pose alone cannot see it. Watch the robot, or record the peak distance past
+the target.
+
 `bearingHoldDist` stays small. `atan2` to a target at shrinking range is mostly
 noise, which a tuned angular loop chases at 591 deg/s. Holding the last good
 bearing fixes that, but too large a radius holds a stale one: 3 failures in 15
 at 1.5 in, 12 in 15 at 6 in.
 
+It is the boomerang's radius too. Near the target the carrot has collapsed
+onto it, so the carrot bearing is noise; its weight in the blended heading is
+only 2%, but 2% of a random angle is a degree and a half of final heading
+error that no tolerance can tighten away. Holding the bearing inside
+`bearingHoldDist` took the same motion from 1.65 deg to 0.31 deg. Dropping the
+carrot term entirely instead does NOT work: it is the only lateral authority a
+boomerang has once it is locked to the final heading, and position then
+plateaus 0.30 in out.
+
+Arc and boomerang both used an unsigned distance as the along-track error, so
+the term could only grow and an overshoot drove away from the target rather
+than backing up. A boomerang aimed 34 in away left the target at 1.3 in and
+kept going to 9 in and 161 deg off before the timeout stopped it. Both now
+project onto the heading the way `moveToPoint` does. On an arc the magnitude
+is kept and only the sign is taken, because partway round the heading is up to
+half the sweep off the chord and a projection would throttle the term to
+nothing on a near-semicircle.
+
 `distResampleVariance` is not a smoothness knob. Lowering it improves every
 tracking number and removes kidnap recovery entirely — 3 recoveries in 4 at the
 default 1.5, 0 in 4 at 1.0 and below.
 
-`ffGains.kP` corrects actuator lag, so it depends on your motors. A lag sweep
-put 12 as the only value stable from 20 to 200 ms. Below 4 the path times out.
+`ffGains.kP` corrects actuator lag, so it depends on your motors -- and it
+depends on them more than one number can cover. Re-measured on the
+simulator's routing battery, the value that works tracks `responseTauMs`
+directly: at 140 ms, `kP` 12 is the best of the four tested; at the sim's
+default 70 ms it stalls the robot dead 0.36 in short of the last path point
+and burns the timeout, where 2 and 6 finish; at 30 ms every `kP` tested times
+out and only the open loop completes. So the earlier claim that 12 held from
+20 to 200 ms does not reproduce. Leave `useVelocityController` off until you
+have measured your own lag, which is what
+`autonCharacterize1Drive` is for.
 
 `integralClamp` defaults to 0, meaning disabled. Set it whenever you set `kI`,
 or a drivetrain held short of its target winds up without bound.
