@@ -8,12 +8,11 @@
 #include "chad/api.hpp"
 
 namespace chad {
-
 using namespace autons;
 
 namespace {
+constexpr float kImuSigmaFloorRad = 0.01f * DEG_TO_RAD;
 
-// Least squares y = a + b*x, plus the through-origin slope MCL's model wants.
 bool fitSigma(const std::vector<float>& x, const std::vector<float>& y,
               float& a, float& b, float& originSlope) {
     const int n = static_cast<int>(x.size());
@@ -29,8 +28,7 @@ bool fitSigma(const std::vector<float>& x, const std::vector<float>& y,
     originSlope = static_cast<float>(sxy / sxx);
     return true;
 }
-
-}  // namespace
+}
 
 void autonCharacterize4Filters() {
     Report out;
@@ -41,6 +39,18 @@ void autonCharacterize4Filters() {
     setFilters(false);
     auto ch = makeCharacterizer(out);
     const auto beams = ch.measureRangeNoise(distSensors);
+
+    const auto imu = ch.localizationNoise();
+    const float imuSigmaRad = std::max(imu.sigmaThetaDeg * DEG_TO_RAD,
+                                       kImuSigmaFloorRad);
+    {
+        auto m = chassis.mcl().config();
+        m.imuVariance = imuSigmaRad;
+        chassis.mcl().setConfig(m);
+        auto e = chassis.ekf().config();
+        e.imuSigmaRad = imuSigmaRad;
+        chassis.ekf().setConfig(e);
+    }
 
     for (int i = 0; i < MAX_DISTANCE_SENSORS; ++i) {
         if (beams.samples[i] > 8) {
@@ -83,17 +93,14 @@ void autonCharacterize4Filters() {
     out.result("mcl.rangeSigmaCloseIn = %.4ff", beams.worstSigmaIn);
     out.result("ekf.rangeSigmaBase = %.4ff", beams.worstSigmaIn);
     out.result("targetTolerance >= %.2ff", noise.suggestTolerance);
+    out.result("mcl.imuVariance = %.5ff", imuSigmaRad);
+    out.result("ekf.imuSigmaRad = %.5ff", imuSigmaRad);
     out.result("bearingHoldDist = %.2ff", noise.suggestBearingHold);
     out.result("pose sigma %.2fin pk %.2fin", noise.sigmaIn, noise.peakIn);
 
-    // The EKF gate is 3 sigma on the combined covariance, so a healthy filter
-    // rejects an MCL update now and then and never twice running. A streak that
-    // climbs, or a relocate nobody caused, means the assumed sigma is too small.
     out.result("gate streak %d reloc %d",
                chassis.ekf().mclRejectStreak(), chassis.ekf().relocateCount());
 
-    // Sigma against range needs more than one range, so back away from the wall
-    // and re-measure. Costs about 16 in behind the robot.
     constexpr int kStops = 3;
     constexpr float kStopIn = 8.0f;
     std::vector<float> xs, ys;
@@ -141,5 +148,4 @@ void autonCharacterize4Filters() {
         out.result("noise did not grow with range");
     }
 }
-
-}  // namespace chad
+}

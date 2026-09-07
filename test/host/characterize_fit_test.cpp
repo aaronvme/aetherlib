@@ -288,3 +288,32 @@ CHAD_TEST(characterizeFit, gatesRejectWhatTheyShould) {
     const float clean = (7.0f - kS - kV * 10.0f) / 201.0f;
     CHECK_NEAR(med.kA, clean, 0.0002);
 }
+
+CHAD_TEST(characterizeFit, madToSigmaMatchesAGaussianSample) {
+    // The drift routines sum |residual| because a signed sum cancels, but every
+    // filter field they feed is a sigma. Verify the factor against a sample
+    // rather than trusting the constant.
+    Rng rng(1234u);
+    double sumAbs = 0.0, sumSq = 0.0;
+    constexpr int kN = 200000;
+    constexpr double kTrueSigma = 0.037;
+    for (int i = 0; i < kN; i++) {
+        const double x = kTrueSigma * rng.gauss(1.0f);
+        sumAbs += std::fabs(x);
+        sumSq += x * x;
+    }
+    const double mad = sumAbs / kN;
+    const double sigma = std::sqrt(sumSq / kN);
+    CHECK_NEAR(sigma / mad, MAD_TO_SIGMA, 0.01);
+    CHECK_NEAR(sigmaFromMeanAbs(static_cast<float>(mad)), sigma, 0.001);
+
+    // sqrt(pi/2) exactly, and degenerate input stays at zero rather than
+    // handing the filter a negative sigma.
+    CHECK_NEAR(MAD_TO_SIGMA, std::sqrt(3.14159265358979 / 2.0), 1e-6);
+    CHECK(sigmaFromMeanAbs(0.0f) == 0.0f);
+    CHECK(sigmaFromMeanAbs(-1.0f) == 0.0f);
+
+    // Skipping the conversion understates the noise by 20%, which is the
+    // direction that makes a filter gate out corrections it needs.
+    CHECK_NEAR(mad / sigma, 0.7979, 0.005);
+}

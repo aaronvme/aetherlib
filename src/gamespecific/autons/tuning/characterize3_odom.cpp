@@ -7,18 +7,16 @@
 #include "chad/api.hpp"
 
 namespace chad {
-
 using namespace autons;
 
 void autonCharacterize3Odom() {
     Report out;
     out("phase 3: scale + odom drift");
     if (!headingOk(out)) return;
-    out("filters off. needs ~66 in ahead");
+    out("filters off. needs ~90 in ahead");
     setFilters(false);
     auto ch = makeCharacterizer(out);
 
-    // Your tape reading of the 48 in drive below; 0 skips the correction.
     constexpr float kTapeMeasuredIn = 48.2f;
 
     if (kTapeMeasuredIn > 0.0f) {
@@ -38,8 +36,8 @@ void autonCharacterize3Odom() {
         chassis.moveDistance(-48.0f, 6000);
     }
 
-    out("drift legs: 3x 48 in out and back");
-    const auto drift = ch.measureOdomDrift(48.0f, 3);
+    out("drift legs: 3x 72 in out and back");
+    const auto drift = ch.measureOdomDrift(72.0f, 3);
     if (drift.alongPerIn > 0.5f) {
         out.result("drift %.3f/in implausible --", drift.alongPerIn);
         out.result("it did not return. check phase 2");
@@ -50,9 +48,6 @@ void autonCharacterize3Odom() {
     const float along = std::max(drift.alongPerIn, kDriftFloor);
     const float lateral = std::max(drift.lateralPerIn, kDriftFloor);
 
-    // Both are fractions of distance travelled: imeVariance scales the vertical
-    // delta, horizDependentVarianceProp multiplies |dVert|. horizConstantNoise
-    // is inches per update and this measurement says nothing about it.
     auto mcl = chassis.mcl().config();
     mcl.imeVariance = along;
     mcl.horizDependentVarianceProp = lateral;
@@ -61,6 +56,8 @@ void autonCharacterize3Odom() {
     auto ekf = chassis.ekf().config();
     ekf.vertNoiseProp = along;
     ekf.slipNoiseProp = lateral;
+
+    if (drift.thetaPerIn > 0.0f) ekf.thetaNoisePerInch = drift.thetaPerIn;
     chassis.ekf().setConfig(ekf);
 
     out.result("copy to config.cpp:");
@@ -69,6 +66,8 @@ void autonCharacterize3Odom() {
     out.result("  = %.4ff", lateral);
     out.result("ekf.vertNoiseProp = %.4ff", along);
     out.result("ekf.slipNoiseProp = %.4ff", lateral);
+    out.result("ekf.thetaNoisePerInch");
+    out.result("  = %.5ff", drift.thetaPerIn);
     out.result("raw %.4f/%.4f floor %.3f", drift.alongPerIn,
                drift.lateralPerIn, kDriftFloor);
     if (kTapeMeasuredIn <= 0.0f) {
@@ -76,5 +75,4 @@ void autonCharacterize3Odom() {
         out.result("rerun for wheelDiameter");
     }
 }
-
-}  // namespace chad
+}

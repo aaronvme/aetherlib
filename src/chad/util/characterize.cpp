@@ -7,12 +7,9 @@
 #include "pros/rtos.hpp"
 
 namespace chad::tuning {
-
 namespace {
-
 constexpr float kVoltsPerPower = 12.0f / 127.0f;
-
-}  // namespace
+}
 
 Characterizer::Characterizer(Chassis& chassis, Drivetrain& drivetrain,
                              const CharacterizeConfig& config)
@@ -27,16 +24,12 @@ void Characterizer::drive(float volts, bool spin) {
     mDrivetrain.setVoltage(power, spin ? -power : power);
 }
 namespace {
-
-// Speed the sides report, in the sign convention the fit wants. Spinning, the
-// sides oppose, so magnitudes give wheel speed and the chassis speed is 0.
 float wheelSpeed(Drivetrain& dt, bool spin, float dir) {
     const float l = dt.leftVelocityInPerSec();
     const float r = dt.rightVelocityInPerSec();
     return spin ? 0.5f * (std::fabs(l) + std::fabs(r)) : dir * 0.5f * (l + r);
 }
-
-}  // namespace
+}
 
 FeedforwardFit Characterizer::feedforward(bool spinInPlace) {
     FeedforwardFit fit;
@@ -52,10 +45,6 @@ FeedforwardFit Characterizer::feedforward(bool spinInPlace) {
     const float degPerIn = 360.0f /
         (mDrivetrain.externalGearRatio() * PI * mDrivetrain.wheelDiameter);
 
-    // Anchoring the lowest level just above breakaway is worth as much as
-    // anything else here: kS is an intercept, and starting from a fixed 1.5 V
-    // makes it an extrapolation from whatever speed that happens to be, which
-    // cost 15-25% on kS in simulation against 8% when anchored.
     const float vLo = breakawayVolts(spinInPlace) + 0.3f;
     report("feedforward", spinInPlace ? "staircase (spin)" : "staircase (straight)");
 
@@ -73,8 +62,6 @@ FeedforwardFit Characterizer::feedforward(bool spinInPlace) {
         const float v = vLo + frac * (mConfig.maxVolts - vLo);
         if (v <= 0.0f) continue;
 
-        // Drive back toward where we started, so the staircase oscillates about
-        // the start instead of walking off the field.
         const float net = (mDrivetrain.averagePositionDeg() - startDeg) / degPerIn;
         const float dir = spinInPlace ? 1.0f : (net > 0.0f ? -1.0f : 1.0f);
         const float legStart = mDrivetrain.averagePositionDeg();
@@ -96,8 +83,6 @@ FeedforwardFit Characterizer::feedforward(bool spinInPlace) {
         mDrivetrain.setVoltage(0.0f, 0.0f);
         pros::delay(250);
 
-        // A dwell cut short has not reached steady state, so its mean is not a
-        // quasistatic point and cannot go in the fit.
         if (ranOutOfRoom || static_cast<int>(hold.size()) < holdN) {
             skipped++;
             continue;
@@ -116,9 +101,6 @@ FeedforwardFit Characterizer::feedforward(bool spinInPlace) {
         return fit;
     }
 
-    // Steps for kA. A least squares slope over slopeWindowMs, taken from where
-    // the robot actually broke away rather than from the command, so a rep that
-    // sat in stiction for 50 ms does not report that as low acceleration.
     report("feedforward", "steps");
     const int slopeN = static_cast<int>(mConfig.slopeWindowMs / mConfig.sampleMs);
     const int stepN = static_cast<int>(mConfig.stepMs / mConfig.sampleMs);
@@ -150,7 +132,6 @@ FeedforwardFit Characterizer::feedforward(bool spinInPlace) {
     const AccelFit acc = fitAccel(steps.data(), static_cast<int>(steps.size()),
                                   vel.kS, vel.kV, mConfig.maxKaSpread);
 
-    // Per in/s to per m/s divides by INCH_TO_METER; same for in/s^2.
     fit.kV = vel.kV / INCH_TO_METER;
     fit.kA = acc.kA / INCH_TO_METER;
     fit.kS = vel.kS;
@@ -207,8 +188,6 @@ float Characterizer::trackWidth() {
     mDrivetrain.setVoltage(0.0f, 0.0f);
     pros::delay(500);
 
-    // In-place rotation moves the sides opposite by theta * trackWidth / 2, so
-    // their difference over the same theta is the track width.
     const float dl = mDrivetrain.leftPositionIn() - l0;
     const float dr = mDrivetrain.rightPositionIn() - r0;
     if (turned < 1.0) {
@@ -279,8 +258,6 @@ NoiseFit Characterizer::localizationNoise() {
     out.sigmaThetaDeg = static_cast<float>(std::sqrt(vart / poses.size())) *
                         180.0f / PI;
 
-    // Tolerance has to clear the worst excursion or settle never fires. The hold
-    // radius measured out at about three sigma.
     out.suggestTolerance = std::max(1.0f, out.peakIn * 1.5f);
     out.suggestBearingHold = std::max(1.0f, out.sigmaIn * 3.0f);
 
@@ -303,10 +280,6 @@ OdomDriftFit Characterizer::measureOdomDrift(float legIn, int reps) {
         pros::delay(300);
         const Pose end = mChassis.getPose();
 
-        // The robot is physically back where it began, so anything odometry
-        // reports here is its own error. Split it along and across the heading
-        // it started on: the two have different causes and MCL models them
-        // separately.
         const float dx = end.x - start.x;
         const float dy = end.y - start.y;
         const float c = std::cos(start.theta), sn = std::sin(start.theta);
@@ -321,11 +294,11 @@ OdomDriftFit Characterizer::measureOdomDrift(float legIn, int reps) {
         return fit;
     }
     fit.distanceIn = static_cast<float>(driven);
-    fit.alongPerIn = static_cast<float>(along / driven);
-    fit.lateralPerIn = static_cast<float>(lateral / driven);
-    // Straight legs turn very little, so a heading residual here is drift rather
-    // than a scale error on rotation. Reported per radian only if it turned.
-    fit.thetaPerRad = static_cast<float>(theta / driven);
+
+    fit.alongPerIn = sigmaFromMeanAbs(static_cast<float>(along / driven));
+    fit.lateralPerIn = sigmaFromMeanAbs(static_cast<float>(lateral / driven));
+
+    fit.thetaPerIn = sigmaFromMeanAbs(static_cast<float>(theta / driven));
     fit.valid = true;
 
     std::snprintf(msg, sizeof(msg), "along %.4f/in  lateral %.4f/in over %.0f in",
@@ -348,7 +321,7 @@ RangeNoiseFit Characterizer::measureRangeNoise(
         for (int i = 0; i < MAX_DISTANCE_SENSORS; i++) {
             if (sensors[i] == nullptr) continue;
             const double mm = sensors[i]->get_distance();
-            // Sentinel and error returns are not noise, they are absence.
+
             if (!std::isfinite(mm) || mm <= 0.0 || mm >= 9000.0) continue;
             const double in = mm / 25.4;
             sum[i] += in;
@@ -374,7 +347,6 @@ RangeNoiseFit Characterizer::measureRangeNoise(
 float Characterizer::breakawayVolts(bool spinInPlace) {
     char msg[96];
 
-    // From rest means from rest: a coasting drivetrain reads as motion at 0 V.
     report("breakaway", "waiting for rest");
     mDrivetrain.setVoltage(0.0f, 0.0f);
     for (int i = 0; i < 300; ++i) {
@@ -395,7 +367,7 @@ float Characterizer::breakawayVolts(bool spinInPlace) {
         const float r = mDrivetrain.rightVelocityInPerSec();
         const float speed = spinInPlace ? 0.5f * (std::fabs(l) + std::fabs(r))
                                         : std::fabs(0.5f * (l + r));
-        // Not minSpeedInPerSec -- stiction is the thing being measured.
+
         if (v > 0.0f && speed > 1.0f) { volts = v; break; }
     }
     mDrivetrain.setVoltage(0.0f, 0.0f);
@@ -404,5 +376,4 @@ float Characterizer::breakawayVolts(bool spinInPlace) {
     report("breakaway", msg);
     return volts;
 }
-
-}  // namespace chad::tuning
+}
