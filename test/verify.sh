@@ -70,7 +70,9 @@ fi
 if [ "$WITH_SIM" = 1 ]; then
     echo "== 3/4 simulator builds and its suites pass =="
     # build.sh must not be piped: it exits 0 through a pipe even when em++ fails.
-    ./sim/test/run.sh --out "$OUT/sim" > "$OUT/sim.log" 2>&1
+    # run.sh rebuilds by default -- it used to be handed an --out it ignored,
+    # which left this gate testing a checked-in wasm and calling it a build.
+    ./sim/test/run.sh > "$OUT/sim.log" 2>&1
     step "sim build + suites" "$OUT/sim.log" $?
 else
     results+=("SKIP  simulator (--no-sim)")

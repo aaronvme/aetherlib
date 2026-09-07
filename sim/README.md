@@ -118,41 +118,301 @@ The world replays exactly for a given seed. **MCL does not.**
 initialisation and resampling jitter differ every run. If you want
 bit-reproducible MCL runs, that constructor needs an optional seed parameter.
 
-## Route DSL
+## Routing an auton
 
-The **Route** tab runs a text routine against the real `Chassis` API, on its own
-fiber, through the same motion queue and the same `waitUntilSettled()`. Edit and
-re-run without recompiling.
+The **Route** tab holds **auton source**. Not a DSL that resembles one -- the
+same C++ you paste into `src/gamespecific/autons/`, run against the real
+`Chassis` API on its own fiber, through the same motion queue and the same
+`waitUntilSettled()`. Edit and re-run without recompiling.
 
+```cpp
+void autonBlueLeft() {
+    chassis.setPose(Pose::fromVex(-48.0f, -60.0f, 90.0f));
+
+    chassis.moveToPoint(-24.0f, -60.0f, 2500);
+    chassis.turnToHeading(0.0f, 1200, {.maxSpeed = 90.0f});
+    chassis.moveDistance(-12.0f, 1500);
+    chassis.turnToPoint(0.0f, 0.0f, 1500);
+    chassis.moveArc(24.0f, 24.0f, 20.0f, 3000);
+    chassis.moveBoomerang(48.0f, 24.0f, 180.0f, 3500, {.lead = 0.6f});
+    chassis.swingToHeading(270.0f, SwingSide::Left, 1500);
+    pros::delay(300);
+
+    std::vector<Pose> path = {
+        {-24.0f, -24.0f, 0.0f},
+        {0.0f, -40.0f, 0.0f},
+        {24.0f, -24.0f, 0.0f},
+    };
+    chassis.moveRAMSETE(path, 5000, {.b = 48.0f, .zeta = 0.85f});
+}
 ```
-setPose(x: -48, y: -60, h: 90);
-moveTo(x: -24, y: -60, t: 2500);
-moveTo(x: -48, y: 24, back: true);
-turnTo(heading: 140);          turnTo(x: 10, y: 20);
-drive(distance: 12);           drive(distance: -8);
-boomerang(x: 10, y: 20, h: 90);
-arc(x: 10, y: 20, radius: 24);
-swing(heading: 90, side: right);
-via(x: -24, y: -24);           followPath(t: 5000);
-delay(ms: 300);                waitSettled();
-maxSpeed(80);
-lateralGains(kp: 5, ki: 0, kd: 5);
-angularGains(kp: 50, ki: 0, kd: 6);
+
+**Copy as auton** wraps it in the includes and the `namespace chad` and copies
+it out; paste and compile. That is the whole point -- what you tuned on screen
+is what ships, with no translation step in between to get wrong.
+
+### What it understands, and what it refuses
+
+Designated initializers are honoured, per motion, by name:
+`{.forwards = false, .maxSpeed = 90.0f, .lead = 4.0f}`. So is a trailing
+`true` for an async motion. A `.lead` you wrote and the sim ignored would make
+the preview a different motion from the code, so anything it cannot apply is
+counted in the `?` column of the report rather than dropped.
+
+Two mistakes are reported as **errors**, because both are compile errors on the
+robot and catching them here is free:
+
+- a field the struct does not have (`.speed` on `MoveToPointParams`)
+- designated initializers out of declaration order, which C++20 rejects
+
+Anything it cannot route -- a lift call, a loop, a local variable -- is
+**skipped and listed** under the editor. Never silently ignored: a preview that
+quietly dropped half your auton would be worse than none. A misspelled
+`chassis` method is an error rather than a skip, because that is a typo.
+
+Note the two conventions real code carries, both of which the parser respects
+because the library does:
+
+- `Pose::theta` is **standard-math radians**, so `setPose({0, 0, 0})` faces +X
+  (VEX 90), not VEX 0. `Pose::fromVex(x, y, deg)` is the readable form and the
+  one **Copy as auton** writes.
+- `moveDistance(-12.0f)` drives backward. `Chassis::moveDistance` flips
+  `forwards` itself for a negative target, so the sign is not a shorthand the
+  sim invented.
+
+### Paths: control points, splined for you
+
+A `std::vector<Pose>` is a list of **control points**, not the path. Place
+three and the trajectory comes out smooth, without asking, exactly as `via()`
+did:
+
+```cpp
+std::vector<Pose> path = {
+    {-24.0f, -24.0f, 0.0f},
+    {0.0f, -40.0f, 0.0f},
+    {24.0f, -24.0f, 0.0f},
+};
+chassis.moveRAMSETE(path, 5000);
 ```
 
-`via()` points define a Catmull-Rom spline and `followPath()` drives it with
-`moveRAMSETE`. The browser samples the spline and uploads the exact points the
-controller receives, so the purple curve drawn on the field IS the trajectory --
-there is no second implementation to drift. Heading ticks along it make a
-reversed or twisted spline obvious before you run it.
+Drag the purple points on the field and the curve follows. Heading ticks
+along it make a reversed or twisted curve obvious before you run it.
 
-`t:` sets a per-motion timeout in ms. Waypoints draw on the field as a numbered
-dashed preview and the HUD shows which command is executing. **Shift-click the
-field** to append a `moveTo` there. Routes save to `localStorage`.
+**The smoothing is `moveRAMSETE`'s, not the simulator's.** It resamples the
+path it is handed along a Catmull-Rom spline every
+`RAMSETEParams::smoothSpacingIn` inches -- 2 in by default -- before the
+controller sees anything, and computes the tangent headings the velocity
+profile needs while it is there. So those three poses are all you write in
+the auton as well: paste this straight into
+`src/gamespecific/autons/` and the robot generates the same curve at runtime.
+
+Which is why the sim uploads the three control points and nothing else, then
+asks the wasm for the curve to draw. One generator
+(`chad::movement_control/spline.hpp`), used by the preview, by this run and by
+the robot. Set `.smoothSpacingIn = 0.0f` to drive a path exactly as given.
+
+The old `via()` preview sampled the same curve in JavaScript, in
+`buildPath()`, and that function is still there for the route DSL --
+`sim/test/auton_cpp.mjs` asserts its spacing still matches the header's, so
+the two previews cannot disagree.
+
+### Editing on the field
+
+Waypoints draw as a numbered dashed preview and the HUD shows which command is
+executing. **Shift-click** appends a `moveToPoint` inside the function body.
+**Drag a numbered point** and the x/y literals in the source are rewritten in
+place -- keeping the `f` suffix, touching nothing else on the line. Source
+saves to `localStorage` under its own key, so a route saved in the old DSL is
+left alone rather than failing to parse on load.
+
+### The report is the part that helps
+
+After a run, **Last run** lists each motion: how long it took, whether it was cut
+off by its timeout, how far it ended from what it was aimed at, the closest the
+footprint came to a wall or post, and the localization error at that moment.
+Plus the total against the 15 s auton limit.
+
+The drawn path cannot show any of that. A motion that sat out its timeout looks
+identical on the field to one that settled, and a route that passes an inch
+from a post looks fine right up until the match where it does not.
+
+Two details worth knowing:
+
+- **Cut off** is a heuristic, and the only one available: nothing in the
+  `Chassis` API says why a motion returned, so a blocking motion whose duration
+  reached its timeout within one loop tick is reported as cut off.
+- **Clearance** counts goal *segments*, which the physics does not collide
+  with -- only the perimeter and the posts stop the robot. So a route can drive
+  clean through a goal wall and still look fine on the field while the
+  clearance column goes negative. That disagreement is deliberate; the column
+  is the only warning you get.
 
 Opcode numbers are the contract between `sim/web/route_dsl.js` and `RouteOp` in
-`sim/bridge/bridge.cpp`. `sim/test/dsl.mjs` reads the C++ enum back out and
-fails if the two drift apart.
+`sim/bridge/bridge.cpp`; `sim/test/dsl.mjs` reads the C++ enum back out and
+fails if they drift. `sim/test/auton_cpp.mjs` does the same for the params
+structs -- it reads every field of every struct out of
+`include/chad/movement_control/*.hpp` -- and then parses the autons that
+actually ship in `src/gamespecific/autons/`, `example.cpp` included, which
+exercises every motion type with a full params block on each.
+
+`sim/test/app_boot.mjs` loads `app.js` against a stubbed DOM and drives the
+render loop, every button and a run of half-typed source through it. Shallow on
+purpose -- it does not check what was drawn. It exists because app.js had no
+test at all, and the gap bit once: a rename left `drawPlan()` reading a
+variable that no longer existed, `frame()` threw on its first call, and the
+page came up with a dead clock and an empty field while every other suite
+stayed green.
+
+## The sim has its own tuning
+
+`kSimTuning` in `sim/bridge/bridge.cpp` is applied over
+`gamespecific/config.cpp` at `sim_init`. It is deliberately **not** the robot's
+numbers, and is not meant to become them. The sim's drivetrain is a first-order
+lag with no mass, torque or traction, so a gain that is right here is optimistic
+there. What it is for is the one thing the sim is authoritative about: **the
+route you drew and the route the sim drives being the same route.**
+
+**None of it reaches the robot.** `bridge.cpp` is a simulator source: the
+firmware build never compiles it, so `kSimTuning` cannot alter what the brain
+runs. `gamespecific/config.cpp` stays the single source of truth for the robot,
+and its values still come from the on-hardware routines --
+`autonCharacterize*`, `autonAutotune*`, `autonCalibrate*`. The sim does not
+replace any of that and is not evidence about any of it.
+
+Only overrides are listed, so the table doubles as the record of what the sim
+disagrees with the robot about. Today that is seven numbers:
+
+| | robot | sim | why |
+|---|---|---|---|
+| `lateralKp` | 9.012 | 12 | at 9 the nine point motions take 16.5 s; at 12 they take 12.5 s. Not higher -- see below |
+| `targetToleranceIn` | 1.0 | 0.30 | the robot's has to exceed its localization error; the sim's dead reckoning is exact |
+| `ramseteMaxAccel` | 50 | 30 | RAMSETE's endpoint error IS its overshoot, so arriving slower is the whole fix: 0.48 in past the last point at 50, 0.18 in at 30 |
+| `ramseteB` | 48 | 96 | at 48 a path does not merely track worse, it times out: 0.89 in cross-track and 19.2 s over five paths against 13.3 s |
+| `boomLead` / `boomLeadDecay` / `boomMinSpeed` | 0.5 / 0.5 / 0 | 0.7 / 0.15 / 127 | boomerang throttles its own approach inside 6 in; `minSpeed` floors that scale, and at 127 it switches off |
+
+### The overshoot trap, which caught this exact file
+
+`moveDistance` and `moveToPoint` have **no velocity profile.** They are P+D
+against a first-order lag, so the only thing that stops them is the output
+leaving saturation in time. The plant needs `v*tau` to stop -- 4.4 in from full
+speed -- and `127/kP` is how far from the target the output comes off the rail:
+10.6 in at `kP` 12, 7.9 in at 16. Past that the arithmetic stops working.
+
+Measured at the default 70 ms lag, over the nine point motions:
+
+| `lateralKp` | overshoot | reversals | total |
+|---|---|---|---|
+| 9.012 (robot) | 0.00 in | 0 | 16.5 s |
+| 12 | 0.00 in | 0 | 12.5 s |
+| 14 | 0.00 in | 0 | 9.4 s |
+| 15 | 0.40 in | 0 | 9.6 s |
+| 16 | 1.22 in | 7 | 10.6 s |
+| 20 | 3.51 in | 9 | 10.8 s |
+
+14 is faster and this table says 12, because 14 only holds at 70 ms: at 100 ms
+it overshoots 0.82 in and reverses seven times, where 12 is still clean. 12 is
+the largest gain that survives the plant moving.
+
+**An earlier pass of this tuning shipped `kP` 20.** It scored perfectly, because
+the score only looked at the final pose -- and a 24 in drive that sails 3.5 in
+past the waypoint, reverses, and creeps back finishes at 0.00 in. It is also the
+most obviously badly tuned thing you can watch a robot do. That is why
+`accuracy.mjs` has `over in` and `revs` columns, and why they are bounded.
+
+### A tolerance below what a controller can deliver is not accuracy
+
+One tolerance covers every motion, because past 0.30 in it stops buying anything.
+Over ten point motions: 0.30 in of tolerance lands 0.11 in out in 12.3 s, and
+0.12 in lands 0.05 in out in 14.2 s. The last 0.06 in is not worth 1.9 s of a
+15 s auton on a robot that is 15 in wide.
+
+It is also the number RAMSETE and boomerang need. Both have a floor on how close
+they can get, and a tolerance under it does not finish closer -- it sits out the
+timeout at the same distance. At 0.12 in the 48 in curve burned all 6 s and still
+finished 0.19 in out; at 0.30 in it exits in 3.1 s, 0.19 in out. So they inherit
+this instead of carrying overrides.
+
+### Re-running it
+
+```sh
+node sim/test/accuracy.mjs              # the battery, as a table
+node sim/test/accuracy.mjs --gate      # exit 1 if a bound is missed
+node sim/test/accuracy.mjs --loc=5    # with MCL+EKF up
+node sim/test/accuracy.mjs --tau=140  # against a slower motor response
+node sim/test/accuracy.mjs --stock    # revert kSimTuning, i.e. the robot's own
+node sim/test/tune_routing.mjs all 2  # sweep everything, twice
+```
+
+`sim/test/accuracy.mjs` runs one motion per case -- a case that chains motions
+cannot say which one missed -- and measures **ground truth** against what the
+command asked for. Not the estimate: the estimate agreeing with itself is what a
+localization bug looks like. It is a gate in `sim/test/run.sh`, and the same
+module the sweeps import, so a tuning run and the gate cannot disagree about what
+accurate means.
+
+`--stock` is the measurement that says whether any of this was worth doing. Same
+binary, same battery, same 32.5 s of sim time, only those seven numbers
+different:
+
+| | robot's values | sim's values |
+|---|---|---|
+| bounds missed | 13 of 24 | 0 |
+| worst end error | 1.40 in | 0.22 in |
+| worst heading error | 11.6 deg | 0.17 deg |
+| worst cross-track | 0.96 in | 0.60 in |
+| worst overshoot | 0.30 in | 0.18 in |
+| reversals | 0 | 0 |
+| motions cut off by their timeout | 1 | 0 |
+
+The 0.5 in floor across every point-to-point motion in the left column is the
+1 in tolerance, not the controller: the debounce expires while the robot is still
+closing. That is the number the robot has to live with and the sim does not.
+Neither column overshoots -- the robot's gain is well damped, just slow.
+
+As of this writing every motion the editor can emit finishes within **0.22 in**
+and **0.17 deg** of what it was asked for, none of them overshoots its waypoint
+by more than 0.18 in, **none reverses direction at all**, and the whole 24-case
+battery runs in 32.6 s of sim time. Chained into a six-motion route, the robot
+ends 0.05 in and 0.28 deg from the last command in 7.9 s.
+
+`tune_routing.mjs` reads its starting point out of the wasm rather than a list in
+the file, so it converges on whatever `kSimTuning` already holds instead of
+silently re-testing the library defaults. Two things about reading its output:
+
+- **A timeout costs 25 penalty points, which turns the cost into a cliff.** Swept
+  in the wrong order, every RAMSETE gain row reports whether it happened to
+  squeeze inside the current tolerance rather than how well it tracked. That is
+  why the gain sweeps pin a tolerance the follower can comfortably meet and
+  tighten it afterwards.
+- **The argmin is not always the answer.** Several knobs improve monotonically in
+  a direction the sim cannot charge for. Where the table keeps the robot's value
+  against a sweep that preferred otherwise, `kSimTuning` says so and why.
+
+### Two things it is not tuned for
+
+**Localization.** Route in dead reckoning, which is the default. Ticking MCL
+and/or the EKF costs 0.35-0.44 in of mean estimate error and up to 3.3 in at
+worst, and the controller drives on the estimate, so ground-truth error goes from
+0.27 in to 1.5 in and motions start timing out. That is not a filter mistuning to
+go and fix: in a sim whose odometry is exact, every correction from a noisy
+sensor is a step away from truth. Loosening the tolerances only trades the
+timeouts for a larger miss -- at 2.5 in of tolerance nothing times out and the
+worst motion finishes 4.7 in from its target. If you want the filters to earn
+their keep, give odometry something to be wrong about first: `wheel slip` and
+`IMU drift` are the **Drive error** and **Sensor error** sliders on the left, and
+`sim/test/tune.mjs` is the sweep that scores them.
+
+**Your motors.** `responseTauMs` is the only thing standing in for motor
+dynamics, and this tuning is fitted to its 70 ms default. It passes the whole
+battery from 30 to 70 ms. At 100 ms the turns start overshooting their heading
+(2.3 deg), and at 140 ms that is 8.7 deg. Nothing about that window is a claim
+about the robot.
+
+It does suggest one thing to look at on the robot, though, and it is the robot's
+own gains that do it: `angularGains` at 176.607/9.933 are what overshoot above
+70 ms, and a real drivetrain with mass in it responds slower than that. If turns
+overshoot on hardware, `angularKd` is the term that is short -- but measure it
+there. This is a hypothesis from a plant with no mass, not a result.
 
 ## Plots
 
@@ -316,13 +576,16 @@ where the two disagree is exactly where MCL will mislocalize on a real field.
 
 ## Not built yet
 
-- **Draggable waypoints.** The route preview draws numbered waypoints but they
-  are not draggable yet; shift-click appends instead. Dragging would have to
-  rewrite the matching line in the editor text.
-- **Replay scrubbing.** Runs are recorded and plotted, but you cannot drag a
-  time cursor and watch the field rewind.
+- **A load model.** Motion is kinematic: voltage maps to a target wheel speed
+  through a first-order lag, with no mass, torque or friction. So the sim
+  rewards aggression whose cost it cannot show — sweep `responseTauMs` before
+  trusting any tuning result that came out of it.
+- **Rectangle-to-segment collision.** The robot stops on the perimeter and the
+  goal posts, but drives straight through goal walls. The route report's
+  clearance column measures against them, which is why it is worth reading.
 - Lift, intake and other subsystem simulation — the shims exist and the code
-  runs, but nothing physical is modelled.
+  runs, but nothing physical is modelled. Subsystem calls in a routed auton are
+  skipped and listed rather than run.
 
 ## Library changes made for the sim
 
@@ -334,3 +597,6 @@ All small, and useful on-robot too:
   `std::min` without including the header; it happened to compile on
   `arm-none-eabi-gcc` through transitive includes, but that is not portable.
 - `gamespecific/robot_config.{hpp,cpp}` renamed to `config.{hpp,cpp}`.
+- `Chassis::setSettleTolerances()` / `setLateralSlew()` — runtime
+  counterparts of the `ChassisConfig` fields. `setPidTuning` deliberately
+  does not touch them: damping and tolerance are not the same knob.

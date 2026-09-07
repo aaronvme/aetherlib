@@ -169,4 +169,36 @@ bool Field::collides(float x, float y, float radius, bool includeCircles) const 
     return false;
 }
 
+Field::Nearest Field::nearest(float x, float y) const {
+    Nearest best;
+    best.dist = 1e9f;
+
+    for (const auto& s : mSegments) {
+        const float ex = s.x2 - s.x1, ey = s.y2 - s.y1;
+        const float len2 = ex * ex + ey * ey;
+        // Clamp the projection so an endpoint answers for anything past it,
+        // otherwise a point beyond a short goal wall measures to the infinite
+        // line and reads closer than it is.
+        float t = (len2 > 1e-9f) ? ((x - s.x1) * ex + (y - s.y1) * ey) / len2 : 0.0f;
+        t = (t < 0.0f) ? 0.0f : (t > 1.0f ? 1.0f : t);
+        const float cx = s.x1 + t * ex, cy = s.y1 + t * ey;
+        const float d = std::sqrt((x - cx) * (x - cx) + (y - cy) * (y - cy));
+        if (d < best.dist) best = {d, cx, cy};
+    }
+
+    for (const auto& c : mCircles) {
+        const float dx = x - c.x, dy = y - c.y;
+        const float len = std::sqrt(dx * dx + dy * dy);
+        const float d = len - c.r;
+        if (d < best.dist) {
+            // Project onto the post's surface, so the direction is the same one
+            // a footprint has to make room in.
+            const float ux = (len > 1e-6f) ? dx / len : 1.0f;
+            const float uy = (len > 1e-6f) ? dy / len : 0.0f;
+            best = {d, c.x + ux * c.r, c.y + uy * c.r};
+        }
+    }
+    return best;
+}
+
 }  // namespace sim

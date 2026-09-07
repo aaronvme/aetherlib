@@ -28,13 +28,14 @@ OUT="sim/web/chad_sim.mjs"
 # sim runs the same code that ships to the brain. autonselector.cpp is replaced
 # by a non-LVGL stub; main.cpp is excluded because the bridge owns the entry
 # points instead of the competition control system.
+#
+# Both trees are globbed rather than listed. The old list named
+# src/gamespecific/autons.cpp, which stopped existing when the routines moved
+# into src/gamespecific/autons/ -- and nothing noticed, because the one gate
+# that claims to build the sim was not calling this script.
 SOURCES=(
     $(find src/chad -name '*.cpp' -not -path '*auton_selector*')
-    src/gamespecific/config.cpp
-    src/gamespecific/autons.cpp
-    src/gamespecific/lift.cpp
-    src/gamespecific/controls.cpp
-    src/gamespecific/tuning.cpp
+    $(find src/gamespecific -name '*.cpp')
     sim/platform/autonselector_sim.cpp
     sim/platform/pros_support.cpp
     sim/platform/sim_runtime.cpp

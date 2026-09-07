@@ -43,6 +43,15 @@ void World::init() {
     mParams.trackWidthIn    = chad::drivetrain.trackWidth;
     mParams.maxWheelRpm     = chad::drivetrain.rpm;
 
+    // And the IMU's calibration, for the same reason. The under-report has to
+    // be the inverse of whatever ScaledIMU is correcting by or the two do not
+    // cancel, and the robot's measured 360/359 against this default's assumed
+    // 360/354.25 left the heading reading 1.19 deg low from the first tick --
+    // which is a 1.3 in cross-track error after 63 in of straight driving,
+    // attributable to nothing the test could see.
+    const double scale = chad::imu.scaleFactor();
+    if (scale > 0.0) mParams.imuUnderReport = static_cast<float>(1.0 / scale);
+
     field().loadDefault();
     setPhysicsFn([this](double dtMs) { this->step(dtMs); });
 }
@@ -71,10 +80,10 @@ void World::resetTo(const chad::Pose& pose) {
     // VEX convention (0 = forward, clockwise positive).
     //
     // Scale by underReport for the same reason the per-tick deltas are: the bus
-    // holds what the PHYSICAL sensor reports, and ScaledIMU multiplies by
-    // 360/354.25 on the way out. Seeding the true angle here instead would make
-    // the corrected heading read 1.6% high from the first tick -- a constant
-    // offset that looks exactly like a real miscalibration.
+    // holds what the PHYSICAL sensor reports, and ScaledIMU multiplies its own
+    // scale factor back in on the way out. Seeding the true angle here instead
+    // would make the corrected heading read high from the first tick -- a
+    // constant offset that looks exactly like a real miscalibration.
     mImuRotationDeg = chad::stdRadToVexDeg(pose.theta) * mParams.imuUnderReport;
 
     for (int i = 1; i < kMaxSmartPorts; i++) {
@@ -129,11 +138,18 @@ void World::updateDrive(double dtSec) {
 
     // Commanded voltage -> target wheel speed. Motors in a group all carry the
     // same command, so reading the first port of each side is sufficient.
+    //
+    // The reversal flag is deliberately NOT applied. A drivetrain's port signs
+    // exist to cancel the mirrored mounting of one side, so a positive command
+    // drives both sides forward -- which is why publishEncoders() writes
+    // `reversed ? -q : q` and lets the shim negate it back on read. Applying it
+    // here as well made the two paths disagree: with the real robot's ports
+    // (-18, -19, -12 on the left) a straight-ahead command spun the sim in
+    // place at 230 deg/s, and every motion test failed as a consequence.
     auto sideTargetIn = [&](const pros::MotorGroup* group, float scale) -> float {
         if (group == nullptr || group->ports().empty()) return 0.0f;
         const auto& m = bus().motors[group->ports()[0]];
-        const double mv = m.reversed ? -m.commandedMv : m.commandedMv;
-        return static_cast<float>(mv / 12000.0) * vMax * scale;
+        return static_cast<float>(m.commandedMv / 12000.0) * vMax * scale;
     };
 
     const float targetL = sideTargetIn(chad::drivetrain.leftMotors,  mParams.leftScale);

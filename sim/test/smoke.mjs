@@ -30,6 +30,11 @@ const api = {
   routePush:   c('sim_route_push', null, ['number','number','number','number','number']),
   routeRun:    c('sim_route_run', null, []),
   routeIndex:  c('sim_route_index', 'number', []),
+  routeOpt:    c('sim_route_opt', null, ['string', 'number']),
+  routeAsync:  c('sim_route_async', null, []),
+  routeReport: c('sim_route_report_json', 'string', []),
+  pathPreview: c('sim_path_preview_json', 'string',
+                 ['number', 'number', 'number']),
   recCount:    c('sim_record_count', 'number', []),
   recStride:   c('sim_record_stride', 'number', []),
   pathClear:   c('sim_path_clear', null, []),
@@ -37,6 +42,7 @@ const api = {
   pathCount:   c('sim_path_count', 'number', []),
 };
 const { buildPath, parseRoute } = await import('../web/route_dsl.js');
+const { parseAuton, OP } = await import('../web/auton_cpp.js');
 const { buildLtvTrajectory } = await import('../web/ltv_traj.js');
 Object.assign(api, {
   ltvSetPath:  c('sim_ltv_set_path', null, ['string']),
@@ -164,21 +170,37 @@ check('reading is held between refreshes and updates after one',
       heldSame && Math.abs(refreshed - held[0]) > 0.5,
       `held ${held[0].toFixed(2)} x${held.length}, then ${refreshed.toFixed(2)}`);
 
-// Cone vs pencil ray. The front sensor is placed 3.5 in off the centre post's
-// axis, so the centre ray misses it entirely and runs out of range, while a
-// wide cone clips the post and returns ~14 in.
+// Cone vs pencil ray. The front sensor has to sit a little off the centre
+// post's axis: far enough out that the on-axis ray misses a 2 in post and runs
+// past max range to the far wall, close enough that a wide cone still clips it.
+//
+// Where that puts the ROBOT depends on the front mount, which is measured
+// hardware and changes. This used to hardcode `reset(-26, 3.5)` with a comment
+// claiming the mount was +6 forward; once config.cpp shipped (1.0, -3.75) the
+// sensor landed at (-25.0, -0.25) instead, staring straight down the post's
+// axis, and both cone widths returned the same 23.0 in. So place the robot,
+// read where the sensor actually ended up -- beams carry their own origin --
+// and correct. Heading 90 (VEX) points +X, so the sensor's y tracks the
+// robot's one for one.
+const kPostOffsetIn = 3.5;     // > 2 in post radius, << the 20 deg cone's reach
 api.setParam('distNoiseMm', 0);
-api.reset(-26, 3.5, 90);       // front mount is +6 forward -> sensor at (-20, 3.5)
 api.setParam('distFovDeg', 0.5);
+api.reset(-26, 0, 90);
+run(60);
+const probeY = st().beams[0].oy;
+api.reset(-26, kPostOffsetIn - probeY, 90);
 run(120);
 const narrow = st().beams[0];
 api.setParam('distFovDeg', 40);
 run(120);
 const wide = st().beams[0];
 check('cone sees a post the centre ray misses',
-      !narrow.hit && wide.hit && wide.r < 25,
+      Math.abs(narrow.oy - kPostOffsetIn) < 0.05 &&
+      !narrow.hit && wide.hit && wide.obs && wide.r < 25,
+      `sensor y ${narrow.oy.toFixed(2)}  ` +
       `narrow ${narrow.hit ? narrow.r.toFixed(1) + ' in' : 'no return'}` +
-      ` -> wide ${wide.hit ? wide.r.toFixed(1) + ' in' : 'no return'}`);
+      ` -> wide ${wide.hit ? wide.r.toFixed(1) + ' in' : 'no return'}` +
+      `${wide.hit && !wide.obs ? ' (a wall, not the post)' : ''}`);
 api.setParam('distFovDeg', 25);
 
 // Grazing incidence. Heading 100 (VEX) points 10 deg below +X, so the front
@@ -234,6 +256,254 @@ s = st();
 check('route drove toward its waypoint', s.true.x > -40,
       `true=(${s.true.x.toFixed(1)}, ${s.true.y.toFixed(1)})`);
 api.stopAuton();
+
+console.log('\n== auton source runs the real API ==');
+
+// Parse real C++, push it, run it to completion, and hand back the report.
+// This is the whole routing path end to end: if an option in the source does
+// not reach the library, the sim is lying about code it was handed.
+function runSource(src, budgetMs = 20000, onTick = null) {
+  const r = parseAuton(src);
+  if (r.error) return { error: r.error };
+
+  // Control points go up as written. moveRAMSETE splines them on the way in,
+  // so the sim uploads exactly what a compiled auton would pass.
+  api.pathClear();
+  const slices = [];
+  let cursor = 0;
+  for (const controls of r.paths) {
+    for (const q of controls) api.pathPush(q.x, q.y, q.h);
+    slices.push([cursor, controls.length]);
+    cursor += controls.length;
+  }
+
+  api.routeClear();
+  r.cmds.forEach((cmd, i) => {
+    let [op, a, b, cc, d] = cmd;
+    if (op === OP.FOLLOW_PATH) {
+      const slice = slices[a];
+      if (!slice) return;
+      [a, b] = slice;
+    }
+    api.routePush(op, a, b, cc, d);
+    for (const [k, v] of Object.entries(r.opts[i] ?? {})) {
+      if (k === '_async') api.routeAsync();
+      else api.routeOpt(k, v);
+    }
+  });
+
+  api.routeRun();
+  for (let t = 0; t < budgetMs && api.routeRunning(); t += 10) {
+    api.step(10);
+    if (onTick) onTick();
+  }
+  api.stopAuton();
+  return { report: JSON.parse(api.routeReport()), state: st(), parsed: r };
+}
+
+api.setLoc(0);
+api.setParam('distNoiseMm', 0);
+
+// --- .forwards has to reach the library -----------------------------------
+//
+// (-20, 35) facing +X, because the field centre is a goal post and a robot
+// started there is stuck inside it. The first draft of these used (0, 0) and
+// measured nothing but the collision.
+const LANE = 'Pose::fromVex(-20.0f, 35.0f, 90.0f)';
+
+let fwd = runSource(`
+  chassis.setPose(${LANE});
+  chassis.moveDistance(18.0f, 3000);
+`);
+check('a forward moveDistance increases x', !fwd.error && fwd.state.true.x > -6,
+      fwd.error ?? `x=${fwd.state.true.x.toFixed(1)} (from -20)`);
+
+let back = runSource(`
+  chassis.setPose(${LANE});
+  chassis.moveDistance(-18.0f, 3000);
+`);
+check('a negative distance drives backward, as Chassis::moveDistance does',
+      !back.error && back.state.true.x < -34,
+      back.error ?? `x=${back.state.true.x.toFixed(1)} (from -20)`);
+
+let flagged = runSource(`
+  chassis.setPose(${LANE});
+  chassis.moveDistance(18.0f, 3000, {.forwards = false});
+`);
+check('.forwards = false reaches the params struct',
+      !flagged.error && flagged.state.true.x < -34,
+      flagged.error ?? `x=${flagged.state.true.x.toFixed(1)} (from -20)`);
+
+// --- .maxSpeed has to reach it too, and it is visible in the timing --------
+const timed = speed => runSource(`
+  chassis.setPose(${LANE});
+  chassis.moveToPoint(10.0f, 35.0f, 6000, {.maxSpeed = ${speed}.0f});
+`).report[1].ms;
+const slow = timed(40), quick = timed(120);
+// An absolute margin, not a ratio: the accel ramp and the settle debounce are
+// a fixed cost either way, so tripling the speed cap over 30 in buys 0.6 s
+// rather than the 3x a ratio test would demand.
+check('a lower .maxSpeed takes measurably longer', slow > quick + 400,
+      `40 -> ${slow} ms, 120 -> ${quick} ms`);
+
+// --- the report itself ----------------------------------------------------
+const cut = runSource(`
+  chassis.setPose(${LANE});
+  chassis.moveToPoint(25.0f, 35.0f, 400);
+  chassis.moveToPoint(-20.0f, 35.0f, 8000);
+`);
+check('one report row per command', !cut.error && cut.report.length === 3,
+      cut.error ?? `${cut.report?.length} rows`);
+check('a motion cut off by its timeout is flagged',
+      cut.report?.[1]?.cutOff === true && cut.report[1].ms <= 450,
+      `${cut.report?.[1]?.ms} ms of 400, cutOff=${cut.report?.[1]?.cutOff}`);
+check('a motion that settled is not flagged', cut.report?.[2]?.cutOff === false,
+      `${cut.report?.[2]?.ms} ms of 8000, cutOff=${cut.report?.[2]?.cutOff}`);
+check('the report says how far it ended from the target',
+      cut.report?.[2]?.targetErr >= 0 && cut.report[2].targetErr < 4,
+      `${cut.report?.[2]?.targetErr?.toFixed(2)} in`);
+check('setPose carries no target to miss', cut.report?.[0]?.targetErr === -1,
+      String(cut.report?.[0]?.targetErr));
+
+// Clearance is measured against the footprint, so the numbers have to be
+// usable rather than always negative: 15 in of robot at the field centre is
+// far from everything, and the same robot against the wall is not.
+const middle = runSource(`
+  chassis.setPose(Pose::fromVex(-30.0f, 30.0f, 90.0f));
+  chassis.moveDistance(10.0f, 3000);
+`);
+check('open field reports metres of room, not a negative number',
+      middle.report?.[1]?.clear > 5,
+      `${middle.report?.[1]?.clear?.toFixed(1)} in`);
+
+const wall = runSource(`
+  chassis.setPose(Pose::fromVex(-30.0f, -60.0f, 180.0f));
+  chassis.moveDistance(8.0f, 3000);
+`);
+check('driving at a wall reports the room running out',
+      wall.report?.[1]?.clear < middle.report?.[1]?.clear &&
+      wall.report?.[1]?.clear < 3,
+      `${wall.report?.[1]?.clear?.toFixed(1)} in vs ` +
+      `${middle.report?.[1]?.clear?.toFixed(1)} in in the open`);
+
+// A post is a smaller target than a wall; the cone test elsewhere proves the
+// sensor sees it, this proves the route report does.
+const post = runSource(`
+  chassis.setPose(Pose::fromVex(-20.0f, 0.0f, 90.0f));
+  chassis.moveToPoint(-11.0f, 0.0f, 3000);
+`);
+check('a post shortens the clearance too', post.report?.[1]?.clear < 4,
+      `${post.report?.[1]?.clear?.toFixed(1)} in from the centre post`);
+
+// --- an option the bridge cannot apply is counted, not swallowed ----------
+api.reset(-20, 35, 90);
+api.routeClear();
+api.routePush(OP.MOVE_TO, -10, 35, 1, 3000);
+api.routeOpt('maxSpeed', 90);
+api.routeOpt('nosuchfield', 1);
+api.routeRun();
+for (let t = 0; t < 5000 && api.routeRunning(); t += 10) api.step(10);
+api.stopAuton();
+const ignored = JSON.parse(api.routeReport());
+check('an option the bridge cannot apply is reported',
+      ignored[0]?.ignored === 1, `ignored=${ignored[0]?.ignored}`);
+
+// --- async runs on while the route continues ------------------------------
+const asyncRun = runSource(`
+  chassis.setPose(${LANE});
+  chassis.moveToPoint(10.0f, 35.0f, 6000, {.maxSpeed = 60.0f}, true);
+  chassis.waitUntilSettled();
+`);
+check('an async motion returns immediately and waitUntilSettled holds',
+      asyncRun.report?.[1]?.ms < 100 && asyncRun.report?.[2]?.ms > 500,
+      `move ${asyncRun.report?.[1]?.ms} ms, wait ${asyncRun.report?.[2]?.ms} ms`);
+
+// --- a whole function, in the shape autons are actually written ------------
+//
+// The braced setPose form on purpose: Pose.theta is RADIANS, so 0.0f faces +X
+// (VEX 90), and getting that backwards would put every route 90 deg out.
+const shipped = runSource(`
+  void autonBlueLeft() {
+      chassis.setPose({-20.0f, 35.0f, 0.0f});
+      chassis.moveDistance(12.0f, 2000);
+      chassis.turnToHeading(270.0f, 1500);
+      chassis.moveDistance(18.0f, 2000);
+  }
+`);
+check('a whole auton function runs as written',
+      !shipped.error && shipped.report?.length === 4,
+      shipped.error ?? `${shipped.report?.length} commands, ` +
+        `ended (${shipped.state.true.x.toFixed(1)}, ${shipped.state.true.y.toFixed(1)})`);
+check('theta 0 rad faced +X, so the first leg landed 12 in along x',
+      shipped.report?.[1]?.targetErr >= 0 && shipped.report[1].targetErr < 3,
+      `first leg missed by ${shipped.report?.[1]?.targetErr?.toFixed(2)} in`);
+check('the turn then reversed it back past where it started',
+      shipped.state?.true.x < -20 && Math.abs(shipped.state.true.y - 35) < 8,
+      `ended (${shipped.state?.true.x.toFixed(1)}, ${shipped.state?.true.y.toFixed(1)})`);
+
+// --- a pose list is control points, splined before it is driven -----------
+console.log('\n== control points drive a smooth curve ==');
+
+// The posts sit on a lattice at (+-47, +-23.5), (+-23.5, +-47) and the origin,
+// so a curve has to be placed in a hole in it. The first draft of this arced
+// through (-20, 45), which is 4 in from the post at (-23.5, 47): the robot hit
+// it and the test read as a path-following failure. Every control below clears
+// the nearest post by more than 11 in.
+const curveSrc = `
+  chassis.setPose(Pose::fromVex(-40.0f, 12.0f, 90.0f));
+  std::vector<Pose> path = {
+      {-40.0f, 12.0f, 0.0f},
+      {-25.0f, 22.0f, 0.0f},
+      {-10.0f, 12.0f, 0.0f},
+  };
+  chassis.moveRAMSETE(path, 8000);
+`;
+
+const parsedCurve = parseAuton(curveSrc);
+check('the parser hands back three control points',
+      parsedCurve.paths?.[0]?.length === 3,
+      parsedCurve.error ?? `${parsedCurve.paths?.[0]?.length} controls`);
+
+// The preview runs the library's own splinePath over the uploaded controls,
+// so this is the curve moveRAMSETE will build from the same three points.
+api.pathClear();
+for (const q of parsedCurve.paths[0]) api.pathPush(q.x, q.y, q.h);
+check('only the control points are uploaded', api.pathCount() === 3,
+      `${api.pathCount()} poses`);
+
+const built = JSON.parse(api.pathPreview(0, 3, 2.0));
+check('the library turns them into a dense curve', built.length > 15,
+      `3 controls -> ${built.length} poses`);
+check('the curve starts and ends on the outer controls',
+      Math.hypot(built[0].x + 40, built[0].y - 12) < 0.01 &&
+      Math.hypot(built.at(-1).x + 10, built.at(-1).y - 12) < 0.01,
+      `(${built[0].x}, ${built[0].y}) -> (${built.at(-1).x}, ${built.at(-1).y})`);
+check('it bulges toward the middle control rather than cutting the corner',
+      Math.max(...built.map(q => q.y)) > 21.5,
+      `peak y ${Math.max(...built.map(q => q.y)).toFixed(1)} (control is at 22)`);
+check('tangent headings were filled in, not left at zero',
+      built.some(q => Math.abs(q.h - 90) > 5),
+      `bearings ${built[0].h.toFixed(0)} .. ${built.at(-1).h.toFixed(0)}`);
+
+// The one that matters: hand moveRAMSETE THREE POSES and watch where the
+// robot goes. If the library were not splining internally it would drive the
+// polyline through them, whose apex is the control itself -- so a trajectory
+// that arcs past the straight lines is the proof.
+const polyApexY = 22.0;      // the middle control
+let peakY = -1e9;
+const sp = runSource(curveSrc, 20000, () => {
+  peakY = Math.max(peakY, st().true.y);
+});
+check('the route stayed clear of the posts', sp.report?.[1]?.hit === false,
+      `clearance ${sp.report?.[1]?.clear?.toFixed(1)} in, hit=${sp.report?.[1]?.hit}`);
+check('the route drove the curve to its end',
+      sp.report?.[1]?.targetErr >= 0 && sp.report[1].targetErr < 6,
+      `ended ${sp.report?.[1]?.targetErr?.toFixed(1)} in from the last control, ` +
+      `${sp.report?.[1]?.ms} ms`);
+check('the robot drove a curve, not the polyline through the controls',
+      peakY > 16 && peakY < polyApexY + 4,
+      `peak y ${peakY.toFixed(1)}; the straight-line pair peaks at ` +
+      `${polyApexY} only at the corner itself`);
 
 console.log('\n== RAMSETE path following ==');
 api.setLoc(0);

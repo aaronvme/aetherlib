@@ -412,3 +412,44 @@ label.inline input[type="checkbox"] { accent-color: var(--accent); margin: 0 0.3
 @media (max-height: 620px) {
   #editor { min-height: 5em; }
 }
+
+/* ---------------------------------------------------------------- report */
+/* Per-motion outcome for the last route run. */
+
+.notes {
+  margin-top: 4px;
+  font: 10px/1.4 ui-monospace, monospace;
+  color: #d19a4a;
+  word-break: break-word;
+}
+
+.repsum {
+  font: 11px/1.5 ui-monospace, monospace;
+  color: #8b93a1;
+  margin-bottom: 6px;
+}
+.repsum b { font-weight: 700; }
+.repsum .good, .report .good { color: #4ade80; }
+.repsum .warn, .report .warn { color: #fbbf24; }
+.repsum .bad,  .report .bad  { color: #f87171; }
+
+table.report {
+  width: 100%;
+  border-collapse: collapse;
+  font: 10px/1.6 ui-monospace, monospace;
+}
+table.report th {
+  text-align: right;
+  color: #6b7280;
+  font-weight: 400;
+  border-bottom: 1px solid #2a2f3a;
+}
+table.report th:nth-child(2) { text-align: left; }
+table.report td {
+  text-align: right;
+  color: #c3c9d4;
+  white-space: nowrap;
+}
+table.report td:nth-child(2) { text-align: left; color: #8b93a1; }
+table.report tr.warn td { color: #fbbf24; }
+table.report tr.bad td  { color: #f87171; }

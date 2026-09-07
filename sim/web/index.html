@@ -115,9 +115,10 @@
       </div>
 
       <div class="card grow">
-        <h3>Route code <small>runs the real Chassis API</small></h3>
+        <h3>Auton source <small>real C++, runs the real Chassis API</small></h3>
         <textarea id="editor" spellcheck="false"></textarea>
         <div id="route-status" class="status"></div>
+        <div id="route-notes" class="notes"></div>
       </div>
 
       <div class="card">
@@ -125,10 +126,20 @@
           <button id="btn-run-route" class="primary">Run route</button>
           <button id="btn-stop">Stop</button>
         </div>
+        <div class="btnrow" style="margin-top:8px">
+          <button id="btn-copy" title="wrap it in a compilable file and copy">Copy as auton</button>
+        </div>
         <div class="row2" style="margin-top:8px">
           <select id="auton"></select>
           <button id="btn-run-auton">Run auton</button>
         </div>
+      </div>
+
+      <!-- What the last run actually did. The drawn path cannot show that a
+           motion sat out its timeout, or passed an inch from a post. -->
+      <div class="card">
+        <h3>Last run <small>per motion</small></h3>
+        <div id="route-report"></div>
       </div>
     </div>
 

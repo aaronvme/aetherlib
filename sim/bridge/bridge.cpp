@@ -18,6 +18,7 @@
 #include "../world/world.hpp"
 
 #include "chad/movement_control/ltv.hpp"
+#include "chad/movement_control/spline.hpp"
 #include "chad/movement_control/ltvlqr.hpp"
 
 #include "gamespecific/autons.hpp"
@@ -46,6 +47,10 @@ float gManualRight = 0.0f;
 bool  gManualActive = false;
 
 sim::TaskId gRouteTask = sim::kInvalidTask;
+
+// Defined with the rest of the route machinery further down. Declared here so
+// sim_init() can wrap it into the physics tick.
+void sampleRouteStep();
 
 // --- optional dead wheels ---------------------------------------------------
 //
@@ -173,6 +178,9 @@ extern "C" {
 // Lifecycle
 // ============================================================================
 
+// Defined next to sim_set_param and sim_get_param, which it goes through.
+EMSCRIPTEN_KEEPALIVE void sim_tuning_apply();
+
 EMSCRIPTEN_KEEPALIVE
 void sim_init() {
     if (gStarted) return;
@@ -180,6 +188,14 @@ void sim_init() {
 
     sim::seedRng(gSeed);
     sim::world().init();
+
+    // World::init() installs itself as the physics function; wrap it so route
+    // clearance is sampled on the same 10 ms tick the physics runs on rather
+    // than once per browser frame.
+    sim::setPhysicsFn([](double dtMs) {
+        sim::world().step(dtMs);
+        sampleRouteStep();
+    });
 
     // Same registration order as src/main.cpp so indices line up with the
     // brain's auton selector.
@@ -190,6 +206,8 @@ void sim_init() {
 
     // Odometry only for now; MCL/RCL are opt-in from the UI.
     chad::chassis.odom().startBackgroundOdom();
+
+    sim_tuning_apply();
 }
 
 EMSCRIPTEN_KEEPALIVE void sim_set_localization(int mode);
@@ -381,18 +399,63 @@ enum RouteOp {
     OP_FOLLOW_PATH,
 };
 
+// One `.field = value` from a designated initializer in the route source.
+// Carried by name rather than by index so the browser does not need the
+// layout of eight different params structs -- only the field names, which it
+// validates against the headers before pushing.
+struct RouteOpt {
+    std::string name;
+    float value;
+};
+
 struct RouteCmd {
     int op;
     float a, b, c, d;
+    bool async{false};
+    std::vector<RouteOpt> opts;
 };
 
+// What one command actually did. This is the point of running a route in the
+// sim rather than eyeballing the drawn path: a motion that quietly sat out its
+// timeout looks identical on the field to one that settled.
+struct RouteStep {
+    int op{0};
+    float startMs{0.0f};
+    float durationMs{0.0f};
+    float timeoutMs{0.0f};
+    bool  ranOutTimeout{false};
+    float targetErrIn{-1.0f};   // truth vs the commanded point, -1 = no point
+    float headingErrDeg{-1.0f}; // truth vs the commanded heading, -1 = no turn
+    float estErrIn{0.0f};       // truth vs what the robot believes
+    float minClearIn{0.0f};     // closest the body came to a wall or post
+    bool  collided{false};
+    int   optsIgnored{0};
+};
+
+// One motion-loop tick plus a margin. A motion that returns this close to its
+// timeout cannot have exited on tolerance.
+constexpr float kTimeoutSlackMs = 25.0f;
+
 std::vector<RouteCmd> gRoute;
+std::vector<RouteStep> gReport;
 int gRouteIndex = -1;
 float gRouteMaxSpeed = 127.0f;
+// Set while a command is executing, so the physics hook knows which report
+// entry to fold clearance into.
+bool gRouteSampling = false;
 
-// RAMSETE gains, tunable from the browser via sim_set_param.
+// Per-motion defaults, tunable from the browser via sim_set_param. Every op
+// starts from the one for its own type rather than from a fresh struct, so a
+// value tuned in the panel reaches the motion the route actually runs. A
+// route's own options still override these per command.
 chad::RAMSETEParams gRamsete;
 chad::MoveToPointParams gMoveToPoint;
+chad::MoveDistanceParams gDrive;
+chad::TurntoHeadingParams gTurn;
+chad::TurnToPointParams gTurnPoint;
+chad::BoomerangParams gBoomerang;
+chad::ArcParams gArc;
+chad::SwingParams gSwing;
 
 // Sampled trajectory points, pushed by the browser before a run. An
 // OP_FOLLOW_PATH command names a [start, count) slice of this buffer, so one
@@ -447,11 +510,168 @@ void rebuildLtv() {
     gLtv = nullptr;
 }
 
+/// Apply one option to whichever params struct is in hand.
+///
+/// `requires` rather than eight hand-written appliers: the structs overlap
+/// heavily -- every one carries maxSpeed, minSpeed and targetTolerance -- and
+/// the duplicated version drifts the moment a field is added to one of them.
+/// A field this does not know is counted rather than dropped: silently
+/// ignoring a .lead the route asked for would make the sim disagree with the
+/// code it was handed, which is the one thing it must not do.
+///
+/// extern "C++" because this section of the file sits inside the bridge's
+/// extern "C" block, and a template cannot be declared with C linkage.
+extern "C++" {
+
+template <typename P>
+bool applyRouteOpt(P& p, const RouteOpt& o) {
+    const float v = o.value;
+    const bool flag = v != 0.0f;
+    if constexpr (requires { p.forwards; }) {
+        if (o.name == "forwards") { p.forwards = flag; return true; }
+    }
+    if constexpr (requires { p.direction; }) {
+        if (o.name == "direction") {
+            p.direction = static_cast<chad::TurnDirection>(static_cast<int>(v));
+            return true;
+        }
+    }
+    if constexpr (requires { p.maxSpeed; }) {
+        if (o.name == "maxSpeed") { p.maxSpeed = v; return true; }
+    }
+    if constexpr (requires { p.minSpeed; }) {
+        if (o.name == "minSpeed") { p.minSpeed = v; return true; }
+    }
+    if constexpr (requires { p.targetTolerance; }) {
+        if (o.name == "targetTolerance") { p.targetTolerance = v; return true; }
+    }
+    if constexpr (requires { p.earlyExitRange; }) {
+        if (o.name == "earlyExitRange") { p.earlyExitRange = v; return true; }
+    }
+    if constexpr (requires { p.lead; }) {
+        if (o.name == "lead") { p.lead = v; return true; }
+    }
+    if constexpr (requires { p.leadDecay; }) {
+        if (o.name == "leadDecay") { p.leadDecay = v; return true; }
+    }
+    if constexpr (requires { p.headingTolerance; }) {
+        if (o.name == "headingTolerance") { p.headingTolerance = v; return true; }
+    }
+    if constexpr (requires { p.bearingHoldDist; }) {
+        if (o.name == "bearingHoldDist") { p.bearingHoldDist = v; return true; }
+    }
+    if constexpr (requires { p.offset; }) {
+        if (o.name == "offset") { p.offset = v; return true; }
+    }
+    if constexpr (requires { p.b; }) {
+        if (o.name == "b") { p.b = v; return true; }
+    }
+    if constexpr (requires { p.zeta; }) {
+        if (o.name == "zeta") { p.zeta = v; return true; }
+    }
+    if constexpr (requires { p.stallSpeed; }) {
+        if (o.name == "stallSpeed") { p.stallSpeed = v; return true; }
+    }
+    if constexpr (requires { p.lookaheadDist; }) {
+        if (o.name == "lookaheadDist") { p.lookaheadDist = v; return true; }
+    }
+    if constexpr (requires { p.useVelocityProfile; }) {
+        if (o.name == "useVelocityProfile") {
+            p.useVelocityProfile = flag;
+            return true;
+        }
+    }
+    if constexpr (requires { p.maxAccel; }) {
+        if (o.name == "maxAccel") { p.maxAccel = v; return true; }
+    }
+    if constexpr (requires { p.maxLateralAccel; }) {
+        if (o.name == "maxLateralAccel") { p.maxLateralAccel = v; return true; }
+    }
+    if constexpr (requires { p.useVelocityController; }) {
+        if (o.name == "useVelocityController") {
+            p.useVelocityController = flag;
+            return true;
+        }
+    }
+    if constexpr (requires { p.settleTimeMs; }) {
+        if (o.name == "settleTimeMs") {
+            p.settleTimeMs = static_cast<std::uint32_t>(v);
+            return true;
+        }
+    }
+    return false;
+}
+
+template <typename P>
+int applyRouteOpts(P& p, const std::vector<RouteOpt>& opts) {
+    int ignored = 0;
+    for (const auto& o : opts) {
+        if (!applyRouteOpt(p, o)) ignored++;
+    }
+    return ignored;
+}
+
+}  // extern "C++"
+
+/// Fold the current instant into the running command's report entry.
+///
+/// Called from the physics hook, so clearance is sampled every tick rather
+/// than once per browser frame: at full speed the robot covers 2 in a tick,
+/// and a per-frame sample would step straight over a post.
+void sampleRouteStep() {
+    if (!gRouteSampling || gReport.empty()) return;
+    RouteStep& st = gReport.back();
+    const auto& t = sim::world().truth();
+    const auto& rp = sim::world().params();
+
+    // Allow for the footprint in the direction the obstacle actually lies,
+    // via the rectangle's support function. The circumscribed radius would be
+    // simpler and is what this did first, but half a body diagonal is 10.6 in
+    // on a 15 in square and the usual start pose is 10.2 in off the wall, so
+    // every clearance came out negative and the column said nothing.
+    const auto near = sim::field().nearest(t.x, t.y);
+    const float dx = near.x - t.x, dy = near.y - t.y;
+    const float len = std::hypot(dx, dy);
+    float halfExtent = 0.5f * std::max(rp.robotLengthIn, rp.robotWidthIn);
+    if (len > 1e-6f) {
+        const float c = std::cos(t.theta), s = std::sin(t.theta);
+        const float fx = (dx * c + dy * s) / len;      // obstacle in robot frame
+        const float fy = (-dx * s + dy * c) / len;
+        halfExtent = 0.5f * (rp.robotLengthIn * std::fabs(fx) +
+                             rp.robotWidthIn * std::fabs(fy));
+    }
+    const float clear = near.dist - halfExtent;
+    if (clear < st.minClearIn) st.minClearIn = clear;
+    if (t.colliding) st.collided = true;
+}
+
 void execRoute() {
+    gReport.clear();
+    gReport.reserve(gRoute.size());
+
     for (std::size_t i = 0; i < gRoute.size(); i++) {
         gRouteIndex = static_cast<int>(i);
         const RouteCmd& c = gRoute[i];
         const float timeout = (c.d > 0.0f) ? c.d : 0.0f;
+
+        RouteStep step;
+        step.op = c.op;
+        step.startMs = static_cast<float>(sim::millis());
+        step.timeoutMs = timeout;
+        step.minClearIn = 1e9f;
+        gReport.push_back(step);
+        gRouteSampling = true;
+        sampleRouteStep();      // one sample, so an instant command still reports
+
+        const auto& t0 = sim::world().truth();
+        const float startX = t0.x, startY = t0.y;
+
+        // Where the command meant to end up, for the error column. Turns and
+        // gain changes leave these unset and report -1.
+        bool hasPoint = false;
+        float targetX = 0.0f, targetY = 0.0f;
+        bool hasHeading = false;
+        float targetHeadingDeg = 0.0f;
 
         switch (c.op) {
             case OP_SET_POSE: {
@@ -466,46 +686,79 @@ void execRoute() {
                 chad::MoveToPointParams params = gMoveToPoint;
                 params.forwards = (c.c >= 0.0f);
                 params.maxSpeed = gRouteMaxSpeed;
-                chad::chassis.moveToPoint(c.a, c.b, timeout, params);
+                gReport.back().optsIgnored = applyRouteOpts(params, c.opts);
+                hasPoint = true;
+                targetX = c.a;
+                targetY = c.b;
+                chad::chassis.moveToPoint(c.a, c.b, timeout, params, c.async);
                 break;
             }
             case OP_TURN_TO_HEADING: {
-                chad::TurntoHeadingParams params;
+                chad::TurntoHeadingParams params = gTurn;
                 params.maxSpeed = gRouteMaxSpeed;
-                chad::chassis.turnToHeading(c.a, timeout, params);
+                gReport.back().optsIgnored = applyRouteOpts(params, c.opts);
+                hasHeading = true;
+                targetHeadingDeg = c.a;
+                chad::chassis.turnToHeading(c.a, timeout, params, c.async);
                 break;
             }
             case OP_TURN_TO_POINT: {
-                chad::TurnToPointParams params;
+                chad::TurnToPointParams params = gTurnPoint;
                 params.maxSpeed = gRouteMaxSpeed;
-                chad::chassis.turnToPoint(c.a, c.b, timeout, params);
+                gReport.back().optsIgnored = applyRouteOpts(params, c.opts);
+                chad::chassis.turnToPoint(c.a, c.b, timeout, params, c.async);
+                // The heading it should have reached is only known once the
+                // motion is over: it is measured from wherever the robot
+                // actually ended up, not from where it started.
+                hasHeading = true;
+                targetHeadingDeg = chad::stdRadToVexDeg(
+                    std::atan2(c.b - sim::world().truth().y,
+                               c.a - sim::world().truth().x));
                 break;
             }
             case OP_DRIVE: {
-                chad::MoveDistanceParams params;
-                params.forwards = (c.a >= 0.0f);
+                chad::MoveDistanceParams params = gDrive;
                 params.maxSpeed = gRouteMaxSpeed;
-                chad::chassis.moveDistance(std::fabs(c.a), timeout, params);
+                gReport.back().optsIgnored = applyRouteOpts(params, c.opts);
+                // Pass the signed distance straight through. Splitting it into
+                // fabs() and a forwards flag here overrode any .forwards the
+                // route asked for, and Chassis::moveDistance already flips the
+                // flag itself for a negative target -- so the sim was applying
+                // a rule the robot does not have.
+                chad::chassis.moveDistance(c.a, timeout, params, c.async);
                 break;
             }
             case OP_BOOMERANG: {
-                chad::BoomerangParams params;
+                chad::BoomerangParams params = gBoomerang;
                 params.maxSpeed = gRouteMaxSpeed;
-                chad::chassis.moveBoomerang(c.a, c.b, c.c, timeout, params);
+                gReport.back().optsIgnored = applyRouteOpts(params, c.opts);
+                hasPoint = true;
+                targetX = c.a;
+                targetY = c.b;
+                hasHeading = true;
+                targetHeadingDeg = c.c;
+                chad::chassis.moveBoomerang(c.a, c.b, c.c, timeout, params, c.async);
                 break;
             }
             case OP_ARC: {
-                chad::ArcParams params;
+                chad::ArcParams params = gArc;
                 params.maxSpeed = gRouteMaxSpeed;
-                chad::chassis.moveArc(c.a, c.b, c.c, timeout, params);
+                gReport.back().optsIgnored = applyRouteOpts(params, c.opts);
+                hasPoint = true;
+                targetX = c.a;
+                targetY = c.b;
+                chad::chassis.moveArc(c.a, c.b, c.c, timeout, params, c.async);
                 break;
             }
             case OP_SWING: {
-                chad::SwingParams params;
+                chad::SwingParams params = gSwing;
                 params.maxSpeed = gRouteMaxSpeed;
+                gReport.back().optsIgnored = applyRouteOpts(params, c.opts);
                 const auto side = (c.b >= 0.5f) ? chad::SwingSide::Right
                                                 : chad::SwingSide::Left;
-                chad::chassis.swingToHeading(c.a, side, timeout, params);
+                hasHeading = true;
+                targetHeadingDeg = c.a;
+                chad::chassis.swingToHeading(c.a, side, timeout, params, c.async);
                 break;
             }
             case OP_DELAY:
@@ -532,14 +785,47 @@ void execRoute() {
                                              gPath.begin() + start + count);
                 chad::RAMSETEParams params = gRamsete;
                 params.maxSpeed = std::min(gRouteMaxSpeed, gRamsete.maxSpeed);
-                chad::chassis.moveRAMSETE(path, timeout, params);
+                gReport.back().optsIgnored = applyRouteOpts(params, c.opts);
+                hasPoint = true;
+                targetX = path.back().x;
+                targetY = path.back().y;
+                chad::chassis.moveRAMSETE(path, timeout, params, c.async);
                 break;
             }
             default:
                 break;
         }
+
+        gRouteSampling = false;
+        sampleRouteStep();
+
+        RouteStep& st = gReport.back();
+        st.durationMs = static_cast<float>(sim::millis()) - st.startMs;
+        // Heuristic, and the only one available: nothing in the Chassis API says
+        // why a motion returned. A blocking motion that used its whole timeout
+        // was cut off rather than settled, within one motion-loop tick.
+        st.ranOutTimeout = timeout > 0.0f && !c.async &&
+                           st.durationMs >= timeout - kTimeoutSlackMs;
+
+        const auto& t = sim::world().truth();
+        const chad::Pose est = chad::chassis.getPose();
+        st.estErrIn = std::hypot(t.x - est.x, t.y - est.y);
+        if (hasPoint) {
+            st.targetErrIn = std::hypot(t.x - targetX, t.y - targetY);
+        } else if (c.op == OP_DRIVE) {
+            // No commanded point to miss, so report the shortfall: straight-line
+            // travel against the distance asked for.
+            const float moved = std::hypot(t.x - startX, t.y - startY);
+            st.targetErrIn = std::fabs(moved - std::fabs(c.a));
+        }
+        if (hasHeading) {
+            st.headingErrDeg = std::fabs(chad::radToDeg(chad::wrapRad(
+                chad::vexToStdRad(targetHeadingDeg) - t.theta)));
+        }
+        if (st.minClearIn > 1e8f) st.minClearIn = 0.0f;
     }
     gRouteIndex = -1;
+    gRouteSampling = false;
 }
 
 }  // namespace
@@ -549,8 +835,10 @@ extern "C" {
 EMSCRIPTEN_KEEPALIVE
 void sim_route_clear() {
     gRoute.clear();
+    gReport.clear();
     gRouteIndex = -1;
     gRouteMaxSpeed = 127.0f;
+    gRouteSampling = false;
 }
 
 EMSCRIPTEN_KEEPALIVE
@@ -564,6 +852,38 @@ void sim_path_push(float x, float y, float headingDeg) {
 
 EMSCRIPTEN_KEEPALIVE
 int sim_path_count() { return static_cast<int>(gPath.size()); }
+
+/// The curve moveRAMSETE will drive for a slice of uploaded control points,
+/// as JSON, for the browser to draw. Headings come back as VEX bearings.
+///
+/// Runs the real chad::splinePath -- the same call moveRAMSETE makes on the
+/// path it is handed -- so the drawn curve is not a browser-side lookalike
+/// that could drift from what the robot does. gPath is left alone; this only
+/// reads it.
+EMSCRIPTEN_KEEPALIVE
+const char* sim_path_preview_json(int start, int count, float spacingIn) {
+    static std::string out;
+    out = "[";
+    if (start < 0 || count <= 0 ||
+        start + count > static_cast<int>(gPath.size())) {
+        out += "]";
+        return out.c_str();
+    }
+
+    const std::vector<chad::Pose> controls(gPath.begin() + start,
+                                          gPath.begin() + start + count);
+    const auto curve = (spacingIn > 0.0f) ? chad::splinePath(controls, spacingIn)
+                                          : controls;
+    char buf[96];
+    for (std::size_t i = 0; i < curve.size(); i++) {
+        std::snprintf(buf, sizeof(buf), "%s{\"x\":%.2f,\"y\":%.2f,\"h\":%.1f}",
+                      i ? "," : "", curve[i].x, curve[i].y,
+                      chad::stdRadToVexDeg(curve[i].theta));
+        out += buf;
+    }
+    out += "]";
+    return out.c_str();
+}
 
 // ============================================================================
 // LTV / LQR follower
@@ -656,6 +976,27 @@ void sim_route_push(int op, float a, float b, float c, float d) {
     gRoute.push_back({op, a, b, c, d});
 }
 
+/// Set one `.field = value` on the command pushed most recently.
+///
+/// Booleans and enums come across as floats: 0/1 for a bool, the enumerator's
+/// integer value for TurnDirection. The browser validates the name against the
+/// params headers before calling, so an unknown name here means the sim cannot
+/// apply that field, not that the route misspelled it -- either way it is
+/// counted and shown in the report rather than dropped.
+EMSCRIPTEN_KEEPALIVE
+void sim_route_opt(const char* name, float value) {
+    if (gRoute.empty() || name == nullptr) return;
+    gRoute.back().opts.push_back({name, value});
+}
+
+/// Mark the most recent command async, matching a trailing `true` on the real
+/// call. The route then runs on to the next statement while the motion is
+/// still going, exactly as the compiled auton would.
+EMSCRIPTEN_KEEPALIVE
+void sim_route_async() {
+    if (!gRoute.empty()) gRoute.back().async = true;
+}
+
 EMSCRIPTEN_KEEPALIVE
 void sim_route_run() {
     if (gRoute.empty()) return;
@@ -669,6 +1010,31 @@ void sim_route_run() {
 /// editor's active-line highlight.
 EMSCRIPTEN_KEEPALIVE
 int sim_route_index() { return gRouteIndex; }
+
+/// Per-command outcome for the last run: how long each took, whether it was
+/// cut off by its timeout, how far it ended from what it was aimed at, and the
+/// closest the body came to a wall or post while it ran.
+EMSCRIPTEN_KEEPALIVE
+const char* sim_route_report_json() {
+    static std::string out;
+    out = "[";
+    char buf[320];
+    for (std::size_t i = 0; i < gReport.size(); i++) {
+        const RouteStep& r = gReport[i];
+        std::snprintf(buf, sizeof(buf),
+                      "%s{\"i\":%d,\"op\":%d,\"t0\":%.0f,\"ms\":%.0f,"
+                      "\"timeout\":%.0f,\"cutOff\":%s,\"targetErr\":%.2f,"
+                      "\"headingErr\":%.2f,\"estErr\":%.2f,\"clear\":%.2f,"
+                      "\"hit\":%s,\"ignored\":%d}",
+                      i ? "," : "", static_cast<int>(i), r.op, r.startMs,
+                      r.durationMs, r.timeoutMs, r.ranOutTimeout ? "true" : "false",
+                      r.targetErrIn, r.headingErrDeg, r.estErrIn, r.minClearIn,
+                      r.collided ? "true" : "false", r.optsIgnored);
+        out += buf;
+    }
+    out += "]";
+    return out.c_str();
+}
 
 }  // extern "C"
 
@@ -795,8 +1161,36 @@ void sim_set_param(const char* name, float value) {
     } else if (k == "ramseteFfKs")        { gRamsete.ffGains.ksStraight = value;
     } else if (k == "ramseteFfKp")        { gRamsete.ffGains.kP = value;
     } else if (k == "ramseteFfKi")        { gRamsete.ffGains.kI = value;
+    } else if (k == "ramseteSmooth")      { gRamsete.smoothSpacingIn = value;
+    } else if (k == "ramseteSettleMs")    {
+        gRamsete.settleTimeMs = static_cast<std::uint32_t>(value);
     } else if (k == "mtpBearingHold")  { gMoveToPoint.bearingHoldDist = value;
     } else if (k == "mtpTolerance")    { gMoveToPoint.targetTolerance = value;
+    } else if (k == "mtpLead")         { gMoveToPoint.lead = value;
+    } else if (k == "boomLead")        { gBoomerang.lead = value;
+    } else if (k == "boomLeadDecay")   { gBoomerang.leadDecay = value;
+    } else if (k == "boomMinSpeed")    { gBoomerang.minSpeed = value;
+    } else if (k == "boomTolerance")   { gBoomerang.targetTolerance = value;
+    } else if (k == "boomHeadingTol")  { gBoomerang.headingTolerance = value;
+    } else if (k == "arcTolerance")    { gArc.targetTolerance = value;
+    } else if (k == "arcMinSpeed")     { gArc.minSpeed = value;
+    } else if (k == "driveTolerance")  { gDrive.targetTolerance = value;
+    } else if (k == "turnTolerance")   { gTurn.targetTolerance = value;
+                                         gTurnPoint.targetTolerance = value;
+                                         gSwing.targetTolerance = value;
+    } else if (k == "targetTolIn" || k == "targetTolDeg" ||
+               k == "bearingHold") {
+        // ChassisConfig's fallbacks: every motion whose own tolerance is
+        // negative reads these, which is most of what a route emits.
+        if      (k == "targetTolIn")  chad::chassisConfig.targetToleranceIn = value;
+        else if (k == "targetTolDeg") chad::chassisConfig.targetToleranceDeg = value;
+        else                          chad::chassisConfig.bearingHoldDist = value;
+        chad::chassis.setSettleTolerances(chad::chassisConfig.targetToleranceIn,
+                                         chad::chassisConfig.targetToleranceDeg,
+                                         chad::chassisConfig.bearingHoldDist);
+    } else if (k == "lateralSlew") {
+        chad::chassisConfig.lateralSlewPerSec = value;
+        chad::chassis.setLateralSlew(value);
     } else if (k == "mclDistSyncProp") {
         chad::chassis.mcl().setDistSyncProp(value);
     } else if (k == "seed") {
@@ -854,12 +1248,41 @@ float sim_get_param(const char* name) {
     else if (k == "angularWindup") return cc.angularWindupRange;
     else if (k == "settleTimeMs")  return static_cast<float>(cc.settleTimeMs);
 
+    else if (k == "lateralSlew")   return cc.lateralSlewPerSec;
+    else if (k == "targetTolIn")   return cc.targetToleranceIn;
+    else if (k == "targetTolDeg")  return cc.targetToleranceDeg;
+    else if (k == "bearingHold")   return cc.bearingHoldDist;
+
     else if (k == "ramseteB")          return gRamsete.b;
     else if (k == "ramseteZeta")       return gRamsete.zeta;
     else if (k == "ramseteMinSpeed")   return gRamsete.minSpeed;
     else if (k == "ramseteMaxAccel")   return gRamsete.maxAccel;
+    else if (k == "ramseteLatAccel")   return gRamsete.maxLateralAccel;
+    else if (k == "ramseteMaxSpeed")   return gRamsete.maxSpeed;
+    else if (k == "ramseteStall")      return gRamsete.stallSpeed;
+    else if (k == "ramseteSmooth")     return gRamsete.smoothSpacingIn;
+    else if (k == "ramseteSettleMs")
+        return static_cast<float>(gRamsete.settleTimeMs);
     else if (k == "ramseteTolerance")  return gRamsete.targetTolerance;
     else if (k == "ramseteHeadingTol") return gRamsete.headingTolerance;
+    else if (k == "ramseteVelCtrl")
+        return gRamsete.useVelocityController ? 1.0f : 0.0f;
+    else if (k == "ramseteFfKv")       return gRamsete.ffGains.kV;
+    else if (k == "ramseteFfKs")       return gRamsete.ffGains.ksStraight;
+    else if (k == "ramseteFfKp")       return gRamsete.ffGains.kP;
+
+    else if (k == "mtpTolerance")   return gMoveToPoint.targetTolerance;
+    else if (k == "mtpBearingHold") return gMoveToPoint.bearingHoldDist;
+    else if (k == "mtpLead")        return gMoveToPoint.lead;
+    else if (k == "boomLead")       return gBoomerang.lead;
+    else if (k == "boomLeadDecay")  return gBoomerang.leadDecay;
+    else if (k == "boomMinSpeed")   return gBoomerang.minSpeed;
+    else if (k == "boomTolerance")  return gBoomerang.targetTolerance;
+    else if (k == "boomHeadingTol") return gBoomerang.headingTolerance;
+    else if (k == "arcTolerance")   return gArc.targetTolerance;
+    else if (k == "arcMinSpeed")    return gArc.minSpeed;
+    else if (k == "driveTolerance") return gDrive.targetTolerance;
+    else if (k == "turnTolerance")  return gTurn.targetTolerance;
 
     const auto mc = chad::chassis.mcl().config();
     if      (k == "mclObsCone")  return mc.obstacleConeFrac;
@@ -867,6 +1290,165 @@ float sim_get_param(const char* name) {
     else if (k == "mclSyncProp") return mc.distSyncProp;
 
     return std::nanf("");
+}
+
+// ============================================================================
+// Simulator tuning
+// ============================================================================
+//
+// What the sim runs with, applied over gamespecific/config.cpp at sim_init.
+//
+// These are NOT the robot's constants and are not meant to become them. The
+// sim's drivetrain is a first-order lag with no mass, torque or traction, so a
+// gain that is right here is optimistic there. What they are for is the one
+// thing the sim is actually authoritative about: a route drawn in the browser
+// and the route the sim drives being the same route. Every waypoint the editor
+// can place is measured against ground truth by sim/test/accuracy.mjs, and
+// sim/test/tune_routing.mjs sweeps outward from whatever is written here.
+//
+// Only entries that differ from the library default are listed, so this doubles
+// as the record of what the sim disagrees with the robot about. Each key is one
+// sim_set_param understands, which is also what makes the browser's panel show
+// these values rather than the header's.
+struct SimTuning { const char* key; float value; };
+
+constexpr SimTuning kSimTuning[] = {
+    // The along-track loop. At the robot's 9.012 the last inch takes 1.5 s to
+    // close, so the settle debounce expires with the robot still half an inch
+    // out; the nine point-to-point motions in the battery take 16.5 s at that
+    // gain and 12.5 s here.
+    //
+    // 12 and not more, because moveDistance and moveToPoint have no velocity
+    // profile -- they are P+D against a first-order lag, so the only thing
+    // stopping them is the gain coming out of saturation in time. The plant
+    // needs v*tau to stop, 4.4 in from full speed, and 127/kP is how far out
+    // the output leaves saturation: 10.6 in at kP 12, 7.9 in at kP 16. Past
+    // that the arithmetic stops working and the robot sails through the
+    // waypoint and reverses. Measured at the default 70 ms lag, overshoot is
+    // 0.00 in up to kP 14, 0.40 in at 15 and 1.22 in with seven reversals at
+    // 16. 12 is the largest value that also holds from 50 to 100 ms.
+    {"lateralKp", 12.0f},
+
+    // The single biggest term in routing error. 1 in means a waypoint counts as
+    // reached from anywhere within an inch of it, and that is what the robot has
+    // to live with: it has to exceed the localization error or the settle test
+    // can never pass. The sim's dead reckoning is exact, so it does not.
+    //
+    // 0.30 and not tighter because past here the tolerance stops buying
+    // accuracy and starts buying nothing. Over ten point motions: 0.30 in of
+    // tolerance lands 0.11 in out in 12.3 s, 0.12 in lands 0.05 in out in
+    // 14.2 s. The last 0.06 in is not worth 1.9 s of a 15 s auton -- the robot
+    // is 15 in wide. Every motion inherits this rather than getting its own,
+    // which is also what makes 0.30 the number RAMSETE and boomerang need: it
+    // is what they can actually deliver, and a tolerance under that does not
+    // finish closer, it sits out the timeout at the same distance.
+    {"targetTolIn", 0.30f},
+
+    // Boomerang's speed scale is a hard distToTarget/6, so inside 6 in the
+    // along-track term is throttled quadratically and the approach crawls.
+    // minSpeed is the only floor available on it, and it floors the SCALE
+    // rather than the output -- so setting it to maxSpeed switches the throttle
+    // off entirely and leaves the plain P+D loop, which at kP 12 stops without
+    // overshooting on its own. The throttle was protecting against an
+    // overshoot the gain no longer has: 0.22 in in 4.5 s with the floor at 60,
+    // 0.18 in in 3.0 s without it, and zero overshoot either way.
+    {"boomLead", 0.7f},
+    {"boomLeadDecay", 0.15f},
+    {"boomMinSpeed", 127.0f},
+
+    // A gentler profile than the robot's 50. RAMSETE's endpoint error IS its
+    // overshoot -- the profile decelerates to zero at the last point, but the
+    // follower exits inside tolerance and coasts the rest -- so arriving
+    // slower is the whole of the fix: 0.48 in past the last point at 50,
+    // 0.18 in at 30, for 1.4 s over five paths.
+    {"ramseteMaxAccel", 30.0f},
+    // b, and this one is the aggression to distrust: cross-track falls
+    // monotonically to b=144 with nothing anywhere in the sim getting worse,
+    // which is what a plant with no mass looks like when you ask it about
+    // gain. It is here anyway because the robot's 48 does not merely track
+    // worse, it times a path out: 0.89 in of cross-track and 19.2 s over the
+    // five, against 13.3 s. 72 is the least that finishes; 96 has margin and
+    // is where the returns flatten.
+    {"ramseteB", 96.0f},
+};
+
+// Swept and deliberately left alone, so the next person does not re-sweep
+// them:
+//
+//   lateralSlew        0 is 0.4 s per motion faster than the robot's 450 and
+//                      no more accurate. The slew is there so a tall robot
+//                      does not tip on the stop, which is a cost this plant
+//                      cannot show.
+//   angularKp/Kd/DFilt 176.607 already turns to 0.14 deg. 210 reads 0.14 and
+//                      250 reads 0.59, so there is a peak near 210 and no
+//                      reason to chase it.
+//   targetTolDeg       1.5 already settles at 0.14 deg.
+//   bearingHold        flat from 0.5 to 2.0 here. Small values chase pose
+//                      noise, which this default plant does not have.
+//   ramseteZeta        1.0 tracks 0.04 in tighter and is outside the
+//                      documented 0 < zeta < 1.
+//   ramseteLatAccel    the robot's 60 is 0.7 s faster over five paths than 40
+//                      and identical at the endpoint, for 0.08 in more
+//                      cross-track. Not worth an override.
+//   ramseteSettleMs    must stay 0. 60 ms times out 2 of 5 paths: position
+//                      and heading have to hold together, and past the last
+//                      point the profile has no authority left to fix
+//                      heading with.
+//   ramseteStall       must stay 1.5. At 0 the same 2 paths time out.
+//   ramseteVelCtrl     off. Closing the loop scores better at kP 2 (0.31
+//                      against 0.82) and at kP 6 and 12 the robot stops dead
+//                      0.26 and 0.36 in short of the last point and sits
+//                      there until the timeout -- the loop cannot deliver the
+//                      creep that closes the last fraction of an inch. A
+//                      default that good only 3x below where it fails hard is
+//                      not worth the 0.5 of cost.
+
+// What each key held before the table was applied, captured once so the effect
+// of the tuning is measurable rather than asserted. Without it,
+// `accuracy.mjs --stock` would need its own copy of the library defaults, and a
+// second copy of a default is how the documentation ends up lying.
+float gStock[std::size(kSimTuning)];
+bool gStockCaptured = false;
+
+EMSCRIPTEN_KEEPALIVE
+void sim_tuning_apply() {
+    if (!gStockCaptured) {
+        for (std::size_t i = 0; i < std::size(kSimTuning); i++) {
+            gStock[i] = sim_get_param(kSimTuning[i].key);
+        }
+        gStockCaptured = true;
+    }
+    for (const auto& t : kSimTuning) sim_set_param(t.key, t.value);
+}
+
+/// Put back what gamespecific/config.cpp and the headers actually say. This is
+/// the robot's tuning, running against the sim's plant -- useful for seeing
+/// what the overrides buy, not for deciding anything about the robot.
+EMSCRIPTEN_KEEPALIVE
+void sim_tuning_stock() {
+    if (!gStockCaptured) return;
+    for (std::size_t i = 0; i < std::size(kSimTuning); i++) {
+        sim_set_param(kSimTuning[i].key, gStock[i]);
+    }
+}
+
+/// The table as JSON, tuned value against the value it replaced, so the sweeps
+/// and the browser can list what the sim overrode without a second copy of it
+/// in JavaScript.
+EMSCRIPTEN_KEEPALIVE
+const char* sim_tuning_json() {
+    static std::string out;
+    out = "[";
+    char buf[128];
+    for (std::size_t i = 0; i < std::size(kSimTuning); i++) {
+        std::snprintf(buf, sizeof(buf),
+                      "%s{\"key\":\"%s\",\"sim\":%.4f,\"robot\":%.4f}",
+                      i ? "," : "", kSimTuning[i].key, kSimTuning[i].value,
+                      gStockCaptured ? gStock[i] : 0.0f);
+        out += buf;
+    }
+    out += "]";
+    return out.c_str();
 }
 
 // ============================================================================

@@ -45,8 +45,10 @@ struct RobotParams {
     float encoderSlip{0.0f};
 
     // --- IMU ---------------------------------------------------------------
-    // underReport reproduces the V5's habit of reading short; with the default
-    // and ScaledIMU's 360/354.25 correction, the two cancel exactly.
+    // underReport reproduces the V5's habit of reading short. init() overwrites
+    // this with the inverse of chad::imu's own scale factor so the two cancel;
+    // the literal here only matters before init() runs. Change it afterwards
+    // (the UI slider does) to model an IMU whose calibration is wrong.
     float imuUnderReport{354.25f / 360.0f};
     float imuDriftDegPerSec{0.0f};
     float imuNoiseDeg{0.0f};

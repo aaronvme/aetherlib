@@ -66,6 +66,21 @@ public:
     /// testing a route, so it is switchable.
     bool collides(float x, float y, float radius, bool includeCircles = true) const;
 
+    struct Nearest {
+        float dist{0.0f};       // to the point, not to any footprint
+        float x{0.0f}, y{0.0f}; // the closest point on the closest obstacle
+    };
+
+    /// Nearest wall or post to a point, with the contact point itself so a
+    /// caller can allow for a footprint in that direction.
+    ///
+    /// Unlike collides(), this counts goal SEGMENTS as well as the perimeter and
+    /// the posts. The two disagree on purpose: the sim only stops the robot on
+    /// the perimeter and the posts, so a route can drive clean through a goal
+    /// wall and look fine. Route planning wants to know that; the physics does
+    /// not simulate it.
+    Nearest nearest(float x, float y) const;
+
     const std::vector<Segment>& segments() const { return mSegments; }
     const std::vector<Circle>&  circles()  const { return mCircles; }
 

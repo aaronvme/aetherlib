@@ -3,7 +3,11 @@
 // All simulation and every algorithm under test live in the WASM module; this
 // file only drives the clock, renders state, and marshals control input.
 import createChadSim from './chad_sim.mjs';
-import { parseRoute, moveWaypoint, buildPath, DEFAULT_ROUTE } from './route_dsl.js';
+import {
+  parseAuton, moveWaypoint, appendStatement, emitAuton, moveToStatement,
+  DEFAULT_AUTON, OP,
+} from './auton_cpp.js';
+
 
 const M = await createChadSim();
 
@@ -39,8 +43,13 @@ const api = {
   routePush:    w('sim_route_push', null, ['number', 'number', 'number', 'number', 'number']),
   routeRun:     w('sim_route_run', null, []),
   routeIndex:   w('sim_route_index', 'number', []),
+  routeOpt:     w('sim_route_opt', null, ['string', 'number']),
+  routeAsync:   w('sim_route_async', null, []),
+  routeReport:  w('sim_route_report_json', 'string', []),
   pathClear:    w('sim_path_clear', null, []),
   pathPush:     w('sim_path_push', null, ['number', 'number', 'number']),
+  pathPreview:  w('sim_path_preview_json', 'string',
+                  ['number', 'number', 'number']),
   recPtr:       w('sim_record_ptr', 'number', []),
   recCount:     w('sim_record_count', 'number', []),
   recStride:    w('sim_record_stride', 'number', []),
@@ -50,6 +59,10 @@ const api = {
   fieldAddSeg:  w('sim_field_add_segment', null, ['number', 'number', 'number', 'number']),
   fieldAddCirc: w('sim_field_add_circle', null, ['number', 'number', 'number']),
 };
+
+// RAMSETEParams::smoothSpacingIn's default, for the preview when a route does
+// not set one. sim/test/auton_cpp.mjs reads the header and fails if it moves.
+const RAMSETE_SPACING_IN = 2.0;
 
 const START = { x: -48, y: -60, h: 90 };
 api.init();
@@ -195,8 +208,11 @@ buildParams('params-sensor', [
     help: 'past this angle from the surface normal the return is lost' },
   { key: 'imuDriftDegPerSec', label: 'IMU drift °/s', min: -2, max: 2, step: 0.05, value: 0 },
   { key: 'imuNoiseDeg', label: 'IMU noise °', min: 0, max: 2, step: 0.05, value: 0 },
-  { key: 'imuUnderReport', label: 'IMU under-report', min: 0.9, max: 1.1, step: 0.001, value: 354.25 / 360,
-    help: 'cancels ScaledIMU(360, 354.25) exactly at the default' },
+  // Read back rather than hardcoded: the sim takes this from the robot's own
+  // ScaledIMU, so a literal here would misreport the moment that changes.
+  { key: 'imuUnderReport', label: 'IMU under-report', min: 0.9, max: 1.1, step: 0.001,
+    value: api.getParam('imuUnderReport'),
+    help: 'the inverse of the ScaledIMU scale factor, so the two cancel' },
 ]);
 
 buildParams('params-drive', [
@@ -214,34 +230,86 @@ buildParams('params-rate', [
 ]);
 
 // ============================================================================
-// Route DSL
+// Auton source
 // ============================================================================
+//
+// The editor holds real C++. A different storage key from the old DSL, so a
+// saved route in the previous syntax is left alone rather than failing to
+// parse on load.
 
 const editor = document.getElementById('editor');
 const routeStatus = document.getElementById('route-status');
-editor.value = localStorage.getItem('chad-sim.route') || DEFAULT_ROUTE;
+const routeNotes = document.getElementById('route-notes');
+editor.value = localStorage.getItem('chad-sim.auton') || DEFAULT_AUTON;
 
 let plan = [];
-let sampledPaths = [];      // spline points, exactly what gets uploaded
+let parsed = null;
+let slices = [];            // one [start, count) of controls per path
+let sampledPaths = [];      // the curve moveRAMSETE will drive, for drawing
+
+/// Upload the control points and read back the curve the library will make
+/// of them. The route's own .smoothSpacingIn is honoured, because the same
+/// value reaches moveRAMSETE through the options channel.
+function buildPaths(r) {
+  api.pathClear();
+  slices = [];
+  sampledPaths = [];
+  let cursor = 0;
+
+  r.paths.forEach((controls, i) => {
+    for (const q of controls) api.pathPush(q.x, q.y, q.h);
+    slices.push([cursor, controls.length]);
+
+    // Which moveRAMSETE follows this path decides the spacing, so find it.
+    const cmdIdx = r.cmds.findIndex(c => c[0] === OP.FOLLOW_PATH && c[1] === i);
+    const spacing = cmdIdx >= 0
+      ? (r.opts[cmdIdx]?.smoothSpacingIn ?? RAMSETE_SPACING_IN)
+      : RAMSETE_SPACING_IN;
+
+    sampledPaths.push(JSON.parse(
+      api.pathPreview(cursor, controls.length, spacing) || '[]'));
+    cursor += controls.length;
+  });
+}
 
 function refreshPlan() {
-  const r = parseRoute(editor.value);
+  const r = parseAuton(editor.value);
+  parsed = r.error ? null : r;
   if (r.error) {
     routeStatus.textContent = r.error;
     routeStatus.className = 'status err';
+    routeNotes.textContent = '';
     return null;
   }
-  sampledPaths = (r.paths || []).map(vias => buildPath(vias));
-  const pts = sampledPaths.reduce((n, p) => n + p.length, 0);
+
+  // Rebuilding mid-run would rewrite the buffer a later moveRAMSETE in the
+  // same route is about to read. The motion in flight holds its own copy,
+  // but the ones after it do not.
+  if (!api.routeRunning()) buildPaths(r);
+
+  const pts = sampledPaths.reduce((n, q) => n + q.length, 0);
+  const controls = (r.paths || []).reduce((n, q) => n + q.length, 0);
+
   routeStatus.textContent = `${r.cmds.length} commands`
-    + (sampledPaths.length ? ` · ${sampledPaths.length} path, ${pts} pts` : '');
+    + (r.paths.length
+        ? ` · ${r.paths.length} path, ${controls} pts -> ${pts} poses`
+        : '')
+    + (r.fnName ? ` · ${r.fnName}()` : '');
   routeStatus.className = 'status';
+
+  // Skipped statements are shown, never swallowed: a lift call that vanished
+  // without a word would make the preview quietly wrong.
+  routeNotes.textContent = r.notes.length
+    ? `not routed (${r.notes.length}): ${r.notes.slice(0, 3).join(' · ')}`
+      + (r.notes.length > 3 ? ' …' : '')
+    : '';
+
   plan = r.plan;
   return r;
 }
 
 editor.addEventListener('input', () => {
-  localStorage.setItem('chad-sim.route', editor.value);
+  localStorage.setItem('chad-sim.auton', editor.value);
   refreshPlan();
 });
 refreshPlan();
@@ -249,42 +317,105 @@ refreshPlan();
 document.getElementById('btn-run-route').addEventListener('click', () => {
   const r = refreshPlan();
   if (!r) return;
-  // Upload the sampled trajectories first, then rewrite each followPath
-  // command's (index) into the (start, count) slice it should follow. The
-  // points drawn on the field are the same array moveRAMSETE receives.
-  api.pathClear();
-  const slices = [];
-  let cursor = 0;
-  for (const pts of sampledPaths) {
-    for (const q of pts) api.pathPush(q.x, q.y, q.h);
-    slices.push([cursor, pts.length]);
-    cursor += pts.length;
-  }
 
+  // refreshPlan() has already uploaded the control points. Each
+  // moveRAMSETE's path index becomes the (start, count) slice it names;
+  // the library splines it on the way in.
   api.routeClear();
-  for (const cmd of r.cmds) {
+  r.cmds.forEach((cmd, i) => {
     let [op, a, b, c, d] = cmd;
-    if (op === 13) {                       // OP_FOLLOW_PATH
+    if (op === OP.FOLLOW_PATH) {
       const slice = slices[a];
-      if (!slice) continue;
+      if (!slice) return;
       [a, b] = slice;
     }
     api.routePush(op, a, b, c, d);
-  }
+
+    // Options attach to the command just pushed, so this must follow it.
+    const opt = r.opts[i] ?? {};
+    for (const [k, v] of Object.entries(opt)) {
+      if (k === '_async') api.routeAsync();
+      else api.routeOpt(k, v);
+    }
+  });
   api.recClear();
   api.routeRun();
+  reportEl.innerHTML = '';
   routeStatus.textContent = `running ${r.cmds.length} commands`;
   routeStatus.className = 'status ok';
   running = true;
   btnPlay.textContent = 'Pause';
 });
 
+// --- what the run actually did ----------------------------------------------
+//
+// The drawn path shows where the robot went; it cannot show that a motion sat
+// out its timeout instead of settling, or that it passed within an inch of a
+// post. Those are the two things that decide whether a route survives a match.
+
+const OP_NAMES = Object.fromEntries(
+  Object.entries(OP).map(([k, v]) => [v, k.toLowerCase().replace(/_/g, ' ')]));
+
+const reportEl = document.getElementById('route-report');
+
+function renderReport() {
+  const rows = JSON.parse(api.routeReport() || '[]');
+  if (!rows.length) { reportEl.innerHTML = ''; return; }
+
+  const total = rows.reduce((n, x) => n + x.ms, 0);
+  const worst = rows.reduce((m, x) => Math.min(m, x.clear), 99);
+  const cut = rows.filter(x => x.cutOff).length;
+
+  const head = `<div class="repsum">`
+    + `<b class="${total > 15000 ? 'bad' : 'good'}">${(total / 1000).toFixed(2)} s</b>`
+    + ` of 15 · <b class="${worst < 1 ? 'bad' : worst < 3 ? 'warn' : 'good'}">`
+    + `${worst.toFixed(1)} in</b> clearance`
+    + (cut ? ` · <b class="bad">${cut} timed out</b>` : '')
+    + `</div>`;
+
+  const body = rows.map(x => {
+    const err = x.targetErr >= 0 ? `${x.targetErr.toFixed(1)}"` : '—';
+    const hdg = x.headingErr >= 0 ? `${x.headingErr.toFixed(1)}°` : '';
+    const cls = x.hit ? 'bad' : x.cutOff ? 'bad' : x.clear < 1 ? 'warn' : '';
+    return `<tr class="${cls}"><td>${x.i}</td><td>${OP_NAMES[x.op] ?? x.op}</td>`
+      + `<td>${(x.ms / 1000).toFixed(2)}s${x.cutOff ? ' ⏱' : ''}</td>`
+      + `<td>${err} ${hdg}</td>`
+      + `<td>${x.clear.toFixed(1)}"${x.hit ? ' ✖' : ''}</td>`
+      + `<td>${x.estErr.toFixed(1)}"</td>`
+      + `<td>${x.ignored ? x.ignored : ''}</td></tr>`;
+  }).join('');
+
+  reportEl.innerHTML = head +
+    '<table class="report"><thead><tr><th>#</th><th>motion</th><th>time</th>' +
+    '<th>miss</th><th>clear</th><th>est err</th><th>?</th></tr></thead>' +
+    `<tbody>${body}</tbody></table>`;
+}
+
+// --- copy out, and smoothing ------------------------------------------------
+
+document.getElementById('btn-copy').addEventListener('click', async () => {
+  const text = emitAuton(editor.value, parsed?.fnName || 'autonFromSim');
+  try {
+    await navigator.clipboard.writeText(text);
+    routeStatus.textContent = 'copied — paste into src/gamespecific/autons/';
+    routeStatus.className = 'status ok';
+  } catch {
+    // Clipboard access needs a secure context; file:// does not have one.
+    editor.value = text;
+    localStorage.setItem('chad-sim.auton', editor.value);
+    refreshPlan();
+    routeStatus.textContent = 'clipboard blocked — wrapped it in the editor instead';
+    routeStatus.className = 'status';
+  }
+});
+
+
 // --- saved routes -----------------------------------------------------------
 
 const savedSel = document.getElementById('saved');
 const routeName = document.getElementById('route-name');
 
-const loadSaved = () => JSON.parse(localStorage.getItem('chad-sim.saved') || '{}');
+const loadSaved = () => JSON.parse(localStorage.getItem('chad-sim.savedAutons') || '{}');
 function refreshSaved() {
   const all = loadSaved();
   savedSel.innerHTML = '<option value="">— saved routes —</option>';
@@ -299,7 +430,7 @@ refreshSaved();
 document.getElementById('btn-save').addEventListener('click', () => {
   const all = loadSaved();
   all[routeName.value || 'untitled'] = editor.value;
-  localStorage.setItem('chad-sim.saved', JSON.stringify(all));
+  localStorage.setItem('chad-sim.savedAutons', JSON.stringify(all));
   refreshSaved();
 });
 
@@ -307,7 +438,7 @@ savedSel.addEventListener('change', () => {
   if (!savedSel.value) return;
   editor.value = loadSaved()[savedSel.value];
   routeName.value = savedSel.value;
-  localStorage.setItem('chad-sim.route', editor.value);
+  localStorage.setItem('chad-sim.auton', editor.value);
   refreshPlan();
 });
 
@@ -453,9 +584,8 @@ canvas.addEventListener('pointerdown', e => {
   const [x, y] = pointerIn(e);
 
   if (e.shiftKey) {
-    const line = `moveTo(x: ${x.toFixed(1)}, y: ${y.toFixed(1)});\n`;
-    editor.value = editor.value.replace(/\s*$/, '\n') + line;
-    localStorage.setItem('chad-sim.route', editor.value);
+    editor.value = appendStatement(editor.value, moveToStatement(x, y));
+    localStorage.setItem('chad-sim.auton', editor.value);
     refreshPlan();
     return;
   }
@@ -480,7 +610,7 @@ canvas.addEventListener('pointermove', e => {
     const wp = plan[dragWaypoint];
     if (!wp) return;
     editor.value = moveWaypoint(editor.value, wp, x, y);
-    localStorage.setItem('chad-sim.route', editor.value);
+    localStorage.setItem('chad-sim.auton', editor.value);
     refreshPlan();          // re-parse so the ranges follow the new text
     return;
   }
@@ -1070,6 +1200,7 @@ function updateHud(s) {
 let lastState = null;
 let lastFrame = performance.now();
 let plotTick = 0;
+let routeWasLive = false;
 
 function frame(now) {
   const wallDt = Math.min(now - lastFrame, 100);
@@ -1083,6 +1214,12 @@ function frame(now) {
   lastState = JSON.parse(api.stateJson());
   render(lastState);
   updateHud(lastState);
+
+  // Render the report on the falling edge, once, rather than rebuilding the
+  // table every frame while the route is still running.
+  const routeLive = api.routeRunning() === 1;
+  if (!routeLive && routeWasLive) renderReport();
+  routeWasLive = routeLive;
 
   // Plots are cheap but not free; refresh a few times a second.
   if (++plotTick % 6 === 0) { if (replayOn.checked) updateReplay(); drawPlots(); }
