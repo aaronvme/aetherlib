@@ -1,21 +1,9 @@
-// Ported from FBLib - https://github.com/jiazegao/FBLib
 #pragma once
 
 #include <cmath>
 #include <cstdint>
 
 namespace chad {
-
-// ============================================================================
-// FastTrig — LUT-based sin/cos for high-frequency localization loops
-// ============================================================================
-//
-// Quadrant resolution: 1024 entries over [0, PI/2] → ~0.088° per step
-// Table footprint: 4 KB (fits entirely in L1 cache of Cortex-A9)
-// Usage: FastTrig::sin(rad), FastTrig::cos(rad)
-
-
-// Cache-line aligned LUT: 1024 values of sin(x) for x in [0, PI/2]
 alignas(64) inline const float SIN_LUT[1024] = {
     0.0000000f,    0.0015340f,    0.0030680f,    0.0046019f,    0.0061359f,    0.0076698f,
     0.0092038f,    0.0107377f,    0.0122715f,    0.0138054f,    0.0153392f,    0.0168730f,
@@ -192,41 +180,32 @@ alignas(64) inline const float SIN_LUT[1024] = {
 
 class FastTrig {
 private:
-    // Scale factor: 1024 entries × 4 quadrants = 4096 steps over [0, 2PI]
-    static constexpr float MAPPING_FACTOR = 4096.0f / 6.28318530718f;  // 4096 / 2PI
+
+    static constexpr float MAPPING_FACTOR = 4096.0f / 6.28318530718f;
 
 public:
-    /// Fast sin(x) for x in radians — ~0.088° resolution, no interpolation
+
     static inline float sin(float rad) {
-        // Scale angle to [0, 4096) range
         float scaled = rad * MAPPING_FACTOR;
 
-        // Floor cast (handles negative angles correctly toward -inf)
         int32_t rawIdx = static_cast<int32_t>(std::floor(scaled));
 
-        // Wrap to [0, 4095] using bitwise AND (4096 = 2^12, 4095 = 0xFFF)
         uint32_t wrapped = static_cast<uint32_t>(rawIdx) & 4095;
 
-        // Extract quadrant (2 MSBs) and index (10 LSBs)
-        uint32_t quad = wrapped >> 10;        // 0, 1, 2, or 3
-        uint32_t idx  = wrapped & 1023;       // 0..1023
+        uint32_t quad = wrapped >> 10;
+        uint32_t idx  = wrapped & 1023;
 
-        // Fold quadrants 1 and 3 (reverse index for sine symmetry)
         if (quad == 1 || quad == 3) {
             idx = 1023 - idx;
         }
 
-        // Lookup value
         float val = SIN_LUT[idx];
 
-        // Sign: quadrants 2 and 3 are negative
         return (quad >= 2) ? -val : val;
     }
 
-    /// Fast cos(x) for x in radians — delegates to sin(x + PI/2)
     static inline float cos(float rad) {
-        return sin(rad + 1.57079632679f);  // PI/2
+        return sin(rad + 1.57079632679f);
     }
 };
-
-}  // namespace chad
+}

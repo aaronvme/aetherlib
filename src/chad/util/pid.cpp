@@ -1,15 +1,14 @@
-// Ported from FBLib - https://github.com/jiazegao/FBLib
 #include "chad/util/util.hpp"
 #include "chad/util/pid.hpp"
 #include "pros/rtos.hpp"
 
 using namespace chad;
-    // PID 
-PID::PID(float kP,          // Proportional gain
-         float kI,          // Integral gain
-         float kD,          // Derivative gain
-         float windupRange, // Anti-windup clamp limit
-         bool flipReset)    // Negate vs. zero integral on reset
+
+PID::PID(float kP,
+         float kI,
+         float kD,
+         float windupRange,
+         bool flipReset)
     : mGains{kP, kI, kD}, mWindupRange(windupRange), mFlipReset(flipReset), mPreviousTime(pros::millis()) {}
 
     PID::PID(const PIDGains& gains, float windupRange, bool flipReset)
@@ -25,17 +24,15 @@ PID::PID(float kP,          // Proportional gain
 
     float PID::update(float error) {
         uint32_t currentTime = pros::millis();
-        float dt = (currentTime - mPreviousTime) / 1000.0f; 
+        float dt = (currentTime - mPreviousTime) / 1000.0f;
 
         if (dt > 0.1f) dt = 0.1f;
         mPreviousTime = currentTime;
 
         if (mFixedDt > 0.0f) dt = mFixedDt;
 
-        // proportional
         float p = mGains.kP * error;
 
-        // integral 
         mIntegral += error * dt;
         if (mWindupRange > 0.0f) {
             if (mIntegral > mWindupRange) {
@@ -46,15 +43,13 @@ PID::PID(float kP,          // Proportional gain
         }
         float i = mGains.kI * mIntegral;
 
-        // derivative 
         float d = 0.0f;
-        if (dt > 1e-6f) {  
+        if (dt > 1e-6f) {
             float derivative = (error - mPreviousError) / dt;
 
             mFilteredDerivative = mDerivativeFilter * derivative + (1.0f - mDerivativeFilter) * mFilteredDerivative;
             d = mGains.kD * mFilteredDerivative;
         }
-
 
         mPreviousError = error;
 
@@ -63,7 +58,6 @@ PID::PID(float kP,          // Proportional gain
 
     void PID::reset() {
         if (mFlipReset) {
-            // Negate the integral so it opposes the opposite direction
             mIntegral = -mIntegral;
         } else {
             mIntegral = 0.0f;
@@ -71,7 +65,7 @@ PID::PID(float kP,          // Proportional gain
 
         mPreviousError = 0.0f;
         mFilteredDerivative = 0.0f;
-        mPreviousTime = pros::millis();  // Reset time to current
+        mPreviousTime = pros::millis();
     }
 
     void PID::setFlipReset(bool flipReset) {
@@ -95,4 +89,3 @@ PID::PID(float kP,          // Proportional gain
     float PID::getWindupRange() const {
         return mWindupRange;
     }
-    

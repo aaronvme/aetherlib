@@ -5,17 +5,15 @@
 #include <string>
 #include <vector>
 
-// Opaque, to keep LVGL out of every TU that includes this.
 typedef struct _lv_obj_t lv_obj_t;
 typedef struct _lv_event_t lv_event_t;
 
 namespace chad {
-
 using AutonFunc = std::function<void()>;
 
 class AutonSelector {
 public:
-    /// Must be called before init().
+
     void registerAuton(const std::string& name, AutonFunc func);
 
     void init();
@@ -45,5 +43,4 @@ private:
     lv_obj_t* mList{nullptr};
     lv_obj_t* mStatus{nullptr};
 };
-
-}  // namespace chad
+}

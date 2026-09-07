@@ -1,15 +1,9 @@
-// Ported from FBLib - https://github.com/jiazegao/FBLib
 #include "chad/tracking/rcl_tracking.hpp"
 
 #include <algorithm>
 #include <cmath>
 
 namespace chad {
-
-// ============================================================================
-// Ray-line intersection
-// ============================================================================
-
 float RclTracking::intersectLineSegment(float rx, float ry,
                                          float rCos, float rSin,
                                          float x1, float y1,
@@ -41,17 +35,10 @@ float RclTracking::intersectLineSegment(float rx, float ry,
     return maxRange;
 }
 
-// ============================================================================
-// nearestWall()
-// ============================================================================
-
 std::pair<int, float> RclTracking::nearestWall(const RclSensor& s) const {
-    // Distance to each of the 4 field walls; the closest positive one is the
-    // wall the ray reaches first.
     float minDist = 1e9f;
-    int wall = -1;  // 1=N(+Y), 2=E(+X), 3=S(-Y), 4=W(-X)
+    int wall = -1;
 
-    // X-walls (vertical planes at x = ±FIELD_HALF_WALL)
     if (std::fabs(s.rayCos) > 1e-6f) {
         float dEast = (Field::FIELD_HALF_WALL - s.worldX) / s.rayCos;
         if (dEast > 0.0f && dEast < minDist) { minDist = dEast; wall = 2; }
@@ -60,7 +47,6 @@ std::pair<int, float> RclTracking::nearestWall(const RclSensor& s) const {
         if (dWest > 0.0f && dWest < minDist) { minDist = dWest; wall = 4; }
     }
 
-    // Y-walls (horizontal planes at y = ±FIELD_HALF_WALL)
     if (std::fabs(s.raySin) > 1e-6f) {
         float dNorth = (Field::FIELD_HALF_WALL - s.worldY) / s.raySin;
         if (dNorth > 0.0f && dNorth < minDist) { minDist = dNorth; wall = 1; }
@@ -73,20 +59,12 @@ std::pair<int, float> RclTracking::nearestWall(const RclSensor& s) const {
     return {wall, minDist};
 }
 
-// ============================================================================
-// Constructor / Destructor
-// ============================================================================
-
 RclTracking::RclTracking(OdomTracking& odom, const Config& config)
     : mConfig(config), mOdom(odom) {}
 
 RclTracking::~RclTracking() {
     stopTracking();
 }
-
-// ============================================================================
-// Sensor management
-// ============================================================================
 
 void RclTracking::setSensor(int index, pros::Distance* sensor, const Pose& mountOffset) {
     if (index < 0 || index >= MAX_DISTANCE_SENSORS) return;
@@ -112,7 +90,7 @@ void RclTracking::configureSensors(const std::array<pros::Distance*, MAX_DISTANC
             mDisableTimers[i]        = 0.0f;
         }
     }
-    // Clamp to [1, MAX_DISTANCE_SENSORS] so loop bounds remain safe
+
     mConfig.sensorCount = (activeCount > 0) ? activeCount : 1;
 }
 
@@ -132,10 +110,6 @@ void RclTracking::disableSensorFor(int index, float durationMs) {
     mDisableTimers[index] = durationMs;
 }
 
-// ============================================================================
-// Obstacle management
-// ============================================================================
-
 void RclTracking::addLineObstacle(float x1, float y1, float x2, float y2, float lifetimeMs) {
     mLineObstacles.push_back({x1, y1, x2, y2, lifetimeMs});
 }
@@ -149,10 +123,6 @@ void RclTracking::clearObstacles() {
     mCircleObstacles.clear();
 }
 
-// ============================================================================
-// updateSensorPoses()
-// ============================================================================
-
 void RclTracking::updateSensorPoses(const Pose& robotPose) {
     float rCos = std::cos(robotPose.theta);
     float rSin = std::sin(robotPose.theta);
@@ -164,40 +134,26 @@ void RclTracking::updateSensorPoses(const Pose& robotPose) {
             continue;
         }
 
-        // Rotate mount offset into world frame
         s.worldX = robotPose.x + (s.mountOffset.x * rCos - s.mountOffset.y * rSin);
         s.worldY = robotPose.y + (s.mountOffset.x * rSin + s.mountOffset.y * rCos);
 
-        // Sensor pointing direction in world frame
         float sensorWorldAngle = robotPose.theta + s.mountOffset.theta;
         s.worldHeading = sensorWorldAngle;
         s.rayCos = std::cos(sensorWorldAngle);
         s.raySin = std::sin(sensorWorldAngle);
 
-        // Read sensor
         int readingMm = s.sensor->get();
         s.readingInch = readingMm * MM_TO_INCH;
         s.confidence = s.sensor->get_confidence();
 
-        // Publish validity; without this the flag is never set true.
         s.valid = isValidReading(i);
     }
 }
 
-// ============================================================================
-// isValidReading()
-// ============================================================================
-
 bool RclTracking::isValidReading(int index) const {
     float wallDist = 0.0f;
     ReadingClass c = classifyReading(index, wallDist);
-    // A TooFar reading is a real wall measurement from somewhere other than where
-    // odometry thinks the robot is: useless as a correction to a pose assumed
-    // good, and exactly what is needed once that assumption is dropped.
-    // Once the pose is known to be wrong, "that reading is too short to be the
-    // wall" is an inference drawn from a pose we no longer believe. Every
-    // well-formed reading becomes a candidate wall measurement again — which is
-    // what lets an axis recover when its only beam reads short.
+
     if (c == ReadingClass::WallHit) return true;
     return mDisplaced && (c == ReadingClass::TooFar || c == ReadingClass::Blocked);
 }
@@ -207,19 +163,10 @@ RclTracking::ReadingClass RclTracking::classifyReading(int index, float& wallDis
     const auto& s = mSensors[index];
     if (!s.enabled || s.sensor == nullptr) return ReadingClass::Invalid;
 
-    // — Range checks —
-    // V5 distance sensor practical maximum is ~2000 mm (~78.7 in). Readings
-    // above this are unreliable; above 9000 is the "no object" sentinel.
-    // Use the stored reading from updateSensorPoses() to avoid a TOCTOU race
-    // where the sensor value changes between the range check here and the
-    // coordinate computation in getBotCoordFromSensor().
     float readingInch = s.readingInch;
     if (readingInch < 1.0f * MM_TO_INCH) return ReadingClass::Invalid;
 
     if (readingInch > 2000.0f * MM_TO_INCH) {
-        // Silence where the pose predicts a near wall is as solid a contradiction
-        // as reading through one. It fixes no coordinate, but it is what tells an
-        // axis whose beams have all fallen silent that the robot has moved.
         float range = 0.0f;
         auto [w, d] = nearestWall(s);
         range = d;
@@ -227,17 +174,10 @@ RclTracking::ReadingClass RclTracking::classifyReading(int index, float& wallDis
         return ReadingClass::Invalid;
     }
 
-    // — Confidence check —
-    // V5 sensor confidence is 0–63. Low-confidence readings produce noise.
     if (readingInch > 200.0f * MM_TO_INCH && s.confidence < mConfig.confidenceThreshold) {
         return ReadingClass::Invalid;
     }
 
-    // — Heading alignment check —
-    // RCL requires the sensor ray to be near-orthogonal to a field wall
-    // (within angleTolerance of 0°, 90°, 180°, or 270° in world frame).
-    // A diagonal ray cannot determine which wall was hit and the distance
-    // measurement has amplified angle error.
     float angleTolRad = degToRad(mConfig.angleTolerance);
     float angleMod = std::fmod(std::fabs(s.worldHeading), HALF_PI);
     if (angleMod > angleTolRad && angleMod < HALF_PI - angleTolRad) {
@@ -248,19 +188,12 @@ RclTracking::ReadingClass RclTracking::classifyReading(int index, float& wallDis
     if (wall < 0) return ReadingClass::Invalid;
     wallDist = wallRange;
 
-    // — Occlusion check —
-    // A ray crossing an obstacle is measuring the obstacle, not the wall behind
-    // it. Reject on any crossing before the wall: comparing the obstacle distance
-    // against the reading misses the case that matters, since a sensor seeing the
-    // obstacle reports the obstacle's own distance.
     for (const auto& obs : mLineObstacles) {
         float dist = intersectLineSegment(s.worldX, s.worldY, s.rayCos, s.raySin,
                                            obs.x1, obs.y1, obs.x2, obs.y2, wallRange);
         if (dist < wallRange) return ReadingClass::Invalid;
     }
 
-    // Cone test, matching MCL and the EKF: a post owns the return either because
-    // the reading sits on its surface or because it stands in front of the wall.
     for (const auto& obs : mCircleObstacles) {
         const float ox = obs.x - s.worldX;
         const float oy = obs.y - s.worldY;
@@ -278,43 +211,18 @@ RclTracking::ReadingClass RclTracking::classifyReading(int index, float& wallDis
         }
     }
 
-    // — Agreement check —
-    // The reading has to be consistent with the wall it will be converted
-    // against: 31 in against a wall predicted at 127 in is not that wall.
     float innovation = readingInch - wallRange;
     if (innovation > mConfig.maxWallInnovation) {
-        // Further than the wall this pose puts in front of the beam. No object
-        // can lengthen a reading and nothing is visible through a wall, so the
-        // pose is wrong — the robot has been moved.
         return ReadingClass::TooFar;
     }
     if (innovation < -mConfig.maxWallInnovation) {
-        // Nearer than predicted: something unmodelled is in the beam. Common,
-        // and it carries no information about where the robot is — unless the
-        // pose itself turns out to be wrong.
         return ReadingClass::Blocked;
     }
 
     return ReadingClass::WallHit;
 }
 
-// ============================================================================
-// getBotCoordFromSensor()
-// ============================================================================
-
 std::pair<CoordType, float> RclTracking::getBotCoordFromSensor(int index) const {
-    // ========================================================================
-    // Derive robot coordinate from a single sensor intersecting a field wall.
-    //
-    // A distance sensor pointed at a wall determines ONE spatial dimension:
-    //   • east/west wall → X coordinate
-    //   • north/south wall → Y coordinate
-    //
-    // The unconstrained coordinate is NOT returned — it must come from
-    // another sensor or from odometry.  This is physically necessary:
-    // a single ray-to-wall distance cannot constrain the axis parallel
-    // to the wall.
-    // ========================================================================
     const auto& s = mSensors[index];
     if (!isValidReading(index)) return {CoordType::INVALID, 0.0f};
 
@@ -322,30 +230,26 @@ std::pair<CoordType, float> RclTracking::getBotCoordFromSensor(int index) const 
     float sinA = s.raySin;
     float reading = s.readingInch;
 
-    int wall = nearestWall(s).first;  // 1=N(+Y), 2=E(+X), 3=S(-Y), 4=W(-X)
+    int wall = nearestWall(s).first;
     if (wall < 0) return {CoordType::INVALID, 0.0f};
 
-    // Derive coordinate from the wall that was hit.
-    //   sensor_world = wall_coord - rayComponent * reading
-    //   robot = sensor_world - sensorOffsetInWorldFrame
     float result;
     CoordType type;
 
-    if (wall == 1) {       // NORTH — horizontal wall at y = +FIELD_HALF_WALL
+    if (wall == 1) {
         type = CoordType::Y;
         result = Field::FIELD_HALF_WALL - sinA * reading;
-    } else if (wall == 2) { // EAST — vertical wall at x = +FIELD_HALF_WALL
+    } else if (wall == 2) {
         type = CoordType::X;
         result = Field::FIELD_HALF_WALL - cosA * reading;
-    } else if (wall == 3) { // SOUTH — horizontal wall at y = -FIELD_HALF_WALL
+    } else if (wall == 3) {
         type = CoordType::Y;
         result = -Field::FIELD_HALF_WALL - sinA * reading;
-    } else {               // wall == 4, WEST — vertical wall at x = -FIELD_HALF_WALL
+    } else {
         type = CoordType::X;
         result = -Field::FIELD_HALF_WALL - cosA * reading;
     }
 
-    // Subtract sensor mount offset from robot center
     float robotHeading = mOdom.getPose().theta;
     float rCos = std::cos(robotHeading);
     float rSin = std::sin(robotHeading);
@@ -358,15 +262,7 @@ std::pair<CoordType, float> RclTracking::getBotCoordFromSensor(int index) const 
     return {type, result};
 }
 
-// ============================================================================
-// computePose()
-// ============================================================================
-
 RclTracking::AxisEstimate RclTracking::estimateAxes() const {
-    // Independently average X and Y coordinates from different sensors.
-    // A sensor pointed at an east/west wall constrains X; a sensor pointed
-    // at a north/south wall constrains Y.  The two axes are independent —
-    // a sensor that determines X says nothing about Y (and vice versa).
     float sumX = 0.0f, sumY = 0.0f;
     int xCount = 0, yCount = 0;
 
@@ -384,7 +280,7 @@ RclTracking::AxisEstimate RclTracking::estimateAxes() const {
     AxisEstimate est;
     est.xCount = xCount;
     est.yCount = yCount;
-    // When no sensor constrains an axis, fall back to odometry
+
     est.x = (xCount > 0) ? sumX / static_cast<float>(xCount) : mOdom.getPose().x;
     est.y = (yCount > 0) ? sumY / static_cast<float>(yCount) : mOdom.getPose().y;
     return est;
@@ -398,12 +294,7 @@ std::pair<Pose, int> RclTracking::computePose() const {
     };
 }
 
-// ============================================================================
-// update()
-// ============================================================================
-
 void RclTracking::update() {
-    // Update sensor disable timers
     for (int i = 0; i < MAX_DISTANCE_SENSORS; i++) {
         if (mDisableTimers[i] > 0.0f) {
             mDisableTimers[i] -= mConfig.updatePeriodMs;
@@ -417,13 +308,6 @@ void RclTracking::update() {
     Pose currentPose = mOdom.getPose();
     updateSensorPoses(currentPose);
 
-    // Displacement detection.
-    //
-    // An object can only shorten a reading, so one LONGER than the predicted wall
-    // cannot happen if the pose is right -- proof the robot moved, not a hint.
-    // Require persistence so a stray sample cannot unlock a hard correction.
-    // Weighted, not counted: reading through a wall is conclusive alone, silence
-    // is weaker (a glancing beam drops out legitimately) so it takes two.
     int evidence = 0;
     for (int i = 0; i < mConfig.sensorCount; i++) {
         float wallDist = 0.0f;
@@ -446,8 +330,6 @@ void RclTracking::update() {
     int sensorCount = est.xCount + est.yCount;
     mActiveSensorCount = sensorCount;
 
-    // Measured axes only, and smooth the residual rather than the coordinate: an
-    // EMA over positions lags a moving robot, and sync writes that lag back.
     if (sensorCount > 0) {
         if (mConfig.useAccumulation) {
             float alpha = mConfig.accumulationAlpha;
@@ -466,10 +348,6 @@ void RclTracking::update() {
         mLatestEstimate.theta = currentPose.theta;
     }
 
-    // Decrement temporary obstacle lifetimes and mark expired ones
-    // Permanent obstacles (lifetimeMs == 0) are never removed.
-    // Temporary obstacles (lifetimeMs > 0) count down each update;
-    // when they cross 0 they are set to -1.0f to flag removal.
     for (auto& o : mLineObstacles) {
         if (o.lifetimeMs > 0.0f) {
             o.lifetimeMs -= mConfig.updatePeriodMs;
@@ -483,7 +361,6 @@ void RclTracking::update() {
         }
     }
 
-    // Remove obstacles flagged for deletion
     mLineObstacles.erase(
         std::remove_if(mLineObstacles.begin(), mLineObstacles.end(),
                        [](const LineObstacle& o) { return o.lifetimeMs < 0.0f; }),
@@ -498,23 +375,14 @@ void RclTracking::update() {
     }
 }
 
-// ============================================================================
-// syncUpdate()
-// ============================================================================
-
 void RclTracking::syncUpdate() {
     if (mActiveSensorCount == 0) return;
 
     Pose odomPose = mOdom.getPose();
 
-    // Measured axes only, and a fraction of the error: applying all of it every
-    // cycle turns one bad reading into a pose teleport.
-    // Once the pose is disproved this is not refining an estimate, it is replacing
-    // a discredited one with a direct wall measurement.
     const float prop = mConfig.hardSync ? 1.0f
                      : (mDisplaced ? mConfig.recoverySyncProp : mConfig.syncProp);
-    // Rate-limited so whatever consumes the pose sees it continuous; a proven
-    // displacement is exempt, and so is hardSync.
+
     const float rateStep = mConfig.maxSyncRate * (mConfig.updatePeriodMs / 1000.0f);
     const float maxStep = (mDisplaced || mConfig.hardSync)
                               ? Field::FIELD_LENGTH
@@ -537,10 +405,6 @@ void RclTracking::syncUpdate() {
     });
 }
 
-// ============================================================================
-// updateBotPoseFromBestSensor()
-// ============================================================================
-
 bool RclTracking::updateBotPoseFromBestSensor() {
     updateSensorPoses(mOdom.getPose());
 
@@ -562,8 +426,6 @@ bool RclTracking::updateBotPoseFromBestSensor() {
     auto [type, coord] = getBotCoordFromSensor(bestIndex);
     if (type == CoordType::INVALID) return false;
 
-    // Only update the coordinate that this sensor constrains.
-    // The other coordinate stays at the odometry value.
     Pose odomPose = mOdom.getPose();
     if (type == CoordType::X) {
         mOdom.setPose({coord, odomPose.y, odomPose.theta});
@@ -573,10 +435,6 @@ bool RclTracking::updateBotPoseFromBestSensor() {
     mLatestEstimate = mOdom.getPose();
     return true;
 }
-
-// ============================================================================
-// Lifecycle
-// ============================================================================
 
 void RclTracking::startTracking() {
     if (mTask == nullptr) {
@@ -589,10 +447,6 @@ void RclTracking::startTracking() {
 void RclTracking::stopTracking() {
     mRunning = false;
     if (mTask != nullptr) {
-        // Wait for the task to exit on its own (it self-deletes when run()
-        // returns). Hard-killing with remove() while the task holds the
-        // odometry mutex (inside getPose/setPose) would deadlock every other
-        // odometry consumer permanently — only remove() as a last resort.
         uint32_t start = pros::millis();
         while (pros::millis() - start < 200) {
             uint32_t state = mTask->get_state();
@@ -617,14 +471,11 @@ bool RclTracking::isTracking() const {
 void RclTracking::run() {
     while (mRunning) {
         uint32_t startTime = pros::millis();
-        // Odometry freshness is provided by the background odometry task inside
-        // OdomTracking (the sole caller of mOdom.update()). Calling update()
-        // here too would race on odometry state and consume delta baselines.
+
         update();
         int32_t elapsed = pros::millis() - startTime;
         int32_t remaining = static_cast<int32_t>(mConfig.updatePeriodMs) - elapsed;
         pros::delay(remaining > 1 ? remaining : 1);
     }
 }
-
-}  // namespace chad
+}

@@ -1,4 +1,3 @@
-// Ported from FBLib - https://github.com/jiazegao/FBLib
 #include "chad/movement_control/turntopoint.hpp"
 
 #include <cmath>
@@ -6,13 +5,6 @@
 #include "chad/util/util.hpp"
 
 namespace chad {
-
-// ============================================================================
-// TurnToPoint — rotational movement utilities
-// ============================================================================
-
-/// Resolve the signed angular error given a desired turn direction.
-/// Positive = CCW, Negative = CW.
 float resolveTurnError(float rawErrorRad, TurnDirection direction) {
     switch (direction) {
     case TurnDirection::CCW:
@@ -28,24 +20,18 @@ float resolveTurnError(float rawErrorRad, TurnDirection direction) {
     return rawErrorRad;
 }
 
-/// Compute heading error to face a target point from current pose.
 float headingToPoint(const Pose& current, float targetX, float targetY) {
     float desiredHeadingRad = bearingToPoint(current, targetX, targetY);
     return angleDiffRad(current.theta, desiredHeadingRad);
 }
 
-/// Compute heading error with an angular offset, in VEX degrees (CW positive)
-/// to match the rest of the API — hence the subtraction from a CCW-positive
-/// bearing.
 float headingToPointOffset(const Pose& current, float targetX, float targetY,
                             float offsetDeg) {
     float desiredHeadingRad = bearingToPoint(current, targetX, targetY) - degToRad(offsetDeg);
     return angleDiffRad(current.theta, desiredHeadingRad);
 }
 
-/// Check if heading error is within tolerance.
 bool headingWithinTolerance(float headingErrorRad, float toleranceRad) {
     return std::fabs(headingErrorRad) < toleranceRad;
 }
-
-}  // namespace chad
+}

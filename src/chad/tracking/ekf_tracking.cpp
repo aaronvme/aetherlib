@@ -5,12 +5,8 @@
 #include <mutex>
 
 namespace chad {
-
 namespace {
-
 constexpr float kWall = Field::FIELD_HALF_WALL;
-
-// --- 3x3 helpers, row-major -------------------------------------------------
 
 void mat3Mul(const float* A, const float* B, float* out) {
     for (int r = 0; r < 3; r++) {
@@ -32,8 +28,6 @@ void mat3MulT(const float* A, const float* B, float* out) {
     }
 }
 
-// Float arithmetic leaves P slightly asymmetric after every update, and the
-// asymmetry compounds until a variance goes negative and the filter diverges.
 void symmetrize3(float* P) {
     for (int r = 0; r < 3; r++) {
         for (int c = r + 1; c < 3; c++) {
@@ -43,12 +37,7 @@ void symmetrize3(float* P) {
     }
     for (int i = 0; i < 3; i++) P[i * 3 + i] = std::max(P[i * 3 + i], 1e-9f);
 }
-
-}  // namespace
-
-// ============================================================================
-// Construction
-// ============================================================================
+}
 
 EkfTracking::EkfTracking(OdomTracking& odom,
                          std::array<pros::Distance*, SENSOR_COUNT> distanceSensors,
@@ -65,14 +54,9 @@ EkfTracking::~EkfTracking() {
     stopTracking();
 }
 
-// ============================================================================
-// Lifecycle
-// ============================================================================
-
 void EkfTracking::startTracking() {
     if (mTask != nullptr) return;
-    // Drop motion that accumulated while the filter was idle; it predates the
-    // current state and would be integrated as though it had just happened.
+
     mOdom.consumeDelta(OdomTracking::CHANNEL_EKF);
     mRunning = true;
     mTask = new pros::Task([this]() { run(); });
@@ -111,10 +95,6 @@ void EkfTracking::run() {
         pros::delay(remaining > 2 ? remaining : 2);
     }
 }
-
-// ============================================================================
-// Pose management
-// ============================================================================
 
 void EkfTracking::setPose(const Pose& pose) {
     setPose(pose, 1.0f, 0.02f);
@@ -161,10 +141,6 @@ void EkfTracking::setDistanceSensors(
     mDistanceSensors = sensors;
 }
 
-// ============================================================================
-// predict() — odometry drives the state, and inflates P
-// ============================================================================
-
 void EkfTracking::predict(const OdomDelta& delta) {
     const float theta = mState[2];
     const float mid = theta + delta.dTheta * 0.5f;
@@ -177,8 +153,6 @@ void EkfTracking::predict(const OdomDelta& delta) {
     mState[1] += dy;
     mState[2] = wrapRad(theta + delta.dTheta);
 
-    // F = I except for the heading column: rotating the robot swings the
-    // displacement it just made.
     const float F[9] = {
         1.0f, 0.0f, -dy,
         0.0f, 1.0f,  dx,
@@ -188,9 +162,6 @@ void EkfTracking::predict(const OdomDelta& delta) {
     mat3Mul(F, mP, FP);
     mat3MulT(FP, F, FPFt);
 
-    // Odometry error accumulates with distance travelled, so noise is per-inch.
-    // It is also anisotropic: a tank drive knows how far it drove far better
-    // than whether it slid sideways, so build Q in the body frame and rotate it.
     const float alongSigma = mConfig.vertNoiseProp * std::fabs(delta.dVert)
                            + mConfig.posNoiseFloor;
     const float lateralSigma =
@@ -198,9 +169,6 @@ void EkfTracking::predict(const OdomDelta& delta) {
             ? mConfig.horizNoiseProp * std::fabs(delta.dHoriz) + mConfig.posNoiseFloor
             : mConfig.slipNoiseProp * std::fabs(delta.dVert) + mConfig.slipNoiseFloor;
 
-    // Systematic component. Charging bias^2 * |ds| * decorrLen per tick makes the
-    // accumulated variance bias^2 * L * decorrLen, so sigma grows like the real
-    // error does over the distances a route covers.
     const float travel = std::fabs(delta.dVert) + std::fabs(delta.dHoriz);
     const float biasScale = travel * mConfig.biasDecorrIn;
     const float qBiasAlong = mConfig.vertBiasProp * mConfig.vertBiasProp * biasScale;
@@ -227,13 +195,8 @@ void EkfTracking::predict(const OdomDelta& delta) {
     symmetrize3(mP);
 }
 
-// ============================================================================
-// Scalar correction (Joseph form)
-// ============================================================================
-
 bool EkfTracking::applyScalarUpdate(const float H[3], float innovation, float R,
                                     float gateChi2) {
-    // S = H P H^T + R
     float PHt[3];
     for (int r = 0; r < 3; r++) {
         PHt[r] = mP[r * 3 + 0] * H[0] + mP[r * 3 + 1] * H[1] + mP[r * 3 + 2] * H[2];
@@ -250,8 +213,6 @@ bool EkfTracking::applyScalarUpdate(const float H[3], float innovation, float R,
     mState[1] += K[1] * innovation;
     mState[2] = wrapRad(mState[2] + K[2] * innovation);
 
-    // Joseph form: P = (I-KH) P (I-KH)^T + K R K^T. The short form
-    // (I-KH)P is cheaper but loses symmetry and can go indefinite in float.
     float A[9];
     for (int r = 0; r < 3; r++) {
         for (int c = 0; c < 3; c++) {
@@ -270,15 +231,8 @@ bool EkfTracking::applyScalarUpdate(const float H[3], float innovation, float R,
     return true;
 }
 
-// ============================================================================
-// Ray casting
-// ============================================================================
-
 EkfTracking::WallHit EkfTracking::castWalls(float sx, float sy,
                                             float rayCos, float raySin) const {
-    // The field interior is a convex axis-aligned box, so a slab test gives both
-    // the exit distance and the face -- and the face normal is what the range
-    // Jacobian needs.
     WallHit hit;
     float best = mConfig.maxRangeIn;
 
@@ -321,8 +275,6 @@ bool EkfTracking::obstacleOwnsReading(float sx, float sy,
                                       float readingIn, float wallRange) const {
     if (mCircleObstacles == nullptr) return false;
 
-    // Widened by the filter's own position sigma: an unsure filter is also
-    // unsure which beams a post could be spoiling, and should drop more.
     const float posSigma = std::sqrt(std::max(mP[0], 0.0f) + std::max(mP[4], 0.0f));
     const float tol = mConfig.obstacleRangeTol + mConfig.obstacleSigmaPad * posSigma;
 
@@ -335,18 +287,12 @@ bool EkfTracking::obstacleOwnsReading(float sx, float sy,
         if (perp > circle.radius + along * mConfig.obstacleConeFrac) continue;
 
         const float postRange = std::sqrt(ox * ox + oy * oy) - circle.radius;
-        // Either the return matches the post surface, or the post stands in
-        // front of the wall this beam would otherwise have measured. Both mean
-        // the reading says nothing about where the wall is.
+
         if (std::fabs(readingIn - postRange) <= tol) return true;
         if (postRange > 0.0f && postRange + tol < wallRange) return true;
     }
     return false;
 }
-
-// ============================================================================
-// updateRanges() — distance sensors against the field walls
-// ============================================================================
 
 void EkfTracking::updateRanges() {
     mBeamsUsed = 0;
@@ -369,7 +315,6 @@ void EkfTracking::updateRanges() {
         }
         const float reading = mm * MM_TO_INCH;
 
-        // Sensor origin and ray direction in the world, from the current mean.
         const Pose& m = mSensorMounts[i];
         const float sx = x + m.x * ct - m.y * st;
         const float sy = y + m.x * st + m.y * ct;
@@ -391,16 +336,13 @@ void EkfTracking::updateRanges() {
             continue;
         }
 
-        // r = (d - n.s) / (n.u), so with N = d - n.s and D = n.u:
-        //   dr/dx = -n_x / D,  dr/dy = -n_y / D
-        //   dr/dtheta = -(n . ds/dtheta)/D - r (n . du/dtheta)/D
         const float D = hit.nx * rayCos + hit.ny * raySin;
         if (std::fabs(D) < 1e-4f) {
             mBeamStates[i] = BeamState::Grazing;
             continue;
         }
         const float invD = 1.0f / D;
-        // ds/dtheta rotates the mount offset; du/dtheta is the ray turned 90 deg.
+
         const float dsx = -m.x * st - m.y * ct;
         const float dsy =  m.x * ct - m.y * st;
         const float dux = -raySin;
@@ -412,8 +354,6 @@ void EkfTracking::updateRanges() {
             (-(hit.nx * dsx + hit.ny * dsy) - hit.range * (hit.nx * dux + hit.ny * duy)) * invD,
         };
 
-        // Range noise grows with distance, and a glancing beam maps a given
-        // range error into a larger position error, so divide by cos(incidence).
         float sigma = (mConfig.rangeSigmaBase + mConfig.rangeSigmaProp * reading)
                     / std::max(hit.cosIncidence, 0.25f);
         if (mm > 200.0f) sigma *= 32.0f / std::max(static_cast<float>(conf), 1.0f);
@@ -429,23 +369,14 @@ void EkfTracking::updateRanges() {
     }
 }
 
-// ============================================================================
-// updateImuHeading()
-// ============================================================================
-
 void EkfTracking::updateImuHeading() {
     const float imu = mOdom.imuHeadingRad();
     if (!std::isfinite(imu)) return;
     const float H[3] = {0.0f, 0.0f, 1.0f};
-    // No gate: on this drivetrain the IMU is the only absolute heading source,
-    // so gating it out would leave the filter's heading unobserved.
+
     applyScalarUpdate(H, angleDiffRad(mState[2], imu),
                       mConfig.imuSigmaRad * mConfig.imuSigmaRad, 0.0f);
 }
-
-// ============================================================================
-// updateMcl() — the particle filter as a 2-dof position measurement
-// ============================================================================
 
 void EkfTracking::updateMcl() {
     if (mMcl == nullptr || !mMcl->isTracking()) return;
@@ -453,8 +384,6 @@ void EkfTracking::updateMcl() {
     const MclTracking::Estimate est = mMcl->estimate();
     if (!(est.nEff > 0.0f)) return;
 
-    // MCL owns position; heading comes from the IMU, and MCL's particles are
-    // clamped to the IMU anyway, so its heading carries no new information.
     const float scale = mConfig.mclSigmaScale * mConfig.mclSigmaScale;
     const float floorVar = mConfig.mclSigmaFloor * mConfig.mclSigmaFloor;
     const float rxx = std::max(est.covXX * scale, floorVar);
@@ -478,9 +407,7 @@ void EkfTracking::updateMcl() {
 
     if (mahal > mConfig.mclGateChi2) {
         mMclRejectStreak++;
-        // Gating is right for a bad reading and wrong for a kidnapped robot --
-        // the two look identical for one cycle and nothing alike over ten. A
-        // healthy cloud that keeps insisting is telling the truth.
+
         const float neffFrac = est.nEff / static_cast<float>(mMcl->config().particleCount);
         if (mMclRejectStreak >= mConfig.mclResetCycles &&
             neffFrac >= mConfig.mclMinNeffFrac) {
@@ -500,7 +427,6 @@ void EkfTracking::updateMcl() {
     }
     mMclRejectStreak = 0;
 
-    // K = P H^T S^-1, with H selecting (x, y): P H^T is P's first two columns.
     float K[6];
     for (int r = 0; r < 3; r++) {
         const float p0 = mP[r * 3 + 0], p1 = mP[r * 3 + 1];
@@ -523,7 +449,6 @@ void EkfTracking::updateMcl() {
     mat3Mul(A, mP, AP);
     mat3MulT(AP, A, APAt);
 
-    // K R K^T
     for (int r = 0; r < 3; r++) {
         const float kr0 = K[r * 2 + 0] * rxx + K[r * 2 + 1] * rxy;
         const float kr1 = K[r * 2 + 0] * rxy + K[r * 2 + 1] * ryy;
@@ -534,10 +459,6 @@ void EkfTracking::updateMcl() {
     }
     symmetrize3(mP);
 }
-
-// ============================================================================
-// update() — one full cycle
-// ============================================================================
 
 Pose EkfTracking::update() {
     const OdomDelta delta = mOdom.consumeDelta(OdomTracking::CHANNEL_EKF);
@@ -552,9 +473,6 @@ Pose EkfTracking::update() {
         fused = {mState[0], mState[1], mState[2]};
     }
 
-    // Written outside the lock: OdomTracking takes its own mutex, and holding
-    // both in one order here while getPose() callers take them in the other is
-    // how a deadlock gets built.
     if (mConfig.autoSync) {
         const Pose odomPose = mOdom.getPose();
         if (mSnapNextSync) {
@@ -571,5 +489,4 @@ Pose EkfTracking::update() {
     }
     return fused;
 }
-
-}  // namespace chad
+}

@@ -1,12 +1,3 @@
-/*
- * Copyright 2026 California High Robotics, Team 1516X
- * SPDX-License-Identifier: GPL-3.0-or-later
- */
-
-// Adapted for chad: Chassis and Drivetrain are injected instead of read
-// from globals, and the lemlib heading conversions are gone because
-// chad's Pose::theta is already in standard math radians.
-
 #pragma once
 
 #include <atomic>
@@ -24,14 +15,10 @@
 #include "pros/rtos.hpp"
 
 namespace chad {
-
-/// One sample of a generated trajectory. Distances in METERS, heading in
-/// standard math radians.
 struct State {
     float x, y, heading, linear_vel, angular_vel;
 };
 
-// LQR-unicycle (LTV) trajectory follower.
 class LTVPathFollower {
 public:
     struct ltvConfig {
@@ -74,16 +61,12 @@ public:
     bool isRunning();
     void precompute_paths(const std::vector<std::string>& path_names);
 
-    /// Return true to abort a run in progress. Replaces upstream's abortAuton
-    /// global. Empty = never abort.
     void setAbortCondition(std::function<bool()> abort);
 
-    /// The velocity controller driving the drivetrain. Exposed so
-    /// chad::tuning::logFeedforward() can attach to it during a path run.
     FeedforwardController& velocityController() { return controller; }
 
 private:
-    /// Motor RPM -> m/s, derived from the drivetrain rather than hardcoded.
+
     float rpmToMps() const;
 
     Chassis& mChassis;
@@ -129,5 +112,4 @@ private:
         float x, y;
     };
 };
-
-}  // namespace chad
+}

@@ -1,11 +1,3 @@
-/*
- * Copyright 2026 California High Robotics, Team 1516X
- * SPDX-License-Identifier: GPL-3.0-or-later
- */
-
-// Adapted for chad: devices are passed in rather than read from globals,
-// and the temperature task no longer exits after the first overheat.
-
 #include "chad/util/warnings.hpp"
 
 #include <string>
@@ -13,17 +5,12 @@
 #include "pros/rtos.hpp"
 
 namespace chad {
-
 namespace {
-
 constexpr int kControllerDelayMs = 50;
 constexpr int kPollDelayMs = 300;
 constexpr int kWarnHoldMs = 1000;
 constexpr int kOverheatBackoffMs = 10000;
 
-/// Shared disconnect-warning loop for motors and distance sensors.
-/// `probe` appends the ports of every disconnected device and returns true if
-/// any were found.
 template <typename Probe>
 void disconnectLoop(pros::Controller* controller, const char* prefix, Probe probe) {
     std::vector<unsigned char> disconnected;
@@ -56,8 +43,7 @@ void disconnectLoop(pros::Controller* controller, const char* prefix, Probe prob
         pros::delay(kPollDelayMs);
     }
 }
-
-}  // namespace
+}
 
 void startTempWarning(pros::Controller& controller,
                       const std::vector<pros::MotorGroup*>& groups,
@@ -96,8 +82,7 @@ void startTempWarning(pros::Controller& controller,
             }
 
             pros::delay(200);
-            // Upstream returned here, permanently ending temperature
-            // monitoring after the first overheat. Back off and keep going.
+
             if (isOverheating) pros::delay(kOverheatBackoffMs);
         }
     });
@@ -149,5 +134,4 @@ void startDistanceDisconnectWarning(pros::Controller& controller,
                        });
     });
 }
-
-}  // namespace chad
+}

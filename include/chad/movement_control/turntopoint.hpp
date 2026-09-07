@@ -1,63 +1,47 @@
-// Ported from FBLib - https://github.com/jiazegao/FBLib
 #pragma once
 
 #include "chad/util/util.hpp"
 
 namespace chad {
-
 enum class TurnDirection {
-    CCW,         // counter-clockwise always
-    CW,          // clockwise always
-    SHORTEST     // shortest angular path (default)
+    CCW,
+    CW,
+    SHORTEST
 };
 
 enum class SwingSide {
-    Left,   // left motors stationary, right motors turn
-    Right   // right motors stationary, left motors turn
+    Left,
+    Right
 };
 
-// ============================================================================
-// TurnToPoint utility functions
-// ============================================================================
-
-/// Resolve signed angular error given a desired turn direction
 float resolveTurnError(float rawErrorRad, TurnDirection direction);
 
-/// Heading error to face a target point from current pose
 float headingToPoint(const Pose& current, float targetX, float targetY);
 
-/// Heading error with an angular offset (positive = CCW)
-/// @param offsetDeg  angular offset in VEX degrees
 float headingToPointOffset(const Pose& current, float targetX, float targetY,
                             float offsetDeg);
 
-/// Check if heading error is within tolerance (both in radians, internal use)
 bool headingWithinTolerance(float headingErrorRad, float toleranceRad);
-
-// ============================================================================
-// Parameter structs
-// ============================================================================
 
 struct TurntoHeadingParams {
     TurnDirection direction{TurnDirection::SHORTEST};
     float maxSpeed{127.0f};
     float minSpeed{0.0f};
-    float targetTolerance{-1.0f};  // VEX degrees, negative = ChassisConfig
+    float targetTolerance{-1.0f};
 };
 
 struct TurnToPointParams {
     TurnDirection direction{TurnDirection::SHORTEST};
     float maxSpeed{127.0f};
     float minSpeed{0.0f};
-    float targetTolerance{-1.0f};  // VEX degrees, negative = ChassisConfig
-    float offset{0.0f};            // angular offset in VEX degrees
+    float targetTolerance{-1.0f};
+    float offset{0.0f};
 };
 
 struct SwingParams {
     TurnDirection direction{TurnDirection::SHORTEST};
     float maxSpeed{127.0f};
     float minSpeed{0.0f};
-    float targetTolerance{-1.0f};  // VEX degrees, negative = ChassisConfig
+    float targetTolerance{-1.0f};
 };
-
-}  // namespace chad
+}

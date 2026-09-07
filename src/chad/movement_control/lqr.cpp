@@ -4,9 +4,7 @@
 #include <cmath>
 
 namespace chad {
-
 namespace {
-
 constexpr int N = DrivetrainErrorPlant::N;
 constexpr int M = DrivetrainErrorPlant::M;
 constexpr float kVMin = 2.0f;
@@ -28,16 +26,14 @@ void mulT(const float* A, int ar, int ac, const float* B, int bc, float* out) {
             out[i * bc + j] = s;
         }
 }
-
-}  // namespace
+}
 
 LqrGain solveLqr(float v, float dt, const LqrWeights& w, int maxIters, float tol) {
     float A[N * N], B[N * M];
     DrivetrainErrorPlant::discretise(v, dt, A, B);
 
     const float Q[N] = {w.qx * w.qx, w.qy * w.qy, w.qtheta * w.qtheta};
-    // R strictly positive, or S = R + B'PB can go singular and the solve returns
-    // a silent zero gain.
+
     const float rv = std::max(w.rv, 1e-3f), rw = std::max(w.romega, 1e-3f);
     const float R[M] = {rv * rv, rw * rw};
 
@@ -60,7 +56,6 @@ LqrGain solveLqr(float v, float dt, const LqrWeights& w, int maxIters, float tol
         float K[M * N];
         mul(Si, M, M, T, N, K);
 
-        // P+ = A'P(A - BK) + Q
         float BK[N * N], AmBK[N * N], PAmBK[N * N], Pn[N * N];
         mul(B, N, M, K, N, BK);
         for (int i = 0; i < N * N; i++) AmBK[i] = A[i] - BK[i];
@@ -85,10 +80,7 @@ void LqrGainSchedule::build(const LqrWeights& w, float dt, float vMax, int point
     points = std::max(points, 2);
     mGains.clear();
     mGains.reserve(points);
-    // Grid starts above zero. At v = 0 cross-track is uncontrollable, so the
-    // Riccati recursion has no finite solution and the cross-track gain steps
-    // from 0 to 2.4 within the first 2 in/s -- a node there makes interpolation
-    // wrong by 2.2 over the first cell.
+
     for (int i = 0; i < points; i++) {
         const float f = static_cast<float>(i) / (points - 1);
         mGains.push_back(solveLqr(kVMin + (mVMax - kVMin) * f, dt, w));
@@ -98,7 +90,7 @@ void LqrGainSchedule::build(const LqrWeights& w, float dt, float vMax, int point
 LqrGain LqrGainSchedule::at(float v) const {
     if (mGains.empty()) return {};
     if (!std::isfinite(v)) return mGains.front();
-    // clamp() propagates NaN, so a zero span would hand NaN gains to the caller.
+
     const float span = std::max(mVMax - kVMin, 1e-3f);
     const float pos = clamp((std::fabs(v) - kVMin) / span, 0.0f, 1.0f);
     const float t = pos * static_cast<float>(mGains.size() - 1);
@@ -109,5 +101,4 @@ LqrGain LqrGainSchedule::at(float v) const {
     for (int k = 0; k < 6; k++) out.k[k] = mGains[i].k[k] * (1.0f - f) + mGains[j].k[k] * f;
     return out;
 }
-
-}  // namespace chad
+}

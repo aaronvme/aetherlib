@@ -1,10 +1,8 @@
-// Ported from FBLib - https://github.com/jiazegao/FBLib
 #pragma once
 
 #include <vector>
 
 namespace chad {
-
 struct MotionProfile {
     float maxVelocity;
     float maxAccel;
@@ -25,5 +23,4 @@ std::vector<ProfilePoint> generateTrapezoidal(float distance, float maxVel,
 std::vector<ProfilePoint> generateSCurve(float distance, float maxVel,
                                           float maxAccel, float maxJerk,
                                           float dt = 0.01f);
-
-}  // namespace chad
+}

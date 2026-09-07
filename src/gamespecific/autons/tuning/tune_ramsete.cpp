@@ -8,11 +8,9 @@
 #include "chad/api.hpp"
 
 namespace chad {
-
 using namespace autons;
 
 namespace {
-
 std::vector<Pose> weavePath(int n) {
     std::vector<Pose> out;
     for (int i = 0; i <= n; ++i) {
@@ -68,8 +66,7 @@ PathScore runRamsetePath(const std::vector<Pose>& path, const RAMSETEParams& p,
     sc.cost = sc.xte + 0.5f * sc.end + 0.2f * sc.secs;
     return sc;
 }
-
-}  // namespace
+}
 
 void autonTuneRamsete() {
     Report out;
@@ -140,5 +137,4 @@ void autonTuneRamsete() {
     out.result("pass in RAMSETEParams; there");
     out.result("is no config default for b");
 }
-
-}  // namespace chad
+}

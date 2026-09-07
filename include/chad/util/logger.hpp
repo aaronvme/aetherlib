@@ -12,15 +12,10 @@
 #include "pros/rtos.hpp"
 
 namespace chad {
-
-// Buffered CSV logger for the microSD card. row() never touches the card; a
-// background task does the writes.
 class Logger {
 public:
-    static constexpr std::size_t kMaxColumns = 15;   // t_ms is prepended on top
+    static constexpr std::size_t kMaxColumns = 15;
 
-    /// Writes /usd/<name><n>.csv, first free n. Keep `name` short - the V5
-    /// filesystem dislikes long names.
     Logger(std::string name, std::vector<std::string> columns,
            std::size_t capacityRows = 256);
     ~Logger();
@@ -28,16 +23,13 @@ public:
     Logger(const Logger&) = delete;
     Logger& operator=(const Logger&) = delete;
 
-    /// False if there is no card or the file could not be opened.
     bool start();
     void stop();
 
-    /// Extra values past kMaxColumns are dropped. No-op if start() failed.
     void row(std::initializer_list<float> values);
 
     bool isRunning() const { return mRunning; }
 
-    /// Non-zero means the flush task could not keep up.
     uint32_t droppedRows() const { return mDropped; }
 
     const std::string& path() const { return mPath; }
@@ -70,5 +62,4 @@ private:
     std::atomic<uint32_t> mDropped{0};
     uint32_t mStartMs{0};
 };
-
-}  // namespace chad
+}

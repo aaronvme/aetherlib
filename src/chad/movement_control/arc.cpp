@@ -1,4 +1,3 @@
-// Ported from FBLib - https://github.com/jiazegao/FBLib
 #include "chad/movement_control/arc.hpp"
 
 #include <algorithm>
@@ -7,16 +6,7 @@
 #include "chad/util/util.hpp"
 
 namespace chad {
-
-// ============================================================================
-// Arc — circular arc movement utilities
-// ============================================================================
-
-/// Compute the center of curvature for an arc.
-/// Positive radius = center to the left of the robot (CCW arc).
-/// Negative radius = center to the right of the robot (CW arc).
 Pose computeArcCenter(const Pose& current, float radius) {
-    // Left of a robot at theta is (-sin, cos); (sin, -cos) is its right.
     float perpX, perpY;
     if (radius >= 0.0f) {
         perpX = -std::sin(current.theta);
@@ -29,13 +19,10 @@ Pose computeArcCenter(const Pose& current, float radius) {
     return {current.x + perpX * absRadius, current.y + perpY * absRadius, 0.0f};
 }
 
-/// Compute the chord distance from current pose to a target point.
 float chordDistance(const Pose& current, float targetX, float targetY) {
     return distanceToPoint(current, targetX, targetY);
 }
 
-/// Compute the arc angle (radians) for an arc from current to target
-/// with the given radius.
 float arcAngle(const Pose& current, float targetX, float targetY,
                float radius) {
     float chord = chordDistance(current, targetX, targetY);
@@ -45,11 +32,6 @@ float arcAngle(const Pose& current, float targetX, float targetY,
     return 2.0f * halfAngle;
 }
 
-// By the tangent-chord theorem the chord bisects the two tangent directions:
-// chordBearing = startTangent + s·angle/2 = endTangent - s·angle/2, where s is
-// +1 for a CCW (positive-radius) arc.
-
-/// Compute the tangent heading at the end of an arc from current to target.
 float arcEndHeading(const Pose& current, float targetX, float targetY,
                     float radius) {
     float chordBearing = bearingToPoint(current, targetX, targetY);
@@ -58,8 +40,6 @@ float arcEndHeading(const Pose& current, float targetX, float targetY,
     return wrapRad(chordBearing + sign * angle * 0.5f);
 }
 
-/// Tangent heading at the START of an arc from current to target — the heading
-/// the robot should hold right now to be on that arc.
 float arcStartHeading(const Pose& current, float targetX, float targetY,
                       float radius) {
     float chordBearing = bearingToPoint(current, targetX, targetY);
@@ -67,5 +47,4 @@ float arcStartHeading(const Pose& current, float targetX, float targetY,
     float sign = (radius >= 0.0f) ? 1.0f : -1.0f;
     return wrapRad(chordBearing - sign * angle * 0.5f);
 }
-
-}  // namespace chad
+}

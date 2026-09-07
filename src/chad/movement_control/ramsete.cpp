@@ -1,4 +1,3 @@
-// Ported from FBLib - https://github.com/jiazegao/FBLib
 #include "chad/movement_control/ramsete.hpp"
 
 #include <cmath>
@@ -6,12 +5,6 @@
 #include "chad/util/util.hpp"
 
 namespace chad {
-
-// ============================================================================
-// RAMSETE — nonlinear SE(2) trajectory tracking path utilities
-// ============================================================================
-
-/// Find the closest point index on a path to a given pose.
 int closestPathIndex(const std::vector<Pose>& path, const Pose& pose) {
     if (path.empty()) return -1;
 
@@ -28,7 +21,6 @@ int closestPathIndex(const std::vector<Pose>& path, const Pose& pose) {
     return bestIdx;
 }
 
-/// Find the lookahead point on a path (first point beyond lookaheadDist).
 int lookaheadIndex(const std::vector<Pose>& path, const Pose& pose,
                    float lookaheadDist) {
     if (path.empty()) return -1;
@@ -40,5 +32,4 @@ int lookaheadIndex(const std::vector<Pose>& path, const Pose& pose,
     }
     return static_cast<int>(path.size()) - 1;
 }
-
-}  // namespace chad
+}

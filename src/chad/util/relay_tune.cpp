@@ -7,17 +7,14 @@
 #include "chad/util/util.hpp"
 
 namespace chad::tuning {
-
 namespace {
-
 float mean(const std::vector<float>& v) {
     if (v.empty()) return 0.0f;
     float s = 0.0f;
     for (float x : v) s += x;
     return s / static_cast<float>(v.size());
 }
-
-}  // namespace
+}
 
 RelayAutoTuner::RelayAutoTuner(Chassis& chassis, Drivetrain& drivetrain,
                                const RelayTuneConfig& config)
@@ -28,8 +25,6 @@ void RelayAutoTuner::report(const char* stage, const char* detail) const {
     if (mConfig.onProgress) mConfig.onProgress(stage, detail);
 }
 
-// Right side faster is CCW, matching the mix in Chassis. Backwards makes the
-// relay positive feedback.
 void RelayAutoTuner::drive(float out, bool angular) {
     mDrivetrain.setVoltage(angular ? -out : out, out);
 }
@@ -59,9 +54,8 @@ RelayFit RelayAutoTuner::run(bool angular) {
 
     report(angular ? "angular" : "lateral", "oscillating");
 
-    // The peak between two switches is the half-amplitude ku needs.
     std::vector<float> halfPeriods, peaks;
-    float sign = 1.0f;   // kicks it off the setpoint; at rest the error is 0
+    float sign = 1.0f;
     float peak = 0.0f;
     float lastSwitchMs = -1.0f;
     int switches = 0;
@@ -69,8 +63,7 @@ RelayFit RelayAutoTuner::run(bool angular) {
 
     while (pros::millis() - t0 < static_cast<uint32_t>(mConfig.timeoutMs)) {
         const Pose p = mChassis.getPose();
-        // Displacement from the setpoint. Negated because angleDiffRad(from, to)
-        // returns to - from, which is a controller's error, the opposite sign.
+
         const float err = angular
                               ? -angleDiffRad(p.theta, start.theta)
                               : (p.x - start.x) * fx + (p.y - start.y) * fy;
@@ -82,7 +75,6 @@ RelayFit RelayAutoTuner::run(bool angular) {
         }
         peak = std::max(peak, std::fabs(err));
 
-        // Opposes the displacement, or it runs away instead of cycling.
         float next = sign;
         if (err > hyst) next = -1.0f;
         else if (err < -hyst) next = 1.0f;
@@ -93,7 +85,7 @@ RelayFit RelayAutoTuner::run(bool angular) {
             sign = next;
             switches++;
             const float now = static_cast<float>(pros::millis() - t0);
-            // First two switches are the start transient.
+
             if (lastSwitchMs >= 0.0f && switches > 2) {
                 halfPeriods.push_back(now - lastSwitchMs);
                 peaks.push_back(peak);
@@ -119,15 +111,13 @@ RelayFit RelayAutoTuner::run(bool angular) {
     fit.amplitude = mean(peaks);
     fit.cycles = static_cast<int>(halfPeriods.size()) / 2;
 
-    // A period resting on its own floor measures the floor.
     if (halfMs < mConfig.minHalfPeriodMs * 1.2f) {
         std::snprintf(msg, sizeof(msg), "tu %.2fs pinned at the dwell floor",
                       fit.tu);
         report(angular ? "angular" : "lateral", msg);
         return fit;
     }
-    // The swing is the band plus the overshoot past it, so this only has to
-    // clear encoder noise.
+
     if (fit.tu <= 0.0f || fit.amplitude < mConfig.minSwingRatio * hyst) {
         std::snprintf(msg, sizeof(msg), "swing %.3f under %.1f dead bands, raise amplitude",
                       fit.amplitude,
@@ -150,5 +140,4 @@ RelayFit RelayAutoTuner::run(bool angular) {
     report(angular ? "angular" : "lateral", msg);
     return fit;
 }
-
-}  // namespace chad::tuning
+}

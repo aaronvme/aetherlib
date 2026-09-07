@@ -5,11 +5,10 @@
 #include "pros/misc.hpp"
 
 namespace chad {
-
 namespace {
 constexpr int kFlushPeriodMs = 50;
 constexpr std::size_t kBatchRows = 64;
-}  // namespace
+}
 
 Logger::Logger(std::string name, std::vector<std::string> columns,
                std::size_t capacityRows)
@@ -66,8 +65,6 @@ void Logger::stop() {
     if (!mRunning) return;
     mRunning = false;
 
-    // join() first: deleting the wrapper does not stop the task, so closing
-    // mFile here would race a flush in progress.
     if (mTask != nullptr) {
         mTask->join();
         delete mTask;
@@ -103,7 +100,6 @@ void Logger::row(std::initializer_list<float> values) {
 
     std::lock_guard<pros::Mutex> lock(mMutex);
     if (mCount == mRing.size()) {
-        // Drop the newest, so the start of a motion survives.
         mDropped++;
         return;
     }
@@ -129,7 +125,6 @@ void Logger::flushLoop() {
     batch.reserve(kBatchRows);
 
     while (mRunning) {
-        // Writes stay outside the mutex so row() never waits on the card.
         while (drain(batch) > 0) {
             for (const Entry& e : batch) {
                 std::fprintf(mFile, "%lu", static_cast<unsigned long>(e.t));
@@ -141,5 +136,4 @@ void Logger::flushLoop() {
         pros::delay(kFlushPeriodMs);
     }
 }
-
-}  // namespace chad
+}

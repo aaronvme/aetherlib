@@ -7,7 +7,6 @@
 #include "chad/api.hpp"
 
 namespace chad {
-
 using namespace autons;
 
 void autonCalibrateImu() {
@@ -17,7 +16,6 @@ void autonCalibrateImu() {
     setFilters(false);
     drivetrain.setVoltage(0.0f, 0.0f);
 
-    // get_rotation() already has the current factor applied; divide it out.
     const double factorWas = imu.scaleFactor();
     if (!(factorWas > 0.0)) {
         out.result("scale factor is %.4f", factorWas);
@@ -46,8 +44,6 @@ void autonCalibrateImu() {
     while (master.get_digital(pros::E_CONTROLLER_DIGITAL_A)) pros::delay(20);
     master.set_text(0, 0, "running-hands off ");
 
-    // Whole turns, inferred: a scale error of a couple of percent cannot move
-    // the reading by half a revolution, so rounding recovers the real count.
     const double turns = std::round(raw / 360.0);
     if (std::fabs(turns) < 1.0) {
         out.result("only %.2f turns. spin more", raw / 360.0);
@@ -73,5 +69,4 @@ void autonCalibrateImu() {
     }
     out.result("rerun phase 1 after this");
 }
-
-}  // namespace chad
+}

@@ -10,7 +10,6 @@
 #include "chad/util/sensor_calibrator.hpp"
 
 namespace chad {
-
 using namespace autons;
 
 void autonCalibrateMounts() {
@@ -21,9 +20,6 @@ void autonCalibrateMounts() {
     out("it turns a full circle");
     setFilters(false);
 
-    // A robot-frame beam angle is CCW positive and a VEX heading is CW, so a
-    // sensor at robot-frame theta aims where the robot started once the robot
-    // has turned to base + theta.
     const float base = stdRadToVexDeg(chassis.getPose().theta);
 
     std::vector<CalibrationConfig> cfgs;
@@ -43,8 +39,6 @@ void autonCalibrateMounts() {
         return;
     }
 
-    // Symmetric in sin(theta), which is the regressor, and five angles leave a
-    // residual worth reading. The stock {0,30,35} does neither.
     SensorCalibrator::Config scfg;
     scfg.sweepAnglesDeg = {-30.0f, -15.0f, 0.0f, 15.0f, 30.0f};
     scfg.verbose = false;
@@ -62,9 +56,7 @@ void autonCalibrateMounts() {
             out.result("s%d FAILED n=%d", i, r.samplesUsed);
             continue;
         }
-        // r.offsetIn is measured ACROSS the beam, so it is sensorMounts[i].y
-        // only for the theta = 0 sensor. Rotating it back keeps the
-        // tape-measured along-beam arm.
+
         out.result("s%d across %+.2f r%.2f", i, r.offsetIn, r.confidence);
         tuning::applyMountOffset(sensorMounts[i].theta, r.offsetIn,
                                  &sensorMounts[i].x, &sensorMounts[i].y);
@@ -80,10 +72,8 @@ void autonCalibrateMounts() {
     }
     out.result("copy the y values into");
     out.result("sensorMounts in config.cpp.");
-    // The filters copied sensorMounts at construction, so nothing running now
-    // sees the new values.
+
     out.result("reboot for MCL to use them");
     out.result("r under ~0.05 is a good fit");
 }
-
-}  // namespace chad
+}

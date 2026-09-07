@@ -7,29 +7,24 @@
 #include "chad/drivetrain.hpp"
 
 namespace chad {
-
 namespace {
-
 float maxLinearInPerSec(const Drivetrain& dt) {
     return dt.rpm / 60.0f * PI * dt.wheelDiameter;
 }
-
-}  // namespace
+}
 
 LtvLqrFollower::LtvLqrFollower(Chassis& chassis, Drivetrain& drivetrain)
     : mChassis(chassis), mDrivetrain(drivetrain),
       mFf(FeedforwardGains{}, drivetrain.trackWidth * INCH_TO_METER) {}
 
 namespace {
-
 float sideVelInPerSec(const pros::MotorGroup* g, const Drivetrain& dt) {
     if (g == nullptr) return 0.0f;
     const double rpm = g->get_actual_velocity();
     if (!std::isfinite(rpm)) return 0.0f;
     return static_cast<float>(rpm) * dt.externalGearRatio() / 60.0f * PI * dt.wheelDiameter;
 }
-
-}  // namespace
+}
 
 void LtvLqrFollower::followPath(const std::vector<Pose>& path,
                                 const LtvLqrParams& params, float timeoutMs) {
@@ -89,8 +84,7 @@ void LtvLqrFollower::followPath(const std::vector<Pose>& path,
     if (params.useVelocityController) {
         mFf.setGains(params.ffGains);
         mFf.setTrackWidth(mDrivetrain.trackWidth * INCH_TO_METER);
-        // Without this the controller desaturates against full scale and
-        // maxSpeed is silently ignored on this path.
+
         mFf.setMaxVoltage(12.0f * params.maxSpeed / 127.0f);
         mFf.reset();
     }
@@ -129,16 +123,11 @@ void LtvLqrFollower::followPath(const std::vector<Pose>& path,
             0.5f * (sideVelInPerSec(mDrivetrain.leftMotors, mDrivetrain) +
                     sideVelInPerSec(mDrivetrain.rightMotors, mDrivetrain));
 
-        // Position and heading both inside tolerance is the clean exit. But the
-        // profile has driven the reference to zero by the last point, so if the
-        // heading is still out there is no authority left to fix it -- waiting
-        // just burns the timeout. Exit anyway once the robot has stopped.
         const bool stalled = std::fabs(measuredSpeed) < params.stallSpeed;
         if (toEnd < params.targetTolerance && (headingOk || stalled)) break;
 
         const Pose& ref = path[best];
-        // Floor only before the profile peak; past it the decel ramp has to be
-        // allowed to reach zero.
+
         float vRef = (cum[best] < peakPos) ? std::max(v[best], minIn) : v[best];
 
         float omegaRef = 0.0f;
@@ -202,5 +191,4 @@ void LtvLqrFollower::followPath(const std::vector<Pose>& path,
     mFinalError = distance(path.back().x, path.back().y, end.x, end.y);
     mRunning = false;
 }
-
-}  // namespace chad
+}

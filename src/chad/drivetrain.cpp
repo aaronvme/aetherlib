@@ -1,13 +1,9 @@
-// Ported from FBLib - https://github.com/jiazegao/FBLib
-// Split out of FBLib's Chassis.cpp (adapted for chad).
-
 #include "chad/drivetrain.hpp"
 
 #include <cmath>
 #include <vector>
 
 namespace chad {
-
 Drivetrain::Drivetrain(pros::MotorGroup* leftMotors, pros::MotorGroup* rightMotors,
                        float trackWidth, float wheelDiameter, float rpm,
                        pros::MotorGroup* leftSenseMotors,
@@ -19,9 +15,6 @@ Drivetrain::Drivetrain(pros::MotorGroup* leftMotors, pros::MotorGroup* rightMoto
       trackWidth(trackWidth),
       wheelDiameter(wheelDiameter),
       rpm(rpm) {
-    // Odometry's motor-encoder fallback assumes positions are in DEGREES.
-    // Enforce it — a user who set rotations/counts elsewhere would silently
-    // corrupt distance measurements by a factor of 360.
     for (pros::MotorGroup* g : {leftMotors, rightMotors,
                                 leftSenseMotors, rightSenseMotors}) {
         if (g != nullptr) g->set_encoder_units_all(pros::E_MOTOR_ENCODER_DEGREES);
@@ -30,7 +23,7 @@ Drivetrain::Drivetrain(pros::MotorGroup* leftMotors, pros::MotorGroup* rightMoto
 
 void Drivetrain::setLeftVoltage(float voltage) {
     if (leftMotors != nullptr) {
-        leftMotors->move_voltage(static_cast<int32_t>(voltage * 94.488f));  // mV * 127 → 12000mV
+        leftMotors->move_voltage(static_cast<int32_t>(voltage * 94.488f));
     }
 }
 
@@ -87,9 +80,6 @@ float Drivetrain::rightVelocityInPerSec() const {
 float Drivetrain::averagePositionDeg() const {
     if (leftSense() == nullptr && rightSense() == nullptr) return 0.0f;
 
-    // A disconnected motor reports PROS_ERR (INT32_MAX ≈ 2.1e9 "degrees").
-    // One bad reading would catapult the average — and odometry with it —
-    // thousands of miles. Skip error readings; average the healthy motors.
     auto accumulate = [](const std::vector<double>& positions,
                          double& sum, int& count) {
         for (double pos : positions) {
@@ -129,11 +119,8 @@ float Drivetrain::rightPositionIn() const {
 }
 
 float Drivetrain::externalGearRatio() const {
-    if (mExtGearRatio > 0.0f) return mExtGearRatio;   // cached
+    if (mExtGearRatio > 0.0f) return mExtGearRatio;
 
-    // Resolve cartridge RPM from the configured gearset. get_gearing() can
-    // return invalid before the motor responds (e.g. during boot) — in that
-    // case return 1.0 WITHOUT caching so a later call can retry.
     pros::MotorGroup* group = (leftSense() != nullptr) ? leftSense() : rightSense();
     if (group == nullptr || rpm <= 0.0f) return 1.0f;
 
@@ -142,16 +129,12 @@ float Drivetrain::externalGearRatio() const {
         case pros::MotorGears::red:   cartridgeRpm = 100.0f; break;
         case pros::MotorGears::green: cartridgeRpm = 200.0f; break;
         case pros::MotorGears::blue:  cartridgeRpm = 600.0f; break;
-        default:                      return 1.0f;   // unknown — retry later
+        default:                      return 1.0f;
     }
 
     mExtGearRatio = rpm / cartridgeRpm;
     return mExtGearRatio;
 }
-
-// ============================================================================
-// DriveCurve
-// ============================================================================
 
 float DriveCurve::apply(float input) const {
     if (std::fabs(input) < deadband) return 0.0f;
@@ -159,13 +142,10 @@ float DriveCurve::apply(float input) const {
     float sign = (input > 0.0f) ? 1.0f : -1.0f;
     float absInput = std::fabs(input);
 
-    // Remap [deadband, 127] → [0, 1]
     float normalized = (absInput - deadband) / (127.0f - deadband);
 
-    // Apply curve: x^curve
     float curved = std::pow(normalized, curve);
 
-    // Remap back: [minOutput, 127]
     return sign * (minOutput + curved * (127.0f - minOutput));
 }
-}  // namespace chad
+}

@@ -1,12 +1,3 @@
-/*
- * Copyright 2026 California High Robotics, Team 1516X
- * SPDX-License-Identifier: GPL-3.0-or-later
- */
-
-// Adapted for chad: Chassis and Drivetrain are injected instead of read
-// from globals, and the lemlib heading conversions are gone because
-// chad's Pose::theta is already in standard math radians.
-
 #include "chad/movement_control/ltv.hpp"
 
 #include <algorithm>
@@ -20,7 +11,6 @@
 #include "chad/util/util.hpp"
 
 namespace chad {
-
 LTVPathFollower::Vector2::Vector2(float x, float y) : x(x), y(y) {}
 
 std::string LTVPathFollower::Vector2::latex() const {
@@ -50,9 +40,6 @@ void LTVPathFollower::setAbortCondition(std::function<bool()> abort) {
     mAbort = std::move(abort);
 }
 
-// Upstream hardcoded a 3.25" wheel and a 4/3 gear ratio. Drivetrain already
-// knows both: externalGearRatio() is wheel revs per motor rev, which for a
-// 450 rpm drive on blue cartridges is 0.75 == 1/(4/3).
 float LTVPathFollower::rpmToMps() const {
     const float circumferenceM = mDrivetrain.wheelDiameter * PI * INCH_TO_METER;
     return circumferenceM * mDrivetrain.externalGearRatio() / 60.0f;
@@ -157,8 +144,6 @@ void LTVPathFollower::followPathImpl(const std::string& path_name, const ltvConf
         return;
     }
 
-    // Trajectory headings are already standard math radians, same as Pose::theta,
-    // so upstream's M_PI_2 - theta lemlib conversions are not needed.
     if (l_config.test) {
         double start_theta =
             l_config.backwards ? trajectory[0].heading + M_PI : trajectory[0].heading;
@@ -184,8 +169,6 @@ void LTVPathFollower::followPathImpl(const std::string& path_name, const ltvConf
     Pose start_pose = mChassis.getPose();
     const float rpm_to_mps_factor = rpmToMps();
 
-    // Clear integrators and acceleration history so a second path does not
-    // inherit the previous run's state.
     controller.reset();
 
     Eigen::MatrixXf cached_K(2, 3);
@@ -207,7 +190,6 @@ void LTVPathFollower::followPathImpl(const std::string& path_name, const ltvConf
         distance_traveled_inches =
             distance(start_pose.x, start_pose.y, current_pose.x, current_pose.y);
 
-        // Trajectory is in meters; pose is in inches.
         const double pose_x_m = current_pose.x * INCH_TO_METER;
         const double pose_y_m = current_pose.y * INCH_TO_METER;
 
@@ -231,7 +213,6 @@ void LTVPathFollower::followPathImpl(const std::string& path_name, const ltvConf
         R_mat << r_vel_effective * r_vel_mult, 0,
                  0, r_ang_effective;
 
-        // Pose::theta IS the math angle; no conversion from a VEX heading needed.
         double math_theta = current_pose.theta;
         double effective_theta = l_config.backwards ? math_theta + M_PI : math_theta;
 
@@ -299,8 +280,6 @@ void LTVPathFollower::followPathImpl(const std::string& path_name, const ltvConf
             right_actual_mps = mDrivetrain.rightMotors->get_actual_velocity() * rpm_to_mps_factor;
         }
 
-        // Real elapsed dt, and the controller desaturates both sides against a
-        // common scale internally, so no external per-side clamp is needed.
         DrivetrainVoltages output_voltages =
             controller.update(v_cmd, w_cmd, left_actual_mps, right_actual_mps,
                               static_cast<float>(measured_dt));
@@ -472,5 +451,4 @@ std::vector<State> LTVPathFollower::prepare_trajectory(const std::string& data) 
 
     return states;
 }
-
-}  // namespace chad
+}

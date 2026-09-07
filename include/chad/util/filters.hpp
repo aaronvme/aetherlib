@@ -7,10 +7,6 @@
 #include <cstdint>
 
 namespace chad {
-
-/// Bounds how fast a signal may change, with separate limits for growing and
-/// shrinking magnitude. Asymmetry matters on a drivetrain: ramping a demand up
-/// gently protects traction, while cutting it off must stay immediate.
 class SlewRateLimiter {
 public:
     SlewRateLimiter() = default;
@@ -38,12 +34,11 @@ public:
     }
 
 private:
-    float mRise{0.0f};   // <= 0 disables limiting
+    float mRise{0.0f};
     float mFall{0.0f};
     float mValue{0.0f};
 };
 
-/// Fixed-window mean. O(1) per sample, no allocation.
 template <std::size_t N>
 class MovingAverage {
     static_assert(N > 0, "window must be non-empty");
@@ -81,8 +76,6 @@ private:
     std::size_t mCount{0};
 };
 
-/// Fixed-window median. Rejects the single-sample spikes a distance sensor
-/// produces, which a mean only smears into the estimate.
 template <std::size_t N>
 class MedianFilter {
     static_assert(N > 0, "window must be non-empty");
@@ -121,9 +114,6 @@ private:
     float mLast{0.0f};
 };
 
-/// First-order low pass specified by time constant. Alpha is recomputed from the
-/// measured dt every sample: PROS task periods jitter, and a fixed alpha silently
-/// changes the cutoff whenever the loop slips.
 class LowPassFilter {
 public:
     LowPassFilter() = default;
@@ -156,7 +146,6 @@ private:
     bool mPrimed{false};
 };
 
-/// Complement of LowPassFilter: passes change, rejects the steady level.
 class HighPassFilter {
 public:
     HighPassFilter() = default;
@@ -173,7 +162,6 @@ private:
     LowPassFilter mLow;
 };
 
-/// Backward difference with optional smoothing of the result.
 class Derivative {
 public:
     Derivative() = default;
@@ -207,8 +195,6 @@ private:
     bool mPrimed{false};
 };
 
-/// Requires a boolean to hold its new state for `debounceSeconds` before
-/// reporting it. Stops a jam detector or a limit switch chattering.
 class Debouncer {
 public:
     enum class Edge { Rising, Falling, Both };
@@ -252,5 +238,4 @@ private:
     bool mState{false};
     float mElapsed{0.0f};
 };
-
-}  // namespace chad
+}

@@ -3,7 +3,6 @@
 #include "chad/api.hpp"
 
 namespace chad {
-
 void autonExample() {
     chassis.setPose({0.0f, 0.0f, 0.0f});
 
@@ -84,7 +83,5 @@ void autonExample() {
                            false);
 
     chassis.waitUntilSettled();
-
 }
-
-}  // namespace chad
+}

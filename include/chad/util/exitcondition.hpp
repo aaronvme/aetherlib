@@ -1,10 +1,6 @@
-// Ported from LemLib - https://github.com/LemLib/LemLib (MIT)
 #pragma once
 
 namespace chad {
-
-/// Error must stay within `range` for `time` ms. Stops a motion exiting while
-/// still carrying velocity through the target.
 class ExitCondition {
 public:
     ExitCondition(float range, int time);
@@ -20,5 +16,4 @@ private:
     int mStartTime{-1};
     bool mDone{false};
 };
-
-}  // namespace chad
+}

@@ -7,7 +7,7 @@
 
 namespace {
 std::shared_ptr<chad::Logger> gLiftLog;
-}  // namespace
+}
 
 void logLift(bool enabled) {
     if (!enabled) {

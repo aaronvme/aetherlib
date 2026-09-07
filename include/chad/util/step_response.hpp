@@ -4,20 +4,16 @@
 #include <cstddef>
 #include <vector>
 
-// Pure step-response analysis. No PROS dependency, so it can be unit tested
-// off the robot.
-
 namespace chad {
-
 struct StepWeights {
-    float overshoot{1.0f};      // per percent
-    float settle{8.0f};         // per second
-    float steadyState{6.0f};    // per degree or inch
-    float oscillation{4.0f};    // per crossing
+    float overshoot{1.0f};
+    float settle{8.0f};
+    float steadyState{6.0f};
+    float oscillation{4.0f};
 };
 
 struct StepMetrics {
-    float initial{0};           // error at the first sample, signed
+    float initial{0};
     float overshootPct{0};
     float steadyState{0};
     float settleMs{0};
@@ -26,8 +22,6 @@ struct StepMetrics {
     bool valid{false};
 };
 
-/// @param error  signed error over time, starting near +/-step and tending to 0
-/// @param step   magnitude of the commanded step
 inline StepMetrics analyseStep(const std::vector<float>& t,
                                const std::vector<float>& error,
                                float step, const StepWeights& w) {
@@ -35,13 +29,12 @@ inline StepMetrics analyseStep(const std::vector<float>& t,
     if (error.size() < 4 || t.size() != error.size() || step <= 0.0f) return m;
 
     const float initial = error.front();
-    m.initial = initial;   // set before the guard, so a rejection is explicable
-    // The trace must start near +/-step. One that does not is a trial that never
-    // ran, and scoring that as a flawless response is worse than refusing it.
+    m.initial = initial;
+
     if (std::fabs(initial) < 0.5f * step) return m;
     const float sign = (initial >= 0.0f) ? 1.0f : -1.0f;
 
-    float worstPast = 0.0f;   // furthest swing past zero, opposite the initial sign
+    float worstPast = 0.0f;
     bool crossed = false;
     int oscillations = 0;
     float prev = initial;
@@ -54,7 +47,6 @@ inline StepMetrics analyseStep(const std::vector<float>& t,
         prev = e;
     }
 
-    // Settle time is the last moment the error left the band.
     const float tol = step * 0.02f;
     float settle = 0.0f;
     for (std::size_t i = error.size(); i-- > 0;) {
@@ -75,5 +67,4 @@ inline StepMetrics analyseStep(const std::vector<float>& t,
              w.oscillation * static_cast<float>(m.oscillations);
     return m;
 }
-
-}  // namespace chad
+}

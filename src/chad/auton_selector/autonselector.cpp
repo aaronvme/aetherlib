@@ -3,13 +3,12 @@
 #include "liblvgl/lvgl.h"
 
 namespace chad {
-
 namespace {
 constexpr uint32_t kBgColor = 0x1A1A2E;
 constexpr uint32_t kTextColor = 0xE0E0E0;
 constexpr uint32_t kSelectedColor = 0x2E7D32;
 constexpr uint32_t kIdleColor = 0x30304A;
-}  // namespace
+}
 
 void AutonSelector::registerAuton(const std::string& name, AutonFunc func) {
     if (mInitialised) return;
@@ -41,8 +40,7 @@ void AutonSelector::init() {
     for (std::size_t i = 0; i < mAutons.size(); ++i) {
         lv_obj_t* btn = lv_list_add_button(mList, nullptr, mAutons[i].name.c_str());
         lv_obj_set_style_text_color(btn, lv_color_hex(kTextColor), 0);
-        // user_data is `this`, not the index: the callback resolves which entry
-        // was hit by button pointer, so it stays correct if mAutons reallocates.
+
         lv_obj_add_event_cb(btn, buttonCb, LV_EVENT_CLICKED, this);
         mAutons[i].button = btn;
     }
@@ -95,5 +93,4 @@ void AutonSelector::runSelected() {
     const AutonFunc& func = mAutons[mSelectedIndex].func;
     if (func) func();
 }
-
-}  // namespace chad
+}

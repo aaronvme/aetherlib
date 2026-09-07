@@ -5,10 +5,7 @@
 #include "chad/util/logger.hpp"
 
 namespace chad::tuning {
-
 namespace {
-
-// shared_ptr because the callback captures it.
 std::shared_ptr<Logger> gChassisLog;
 std::shared_ptr<Logger> gJamLog;
 std::shared_ptr<Logger> gFeedforwardLog;
@@ -18,8 +15,7 @@ std::shared_ptr<Logger> open(std::string name, std::vector<std::string> columns)
     log->start();
     return log;
 }
-
-}  // namespace
+}
 
 void logChassis(Chassis& chassis, bool enabled) {
     if (!enabled) {
@@ -71,5 +67,4 @@ void logFeedforward(FeedforwardController& controller, bool enabled) {
                   s.voltLeft, s.voltRight, s.dt});
     });
 }
-
-}  // namespace chad::tuning
+}

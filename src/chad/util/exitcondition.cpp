@@ -1,4 +1,3 @@
-// Ported from LemLib - https://github.com/LemLib/LemLib (MIT)
 #include "chad/util/exitcondition.hpp"
 
 #include <cmath>
@@ -6,7 +5,6 @@
 #include "pros/rtos.hpp"
 
 namespace chad {
-
 ExitCondition::ExitCondition(float range, int time) : mRange(range), mTime(time) {}
 
 bool ExitCondition::getExit() const { return mDone; }
@@ -27,6 +25,4 @@ void ExitCondition::reset() {
     mStartTime = -1;
     mDone = false;
 }
-
-}  // namespace chad
-//dsfassadf
+}

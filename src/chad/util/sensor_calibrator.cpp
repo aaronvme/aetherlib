@@ -1,4 +1,3 @@
-// Ported from FBLib - https://github.com/jiazegao/FBLib
 #include "chad/util/sensor_calibrator.hpp"
 
 #include <cmath>
@@ -10,20 +9,13 @@
 #include "chad/movement_control/turntopoint.hpp"
 
 namespace chad {
-
 namespace {
-
-/// Shortest signed difference `heading - reference`, folded to (-180, 180].
-/// Used instead of a raw subtraction so a sweep that straddles the 0/360 seam
-/// (e.g. baseHeadingDeg = 350) still produces small thetas for the fit.
 float signedHeadingDelta(float headingDeg, float referenceDeg) {
     float diff = wrapDeg(headingDeg - referenceDeg);
     if (diff > 180.0f) diff -= 360.0f;
     return diff;
 }
 
-/// A result marked unusable. offsetIn stays 0 so a caller that ignores `valid`
-/// at least applies no correction rather than a garbage one.
 CalibrationResult failedResult(const std::string& name, int samplesUsed) {
     CalibrationResult r;
     r.name = name;
@@ -33,36 +25,21 @@ CalibrationResult failedResult(const std::string& name, int samplesUsed) {
     r.valid = false;
     return r;
 }
-
-}  // namespace
-
-// ============================================================================
-// Construction
-// ============================================================================
+}
 
 SensorCalibrator::SensorCalibrator(Chassis& chassis, const Config& config)
     : mChassis(chassis), mConfig(config) {}
 
-// ============================================================================
-// Internal helpers
-// ============================================================================
-
 float SensorCalibrator::currentHeadingDeg() const {
-    // Pose::theta is standard math radians (CCW+). The sweep math, and every
-    // heading the Chassis turn API takes, are VEX degrees (CW+).
     return stdRadToVexDeg(mChassis.getPose().theta);
 }
 
 void SensorCalibrator::turnTo(float headingDeg) {
     TurntoHeadingParams params;
     params.maxSpeed = mConfig.turnMaxSpeed;
-    // async = false — every turn must finish before the next reading is taken.
+
     mChassis.turnToHeading(headingDeg, mConfig.turnTimeoutMs, params, false);
 }
-
-// ============================================================================
-// solveLeastSquares()
-// ============================================================================
 
 CalibrationResult SensorCalibrator::solveLeastSquares(const std::string& name,
                                                        const std::vector<float>& thetaRad,
@@ -72,12 +49,8 @@ CalibrationResult SensorCalibrator::solveLeastSquares(const std::string& name,
         return failedResult(name, static_cast<int>(count));
     }
 
-    // Accumulate in double: the normal-equation determinant is a difference of
-    // similar-magnitude products and loses most of its significant digits in
-    // float when the sweep angles are close together (the {30, 35} pair here).
     double sumX = 0.0, sumY = 0.0, sumXY = 0.0, sumXX = 0.0;
     for (std::size_t i = 0; i < count; i++) {
-        // Y = d*cos(theta), X = sin(theta) — see the model derivation in the header.
         const double x = std::sin(static_cast<double>(thetaRad[i]));
         const double y = static_cast<double>(distIn[i]) * std::cos(static_cast<double>(thetaRad[i]));
 
@@ -90,9 +63,6 @@ CalibrationResult SensorCalibrator::solveLeastSquares(const std::string& name,
     const double n = static_cast<double>(count);
     const double denom = n * sumXX - sumX * sumX;
 
-    // Singular fit: every sample landed on (effectively) the same angle, so the
-    // sweep never produced the lever arm the slope is read from. The donor
-    // divided by this unconditionally and returned inf/NaN as a real offset.
     if (std::fabs(denom) < 1e-9) {
         return failedResult(name, static_cast<int>(count));
     }
@@ -100,11 +70,8 @@ CalibrationResult SensorCalibrator::solveLeastSquares(const std::string& name,
     const double slope = (n * sumXY - sumX * sumY) / denom;
     const double intercept = (sumY - slope * sumX) / n;
 
-    // Model is Y = D - x*X, so the fitted slope is -x. The intercept D folds
-    // together the wall distance and the forward mount offset and is dropped.
     const double offsetIn = -slope;
 
-    // Mean squared residual — the reported "confidence" (lower is better).
     double totalError = 0.0;
     for (std::size_t i = 0; i < count; i++) {
         const double x = std::sin(static_cast<double>(thetaRad[i]));
@@ -124,10 +91,6 @@ CalibrationResult SensorCalibrator::solveLeastSquares(const std::string& name,
     return result;
 }
 
-// ============================================================================
-// calibrate() — one sensor
-// ============================================================================
-
 CalibrationResult SensorCalibrator::calibrate(const CalibrationConfig& config) {
     if (config.sensor == nullptr) {
         if (mConfig.verbose) {
@@ -146,26 +109,18 @@ CalibrationResult SensorCalibrator::calibrate(const CalibrationConfig& config) {
     recordedThetas.reserve(mConfig.sweepAnglesDeg.size());
     recordedDists.reserve(mConfig.sweepAnglesDeg.size());
 
-    // 1. Square up on the wall this sensor faces.
     turnTo(wrapDeg(config.baseHeadingDeg));
     pros::delay(mConfig.settleDelayMs);
 
-    // 2. Sweep.
     for (float relAngleDeg : mConfig.sweepAnglesDeg) {
         turnTo(wrapDeg(config.baseHeadingDeg + relAngleDeg));
 
-        // Let the chassis stop ringing. Without this the reading is taken while
-        // the robot is still rocking and the noise swamps the offset.
         pros::delay(mConfig.postTurnDelayMs);
 
-        // 3. Sample. Use the MEASURED heading, not the commanded one — the turn
-        // settles inside targetTolerance, not exactly on target, and feeding the
-        // commanded angle into the fit would bake that error into the slope.
         const float measuredDiffDeg = signedHeadingDelta(currentHeadingDeg(), config.baseHeadingDeg);
 
         const std::int32_t readingMm = config.sensor->get();
-        // Rejects the 9999 "nothing in range" sentinel and PROS_ERR (INT32_MAX)
-        // in the same comparison; <= 0 catches a lens against the wall.
+
         if (readingMm <= 0 || static_cast<float>(readingMm) > mConfig.maxValidReadingMm) {
             if (mConfig.verbose) {
                 printf("  [ERR] %s: bad reading (%ld mm) at %.1f deg — skipped\n",
@@ -185,7 +140,6 @@ CalibrationResult SensorCalibrator::calibrate(const CalibrationConfig& config) {
         }
     }
 
-    // 4. Solve.
     if (recordedDists.size() < 2) {
         if (mConfig.verbose) {
             printf("  [FAIL] %s: only %u valid point(s), need 2+\n",
@@ -209,19 +163,11 @@ CalibrationResult SensorCalibrator::calibrate(const CalibrationConfig& config) {
     return result;
 }
 
-// ============================================================================
-// calibrateAll()
-// ============================================================================
-
 std::vector<CalibrationResult> SensorCalibrator::calibrateAll(
         const std::vector<CalibrationConfig>& configs) {
     std::vector<CalibrationResult> results;
     results.reserve(configs.size());
 
-    // Record where we started. The donor hardcoded a return to heading 0, which
-    // silently relocates the robot's notion of "forward" whenever the routine is
-    // launched from anything else; returning to the recorded start heading is
-    // both correct and idempotent.
     const float startHeadingDeg = currentHeadingDeg();
 
     if (mConfig.verbose) {
@@ -233,7 +179,6 @@ std::vector<CalibrationResult> SensorCalibrator::calibrateAll(
         results.push_back(calibrate(config));
     }
 
-    // Restore the starting heading.
     turnTo(startHeadingDeg);
 
     if (mConfig.verbose) {
@@ -249,19 +194,11 @@ std::vector<CalibrationResult> SensorCalibrator::calibrateAll(
     return results;
 }
 
-// ============================================================================
-// estimateWallAngle()
-// ============================================================================
-
 float estimateWallAngle(pros::Distance& sensorA, pros::Distance& sensorB,
                         float robotHeadingDeg, const WallAngleConfig& cfg) {
-    // sensorA = right, sensorB = left (+ mounting-depth bias). See the header
-    // for the sign derivation and the swap-if-inverted note.
     const std::int32_t rawA = sensorA.get();
     const std::int32_t rawB = sensorB.get();
 
-    // Reject before adding the bias: PROS_ERR is INT32_MAX and adding to it
-    // overflows. Also rejects the 9999 no-target sentinel and dead lenses.
     if (rawA <= 0 || rawB <= 0) return WALL_ANGLE_INVALID;
 
     const float dA = static_cast<float>(rawA);
@@ -271,17 +208,11 @@ float estimateWallAngle(pros::Distance& sensorA, pros::Distance& sensorB,
         return WALL_ANGLE_INVALID;
     }
 
-    // A zero baseline would make atan2 report +/-90 deg for any imbalance.
     if (cfg.sensorBaselineIn <= 0.0f) return WALL_ANGLE_INVALID;
 
-    // deviation = atan2(dRight - dLeft, baseline), clockwise positive.
     const float deltaIn = mmToInch(dA - dB);
     const float deviationDeg = radToDeg(std::atan2(deltaIn, cfg.sensorBaselineIn));
 
-    // Quadrant snap: add the deviation to whichever cardinal the robot is
-    // nearest. Assumes a rectangular field perimeter aligned to the field axes
-    // (see header) — the deviation is measured against *a* wall, and only the
-    // heading estimate tells us which one.
     const float heading = wrapDeg(robotHeadingDeg);
     float cardinal;
     if (heading >= 315.0f || heading < 45.0f) {
@@ -294,10 +225,6 @@ float estimateWallAngle(pros::Distance& sensorA, pros::Distance& sensorB,
         cardinal = 270.0f;
     }
 
-    // Wrap into [0, 360). The donor returned the raw sum, so a slightly
-    // counter-clockwise robot near heading 0 came back as e.g. -3.0 — both an
-    // invalid VEX heading and indistinguishable from its -1 error sentinel.
     return wrapDeg(cardinal + deviationDeg);
 }
-
-}  // namespace chad
+}

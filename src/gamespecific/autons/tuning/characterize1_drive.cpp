@@ -5,7 +5,6 @@
 #include "chad/util/characterize.hpp"
 
 namespace chad {
-
 using namespace autons;
 
 void autonCharacterize1Drive() {
@@ -36,9 +35,6 @@ void autonCharacterize1Drive() {
     ramseteFf.ksStraight = str.kS;
     ramseteFf.ksTurn = turn.kS;
 
-    // An unfit kA is worse than none: it feeds the velocity loop a voltage
-    // proportional to commanded acceleration with no basis, and the old ramp
-    // fit could return it negative. Zero just leaves kV and kS doing the work.
     ramseteFf.kaStraight = str.kaValid ? str.kA : 0.0f;
     ramseteFf.kaTurn =
         turn.kaValid ? turn.kA * width * INCH_TO_METER * 0.5f : 0.0f;
@@ -60,13 +56,10 @@ void autonCharacterize1Drive() {
         out.result("kA UNFIT->0 spr%.2f n%d", str.kaSpread, str.stepReps);
     }
 
-    // The one fault a straight-line fit cannot see: a drivetrain that is
-    // simply weaker than configured still fits a clean line.
     if (str.drivetrainSuspect) {
         out.result("CHECK MOTORS/GEARING");
         out.result("else rpm=%.0ff (is %.0f)",
                    drivetrain.rpm * str.freeSpeedRatio, drivetrain.rpm);
     }
 }
-
-}  // namespace chad
+}

@@ -6,7 +6,6 @@
 #include "chad/api.hpp"
 
 namespace chad {
-
 using namespace autons;
 
 void autonProbe2Motions() {
@@ -16,7 +15,6 @@ void autonProbe2Motions() {
     setFilters(false);
 
     {
-        // CCW must drop the IMU heading and raise pose theta.
         const float imu0 = static_cast<float>(imu.get_heading());
         const float th0 = chassis.getPose().theta;
         drivetrain.setVoltage(-30.0f, 30.0f);
@@ -53,5 +51,4 @@ void autonProbe2Motions() {
     }
     out.result("2000ms = never settled");
 }
-
-}  // namespace chad
+}
