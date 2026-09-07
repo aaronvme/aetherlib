@@ -6,9 +6,9 @@
 
 #include "gamespecific/config.hpp"
 #include "chad/util/characterize.hpp"
+#include "chad/util/localization_fit.hpp"
 
 namespace chad::autons {
-
 class Report {
 public:
     Report();
@@ -42,4 +42,31 @@ bool solvePark(const tuning::RangeNoiseFit& beams, float theta,
 
 tuning::Characterizer makeCharacterizer(Report& out);
 
-}  // namespace chad::autons
+constexpr bool kFieldIsClear = true;
+
+struct BeamRead {
+    bool valid{false};
+    float inches{0.0f};
+    float sigmaIn{0.0f};
+    float bx{0.0f}, by{0.0f};
+    float alongX{0.0f}, alongY{0.0f};
+};
+
+struct BeamPair {
+    int plus{-1}, minus{-1};
+    bool xAxis{false};
+};
+
+int readBeams(BeamRead* out, float robotThetaRad);
+
+int findBeamPairs(const BeamRead* beams, BeamPair* out);
+
+bool solveWallTruth(const BeamRead* beams, const BeamPair* pairs, int nPairs,
+                    float kSigmas, float& cx, float& cy,
+                    float& worstBracketIn);
+
+bool solveWallTruthClear(const BeamRead* beams, float& cx, float& cy);
+
+bool solveTruth(const BeamRead* beams, const BeamPair* pairs, int nPairs,
+                float kSigmas, float& cx, float& cy, float& worstBracketIn);
+}
