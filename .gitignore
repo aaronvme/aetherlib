@@ -17,7 +17,8 @@ temp.errors
 .d/
 
 
-# chad-sim build output
+# chad-sim build output -- untracked, and survives a switch back from the
+# sim branch, so main ignores it too
 sim/web/chad_sim.mjs
 sim/web/chad_sim.wasm
 sim/web/chad_sim.wasm.map

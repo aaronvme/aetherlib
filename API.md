@@ -1394,116 +1394,31 @@ thresholds. Those are what `sim/test/autotune.mjs` searches.
 
 ## Simulator and sweeps
 
+The browser simulator lives on the **`sim` branch**, not here. It compiles this
+library to WebAssembly and runs it against fake hardware, so a gain fitted there
+is a gain you can paste into the robot.
+
 ```sh
-export EMSDK="$HOME/emsdk"; source "$EMSDK/emsdk_env.sh"
+git checkout sim
 ./sim/build.sh
-python -m http.server -d sim/web 8000    # localhost:8000
+python sim/serve.py       # http://localhost:8080
+./sim/test/run.sh         # headless regression suite
 ```
 
-```sh
-bash sim/test/run.sh              # rebuild, then all three suites
-bash sim/test/run.sh --no-build   # against whatever is already built
-node sim/test/tune.mjs            # sweeps below
-node sim/test/mpc.mjs             # experimental branch only
-```
+`sim/README.md` on that branch documents the route editor that runs real auton
+C++, the parameter sweeps in `sim/test/tune.mjs`, and the coordinate-descent
+search in `sim/test/autotune.mjs` that fits the gains above no robot can score.
 
-`run.sh` rebuilds by default. It used to build only with `--build`, and
-`test/verify.sh` called it with an `--out` flag it silently ignored — so the
-"simulator builds" gate never built anything, and passed for several commits
-against a stale wasm while `sim/build.sh` was broken and the current sources
-failed eight checks. Unknown flags are now an error for that reason.
+Two caveats travel back here. The sim models no traction, torque, current limit
+or voltage sag — differential-drive kinematics are exact, so the robot cannot
+slide and `maxLateralAccel` is a profile-speed knob rather than a grip limit.
+And `encoderSlip`, `imuDriftDegPerSec` and `imuNoiseDeg` default to zero, so a
+localization comparison left at defaults is measuring dead reckoning against
+itself.
 
-### Routing an auton
-
-The sim's route editor holds **real auton C++** — the same text you paste into
-`src/gamespecific/autons/`, executed against the real `Chassis` API on its own
-fiber through the same motion queue.
-
-```cpp
-chassis.setPose(Pose::fromVex(-48.0f, -60.0f, 90.0f));
-chassis.moveToPoint(-24.0f, -60.0f, 2500, {.maxSpeed = 90.0f, .lead = 4.0f});
-chassis.moveDistance(-12.0f, 1500);
-
-std::vector<Pose> path = {{-24.0f, -24.0f, 0.0f},   // control points; the sim
-                          {0.0f, -40.0f, 0.0f},     // splines through them
-                          {24.0f, -24.0f, 0.0f}};
-chassis.moveRAMSETE(path, 5000, {.b = 48.0f, .zeta = 0.85f}, true);
-```
-
-Designated initializers are applied per motion by name, and a trailing `true`
-runs the motion async. Anything the sim cannot apply is counted and shown
-rather than dropped — a `.lead` that the preview ignored would make it a
-different motion from the code it was handed.
-
-It refuses two things the compiler would also refuse: a field the struct does
-not declare, and designated initializers out of declaration order. Statements
-it cannot route (a lift call, a loop) are skipped and listed, never silently
-dropped. A misspelled `chassis` method is an error, because that is a typo.
-
-After a run it reports, per motion: duration, whether the timeout cut it off,
-how far it ended from its target, the closest the footprint came to a wall or
-post, and the localization error at that moment — plus the total against the
-15 s limit. None of that is visible in the drawn path, which is the point: a
-motion that sat out its timeout looks exactly like one that settled.
-
-Two conventions the parser follows because the library does. `Pose::theta` is
-standard-math radians, so `setPose({0, 0, 0})` faces +X (VEX 90) — and
-`moveDistance(-12.0f)` drives backward, because `Chassis::moveDistance` flips
-`forwards` itself for a negative target.
-
-`sim/test/auton_cpp.mjs` reads every params struct out of
-`include/chad/movement_control/*.hpp` and fails if the parser's field lists
-drift, then parses the autons that actually ship — `example.cpp` included,
-which exercises every motion type with a full params block on each.
-
-Gains that need a known true pose cannot be scored on hardware, so they are
-swept here.
-
-```sh
-node sim/test/tune.mjs             # all sections
-node sim/test/tune.mjs ramsete     # b / zeta
-node sim/test/tune.mjs mcl         # filter noise vs kidnap recovery
-node sim/test/tune.mjs tolerance   # settle tolerance vs localization error
-```
-
-### Searching, not sweeping
-
-`tune.mjs` prints tables for you to read. `autotune.mjs` searches.
-
-```sh
-node sim/test/autotune.mjs                        # 2 passes, 3 seeds
-node sim/test/autotune.mjs --passes 3 --seeds 4
-```
-
-Coordinate descent over ten MCL/EKF parameters, minimising a weighted sum of
-estimate error and jerk. Kidnap recovery is a hard constraint rather than a cost
-term: every parameter that tightens the estimate also narrows the cloud's
-search, so a plain weighted sum walks to a configuration that tracks well and
-can never relocate. Candidates that recover less often than the baseline are
-rejected outright.
-
-It searches on one set of seeds and revalidates the winner on a disjoint set,
-then prints `[HOLDS]` or `[DOES NOT HOLD]`. A result that only appears on the
-seeds it was chosen against is the search fitting noise, and the paste-ready
-config is withheld in that case.
-
-Each row prints cross-track, peak, jerk, time, endpoint error and kidnap
-recovery. Read all of them; two knobs improve the tracking columns while
-breaking something else, and the tool flags where.
-
-First output is a control: the same config twice, which must match.
-`sim_reset` does not restore filter or motion config, so every trial rewrites
-every key. If the control fails, ignore everything below it.
-
-`sim/web/chad_sim.mjs` and `.wasm` are untracked build output and survive a
-branch switch. Rebuild after every checkout or you are running the previous
-branch's binary.
-
-No traction, torque, current limit or voltage sag. Exact differential-drive
-kinematics, so the robot cannot slide and `maxLateralAccel` is a profile-speed
-knob, not a grip limit. Odometry error comes from sensor staleness, not slip.
-`encoderSlip`, `imuDriftDegPerSec` and `imuNoiseDeg` default to zero — turn them
-on or dead reckoning is ground truth and localization comparisons mean nothing.
+Because the sim sits on its own branch, a change merged here is not checked
+against the wasm bridge until it reaches `sim`. Merge `main` into `sim` and run
+`./sim/test/run.sh` before trusting anything fitted there.
 
 ---
 

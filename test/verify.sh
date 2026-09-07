@@ -1,17 +1,21 @@
 #!/usr/bin/env bash
 # One gate for the whole tree.
 #
-#     ./test/verify.sh              all three gates
+#     ./test/verify.sh              every gate this branch can run
 #     ./test/verify.sh --no-sim     skip the simulator (no emsdk on this machine)
+#
+# The simulator lives on the sim branch. Gate 3 is skipped automatically when
+# sim/ is absent, so this script is the same file on both branches.
 #
 # Three things break independently and each needs its own toolchain, so passing
 # one proves nothing about the others. A constraint-interface change once
 # compiled clean for ARM while the wasm bridge was still calling the old
-# signature, because the ARM check does not look at sim/.
+# signature, because the ARM check does not look at sim/. On main that gate
+# cannot run at all, so merge into sim to catch it.
 #
 #   1. arm-none-eabi   the firmware compiles          test/syntax-check.sh
 #   2. MSVC            the PROS-free numerics pass    test/host/run.ps1
-#   3. emscripten      the simulator builds and runs  sim/test/run.sh
+#   3. emscripten      the simulator builds and runs  sim/test/run.sh (sim branch)
 #   4. python3         API.md's defaults are real     test/check-defaults.py
 #
 # A failure while a subagent is editing is not necessarily real: -OutDir isolates
@@ -26,6 +30,7 @@ cd "$ROOT"
 
 WITH_SIM=1
 [ "${1:-}" = "--no-sim" ] && WITH_SIM=0
+[ -f sim/test/run.sh ] || WITH_SIM=2   # sim/ can survive as stale wasm output
 
 OUT="${TMPDIR:-/tmp}/chad-verify.$$"
 mkdir -p "$OUT"
@@ -74,6 +79,8 @@ if [ "$WITH_SIM" = 1 ]; then
     # which left this gate testing a checked-in wasm and calling it a build.
     ./sim/test/run.sh > "$OUT/sim.log" 2>&1
     step "sim build + suites" "$OUT/sim.log" $?
+elif [ "$WITH_SIM" = 2 ]; then
+    results+=("SKIP  simulator (not on this branch -- see the sim branch)")
 else
     results+=("SKIP  simulator (--no-sim)")
 fi

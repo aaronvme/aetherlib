@@ -79,8 +79,8 @@ CHAD_TEST(spline, passes_near_the_interior_control_point) {
 }
 
 CHAD_TEST(spline, the_default_spacing_is_the_one_the_preview_uses) {
-    // 2 in, matching buildPath() in sim/web/route_dsl.js. If these drift the sim
-    // draws one curve and drives another.
+    // 2 in, matching buildPath() in sim/web/route_dsl.js on the sim branch. If
+    // these drift the sim draws one curve and drives another.
     CHECK_NEAR(chad::SPLINE_SPACING_IN, 2.0, 1e-9);
     CHECK(splinePath(kElbow).size() == splinePath(kElbow, 2.0f).size());
 }
