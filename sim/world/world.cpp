@@ -1,6 +1,7 @@
 #include "world.hpp"
 #include "field.hpp"
 
+#include <algorithm>
 #include <cmath>
 
 #include "../platform/sim_runtime.hpp"
@@ -92,7 +93,12 @@ void World::resetTo(const chad::Pose& pose) {
         bus().motors[i].commandedMv = 0.0;
         bus().rotations[i].positionCentideg = 0;
     }
-    publishImu();
+    // The bus was just zeroed, so the delta trackers have to agree with it or
+    // the next tick republishes the previous run's travel as a real delta.
+    mPubMotorDegLeft = mPubMotorDegRight = 0.0;
+    mPubPodVertCentideg = mPubPodHorizCentideg = 0;
+
+    seedImu();
     // Pods must be on the bus before anything baselines against them. Left to
     // the next encoder tick, OdomTracking::reset() would sample the previous
     // run's travel and then see it jump to zero as a real delta.
@@ -185,26 +191,65 @@ void World::updateDrive(double dtSec) {
     const double nx = mTruth.x + dDist * std::cos(midTheta);
     const double ny = mTruth.y + dDist * std::sin(midTheta);
 
-    // Walls and posts are solid: stop translation on contact but let the robot
-    // keep rotating, otherwise it can wedge permanently.
-    const float radius = 0.5f * std::hypot(mParams.robotLengthIn, mParams.robotWidthIn);
-    if (!field().collides(static_cast<float>(nx), static_cast<float>(ny), radius * 0.5f,
-                          mParams.collideObstacles)) {
+    // Walls and posts are solid, and the body is tested as the rectangle it is:
+    // standing a circle in for it cannot be right at both angles -- a radius
+    // that stops the robot square-on lets a corner through at 45 deg, and one
+    // that stops the corner holds it a corner's-worth off every wall it faces.
+    //
+    // Which means rotation is no longer free. A circle's footprint does not
+    // change when it turns, so the old rule -- block translation, always allow
+    // rotation -- could not put the body anywhere it was not already. A
+    // rectangle's does: parked square-on against a wall, a 10 degree turn
+    // buries a corner 1.17 in into it, and then translation is blocked in EVERY
+    // direction, including away. That is the permanent wedge the old comment
+    // was guarding against, arrived at from the other side.
+    //
+    // So the two are accepted separately, most-preferred first, and whichever
+    // combination is free wins. The body can then never overlap anything, and
+    // there is always a way out: if turning is blocked the robot can still
+    // reverse, and if reversing is blocked it can still turn.
+    const float endTheta = static_cast<float>(mTruth.theta + dTheta);
+    const float halfLen = 0.5f * mParams.robotLengthIn;
+    const float halfWid = 0.5f * mParams.robotWidthIn;
+    auto free = [&](double x, double y, float th) {
+        return !field().collidesBody(static_cast<float>(x), static_cast<float>(y),
+                                     std::cos(th), std::sin(th), halfLen, halfWid,
+                                     mParams.collideObstacles);
+    };
+
+    // A pose that already overlaps can only have come from a teleport or a
+    // reset -- the rules below cannot produce one. Driving out of it has to be
+    // allowed or the robot is stuck where it was dropped.
+    const bool stuckAlready = !free(mTruth.x, mTruth.y, static_cast<float>(mTruth.theta));
+
+    bool moved = false, turned = false;
+    if (stuckAlready || free(nx, ny, endTheta)) {
+        moved = turned = true;
+    } else if (free(nx, ny, static_cast<float>(mTruth.theta))) {
+        moved = true;                   // translate, hold the heading
+    } else if (free(mTruth.x, mTruth.y, endTheta)) {
+        turned = true;                  // turn in place
+    }
+
+    if (moved) {
         mTruth.x = static_cast<float>(nx);
         mTruth.y = static_cast<float>(ny);
-        mTruth.colliding = false;
-    } else {
-        mTruth.colliding = true;
     }
-    mTruth.theta = chad::wrapRad(static_cast<float>(mTruth.theta + dTheta));
+    const double appliedTheta = turned ? dTheta : 0.0;
+    mTruth.theta = chad::wrapRad(static_cast<float>(mTruth.theta + appliedTheta));
+    mTruth.colliding = stuckAlready || !(moved && turned);
 
+    // The encoders see the travel the wheels claim -- blocked or not, they spin
+    // and slip. The IMU does not: a gyro reports the rotation the body actually
+    // made, so a turn the walls refused is a turn it never saw.
     accumulateEncoders(mLeftCmdIn * dtSec, mRightCmdIn * dtSec);
-    accumulateImu(dTheta, dtSec);
+    accumulateImu(appliedTheta, dtSec);
 
-    // Dead wheels roll on the floor rather than being driven, so they see the
-    // travel the drive wheels only claim to have made: no encoderSlip term.
-    // Both pods sit at the tracking centre, so rotation contributes nothing.
-    mPodVertIn += dDist;
+    // Dead wheels are unpowered and roll on the floor, so they see real travel
+    // rather than what the drive wheels claim: no encoderSlip term, and nothing
+    // at all while a wall is holding the robot still. Both pods sit at the
+    // tracking centre, so rotation contributes nothing.
+    if (moved) mPodVertIn += dDist;
 
 }
 
@@ -240,10 +285,12 @@ constexpr int kHorizPodPort = 12;
 void World::publishEncoders() {
     // Always published, whether or not the library is configured to read them.
     // Enabling pods mid-run then has a live baseline instead of a jump.
-    bus().rotations[kVertPodPort].positionCentideg =
-        podCentideg(mPodVertIn, kPodWheelDiamIn);
-    bus().rotations[kHorizPodPort].positionCentideg =
-        podCentideg(mPodHorizIn, kPodWheelDiamIn);
+    const std::int32_t podVert = podCentideg(mPodVertIn, kPodWheelDiamIn);
+    const std::int32_t podHoriz = podCentideg(mPodHorizIn, kPodWheelDiamIn);
+    bus().rotations[kVertPodPort].positionCentideg += podVert - mPubPodVertCentideg;
+    bus().rotations[kHorizPodPort].positionCentideg += podHoriz - mPubPodHorizCentideg;
+    mPubPodVertCentideg = podVert;
+    mPubPodHorizCentideg = podHoriz;
 
     const double circumference = chad::PI * mParams.wheelDiameterIn;
     const double extRatio = chad::drivetrain.externalGearRatio();
@@ -251,22 +298,29 @@ void World::publishEncoders() {
 
     const double seen = 1.0 - mParams.encoderSlip;
 
-    auto writeSide = [&](const pros::MotorGroup* group, double deg, double velIn) {
+    auto writeSide = [&](const pros::MotorGroup* group, double deg, double velIn,
+                         double& published) {
         if (group == nullptr) return;
         const double motorRpm = (velIn / circumference) / extRatio * 60.0;
+        // Quantise the absolute travel, then publish the difference, so the
+        // resolution step stays exact instead of accumulating rounding error.
         const double q = quantise(deg, mParams.encoderResolutionDeg);
+        const double dq = q - published;
         for (std::uint8_t port : group->ports()) {
             auto& m = bus().motors[port];
             // The bus stores the raw sensor value; pros::Motor applies the
             // reversal flag on read, exactly as the real device does.
-            m.positionDeg = m.reversed ? -q : q;
+            m.positionDeg += m.reversed ? -dq : dq;
             m.velocityRpm = m.reversed ? -motorRpm : motorRpm;
             m.currentMa = std::fabs(m.commandedMv) * 0.05;
         }
+        published = q;
     };
 
-    writeSide(chad::drivetrain.leftMotors,  mMotorDegLeft,  mLeftCmdIn * seen);
-    writeSide(chad::drivetrain.rightMotors, mMotorDegRight, mRightCmdIn * seen);
+    writeSide(chad::drivetrain.leftMotors,  mMotorDegLeft,  mLeftCmdIn * seen,
+              mPubMotorDegLeft);
+    writeSide(chad::drivetrain.rightMotors, mMotorDegRight, mRightCmdIn * seen,
+              mPubMotorDegRight);
 }
 
 // ============================================================================
@@ -287,9 +341,22 @@ void World::accumulateImu(double dThetaRad, double dtSec) {
 void World::publishImu() {
     // The V5 reports hundredths of a degree.
     const double q = quantise(mImuRotationDeg, 0.01);
+    const double dq = q - mPubImuRotationDeg;
+    for (int i = 1; i < kMaxSmartPorts; i++) {
+        if (bus().imus[i].present) bus().imus[i].rotationDeg += dq;
+    }
+    mPubImuRotationDeg = q;
+}
+
+/// Write the IMU's absolute heading onto the bus, discarding whatever the
+/// library had tared it to. Only a world reset may do this; the per-tick path
+/// publishes deltas so a tare survives.
+void World::seedImu() {
+    const double q = quantise(mImuRotationDeg, 0.01);
     for (int i = 1; i < kMaxSmartPorts; i++) {
         if (bus().imus[i].present) bus().imus[i].rotationDeg = q;
     }
+    mPubImuRotationDeg = q;
 }
 
 // ============================================================================

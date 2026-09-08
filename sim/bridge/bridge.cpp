@@ -575,6 +575,13 @@ bool applyRouteOpt(P& p, const RouteOpt& o) {
     if constexpr (requires { p.lookaheadDist; }) {
         if (o.name == "lookaheadDist") { p.lookaheadDist = v; return true; }
     }
+    // The browser splines the preview at this spacing, so failing to pass it on
+    // made the drawn curve and the driven curve different curves -- the one
+    // thing the sim is supposed to be authoritative about. It showed up in the
+    // report's ignored column rather than silently, but only if you read it.
+    if constexpr (requires { p.smoothSpacingIn; }) {
+        if (o.name == "smoothSpacingIn") { p.smoothSpacingIn = v; return true; }
+    }
     if constexpr (requires { p.useVelocityProfile; }) {
         if (o.name == "useVelocityProfile") {
             p.useVelocityProfile = flag;
@@ -1191,8 +1198,6 @@ void sim_set_param(const char* name, float value) {
     } else if (k == "lateralSlew") {
         chad::chassisConfig.lateralSlewPerSec = value;
         chad::chassis.setLateralSlew(value);
-    } else if (k == "mclDistSyncProp") {
-        chad::chassis.mcl().setDistSyncProp(value);
     } else if (k == "seed") {
         // Pin both RNGs: the world's noise and MCL's particle jitter. Without
         // the second, a run replays the same sensor stream but a different
@@ -1234,6 +1239,28 @@ float sim_get_param(const char* name) {
     else if (k == "imuPeriodMs")       return p.imuPeriodMs;
     else if (k == "encoderPeriodMs")   return p.encoderPeriodMs;
     else if (k == "encoderResolutionDeg") return p.encoderResolutionDeg;
+
+    // Geometry, readable so the browser can state what it is simulating instead
+    // of carrying its own copy. World::init() takes these from chad::drivetrain,
+    // so they are the robot's numbers, not RobotParams' pre-init placeholders --
+    // which is exactly what the drivetrain panel used to print, and why it
+    // claimed a 3.25 in wheel on a 2.6738 in drivetrain.
+    else if (k == "trackWidthIn")      return p.trackWidthIn;
+    else if (k == "wheelDiameterIn")   return p.wheelDiameterIn;
+    else if (k == "maxWheelRpm")       return p.maxWheelRpm;
+    else if (k == "robotLengthIn")     return p.robotLengthIn;
+    else if (k == "robotWidthIn")      return p.robotWidthIn;
+    else if (k == "mclParticleCount")
+        return static_cast<float>(chad::chassis.mcl().config().particleCount);
+    else if (k == "distSensorCount") {
+        // Counted from the config rather than from the live beams, which are
+        // not populated until the first reset or physics tick.
+        int n = 0;
+        for (int i = 0; i < chad::MAX_DISTANCE_SENSORS; i++) {
+            if (chad::distSensors[i] != nullptr) n++;
+        }
+        return static_cast<float>(n);
+    }
 
     const auto& cc = chad::chassisConfig;
     if      (k == "lateralKp")     return cc.lateralGains.kP;
@@ -1313,10 +1340,11 @@ float sim_get_param(const char* name) {
 struct SimTuning { const char* key; float value; };
 
 constexpr SimTuning kSimTuning[] = {
-    // The along-track loop. At the robot's 9.012 the last inch takes 1.5 s to
-    // close, so the settle debounce expires with the robot still half an inch
-    // out; the nine point-to-point motions in the battery take 16.5 s at that
-    // gain and 12.5 s here.
+    // The along-track loop. Around the robot's gain the last inch takes 1.5 s
+    // to close, so the settle debounce expires with the robot still half an
+    // inch out; the nine point-to-point motions in the battery took 16.5 s at
+    // the 9.012 it shipped when this was measured, against 12.5 s here. It
+    // ships 9.5 now, which is the same story a little faster.
     //
     // 12 and not more, because moveDistance and moveToPoint have no velocity
     // profile -- they are P+D against a first-order lag, so the only thing
@@ -1324,25 +1352,36 @@ constexpr SimTuning kSimTuning[] = {
     // needs v*tau to stop, 4.4 in from full speed, and 127/kP is how far out
     // the output leaves saturation: 10.6 in at kP 12, 7.9 in at kP 16. Past
     // that the arithmetic stops working and the robot sails through the
-    // waypoint and reverses. Measured at the default 70 ms lag, overshoot is
-    // 0.00 in up to kP 14, 0.40 in at 15 and 1.22 in with seven reversals at
-    // 16. 12 is the largest value that also holds from 50 to 100 ms.
+    // waypoint and reverses.
     {"lateralKp", 12.0f},
 
-    // The single biggest term in routing error. 1 in means a waypoint counts as
-    // reached from anywhere within an inch of it, and that is what the robot has
-    // to live with: it has to exceed the localization error or the settle test
-    // can never pass. The sim's dead reckoning is exact, so it does not.
+    // kD has to be overridden WITH kP, not inherited. This entry pinned kP to
+    // 12 and left kD alone, which was fine until the robot's measured gains
+    // went from {9.012, 0, 1.15} to {9.5, 0, 0.4}: kP 12 against kD 0.4 is
+    // under-damped in this plant, and the whole gate went red -- 0.89 in of
+    // overshoot and one reversal on every long straight. Nothing caught it
+    // because the sim did not compile for the several commits either side of
+    // that change.
     //
-    // 0.30 and not tighter because past here the tolerance stops buying
-    // accuracy and starts buying nothing. Over ten point motions: 0.30 in of
-    // tolerance lands 0.11 in out in 12.3 s, 0.12 in lands 0.05 in out in
-    // 14.2 s. The last 0.06 in is not worth 1.9 s of a 15 s auton -- the robot
-    // is 15 in wide. Every motion inherits this rather than getting its own,
-    // which is also what makes 0.30 the number RAMSETE and boomerang need: it
-    // is what they can actually deliver, and a tolerance under that does not
-    // finish closer, it sits out the timeout at the same distance.
-    {"targetTolIn", 0.30f},
+    // Swept on the full battery at the default 70 ms lag: kD 0.4 fails 8 cases,
+    // 0.6 passes but at worst=0.58, and 0.7 through 1.4 all pass with the cost
+    // flat from 2.22 to 2.61. 0.8 is in the flat part with room above the 0.6
+    // cliff. It holds from 50 ms to 85 ms of lag; at 100 ms the battery does
+    // fail, but on turn overshoot and RAMSETE endpoints rather than anything
+    // along-track, and identically at kD 1.15 -- so that ceiling belongs to the
+    // angular gains and the follower, not here.
+    {"lateralKd", 0.8f},
+
+    // There is deliberately NO targetTolIn entry. There was one, at 0.30, and
+    // its reason was that the robot's 1.0 in had to exceed a localization error
+    // the sim's exact dead reckoning does not have. The robot ships 0.2 now, so
+    // the override had inverted into loosening the tolerance rather than
+    // tightening it. Swept on the battery: inheriting 0.2 scores cost 1.94
+    // against 0.30's 2.25 and lands 0.194 in out against 0.209, for 1.0 s more
+    // over the whole battery. 0.15 is better again (1.82) and 0.12 breaks --
+    // a motion sits out its timeout -- so the floor is real, just below 0.2.
+    // Inherited rather than re-pinned at 0.15, because a divergence has to earn
+    // its keep and 0.005 in does not.
 
     // Boomerang's speed scale is a hard distToTarget/6, so inside 6 in the
     // along-track term is throttled quadratically and the approach crawls.
@@ -1473,14 +1512,18 @@ void sim_field_clear() { sim::field().clear(); }
 EMSCRIPTEN_KEEPALIVE
 void sim_field_default() { sim::field().loadDefault(); }
 
+/// `kind` is carried rather than defaulted so a round trip through the editor
+/// preserves it: 0 marks the perimeter, and the physics needs to know a wall is
+/// a wall. Re-adding the perimeter as kind 2 used to leave a field the
+/// raycaster and the collision test disagreed about.
 EMSCRIPTEN_KEEPALIVE
-void sim_field_add_segment(float x1, float y1, float x2, float y2) {
-    sim::field().addSegment(x1, y1, x2, y2);
+void sim_field_add_segment(float x1, float y1, float x2, float y2, int kind) {
+    sim::field().addSegment(x1, y1, x2, y2, kind);
 }
 
 EMSCRIPTEN_KEEPALIVE
-void sim_field_add_circle(float x, float y, float r) {
-    sim::field().addCircle(x, y, r);
+void sim_field_add_circle(float x, float y, float r, int kind) {
+    sim::field().addCircle(x, y, r, kind);
 }
 
 // ============================================================================

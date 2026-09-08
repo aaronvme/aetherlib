@@ -122,9 +122,17 @@ export const BATTERY = [
   // A swing pivots about one wheel set, so the body centre necessarily
   // translates -- 8.4 in for 90 degrees on an 11.9 in track. Bounding drift
   // here would be bounding the geometry.
-  { name: 'swing left',     start: [-36, -36, 90], noDrift: true,
+  //
+  // Started at y = 0 rather than the shared (-36, -36): a 180 degree swing
+  // walks the centre ~7 in, and from (-36, -36) that puts the body onto the
+  // post at (-47, -23.5). It used to pass only because the collision footprint
+  // was half the robot, so the corner went through the post instead of
+  // stopping on it -- and a blocked swing is not the swing being measured.
+  // At (-36, 0) the nearest post is 25.9 in away, which leaves 8.9 in of
+  // clearance at the closest approach. Heading error is 0.17 deg either way.
+  { name: 'swing left',     start: [-36, 0, 90], noDrift: true,
     cmd: [OP.SWING, 180, 0, 0, 2500], want: { heading: 180 } },
-  { name: 'swing right',    start: [-36, -36, 90], noDrift: true,
+  { name: 'swing right',    start: [-36, 0, 90], noDrift: true,
     cmd: [OP.SWING, 0, 1, 0, 2500],   want: { heading: 0 } },
   // 26 in is the radius of the only circle through both poses that is
   // tangent to the start heading: 24 in across and 16 in up solves
@@ -139,8 +147,13 @@ export const BATTERY = [
   // against the previewed curve rather than the polyline.
   { name: 'path gentle',    start: [-40, 12, 45],
     path: [[-40, 12, 0], [-25, 22, 0], [-10, 12, 0]], timeout: 5000 },
-  { name: 'path S',         start: [-60, -60, 35],
-    path: [[-60, -60, 0], [-45, -39, 0], [-27, -33, 0], [-12, -12, 0]],
+  // Started at (-57, -57) and not the corner's (-60, -60): at 35 degrees a
+  // 15 in square reaches 10.45 in toward the corner walls and there is only
+  // 10.2 in of it, so the body began 0.25 in inside them. It read as a clean
+  // pass only while the collision footprint was a circle, which cannot see a
+  // corner. 2.75 in of slack now, in line with the other path cases.
+  { name: 'path S',         start: [-57, -57, 35],
+    path: [[-57, -57, 0], [-45, -39, 0], [-27, -33, 0], [-12, -12, 0]],
     timeout: 6000 },
   { name: 'path L',         start: [-60, -36, 90],
     path: [[-60, -36, 0], [-36, -36, 0], [-36, -12, 0]], timeout: 5000 },
@@ -320,8 +333,8 @@ export function runBattery(api, opts = {}) {
 // ============================================================================
 //
 // Bounds are what "accurate enough to route on" means, and they are the sim's
-// bounds, not the robot's -- see sim/tuning.json. A miss is a failure of the
-// TUNING, so the gate is worth having in CI.
+// bounds, not the robot's -- see kSimTuning in sim/bridge/bridge.cpp. A miss is
+// a failure of the TUNING, so the gate is worth having in CI.
 export const BOUNDS = {
   endIn: 0.5,       // inches from the commanded point
   endDeg: 1.5,      // degrees from the commanded heading

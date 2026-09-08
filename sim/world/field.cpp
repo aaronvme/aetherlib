@@ -1,6 +1,7 @@
 #include "field.hpp"
 
 #include <cmath>
+#include <utility>
 
 namespace sim {
 namespace {
@@ -157,14 +158,70 @@ float Field::raycast(float ox, float oy, float dc, float ds, float maxRange) con
     return h.hit ? h.dist : maxRange;
 }
 
-bool Field::collides(float x, float y, float radius, bool includeCircles) const {
-    if (std::fabs(x) > kHalf - radius || std::fabs(y) > kHalf - radius) return true;
-    if (!includeCircles) return false;
+namespace {
+
+/// Does segment (x0,y0)-(x1,y1) overlap the box [-hx,hx] x [-hy,hy]?
+///
+/// Liang-Barsky: clip the segment's parameter range against each of the four
+/// slabs and see whether anything survives. The box is treated as OPEN, so a
+/// segment lying exactly along a face is NOT an overlap -- which is what lets
+/// the robot come to rest in contact with a wall instead of being stopped a
+/// float's width short of it every tick.
+bool segmentHitsBox(float x0, float y0, float x1, float y1, float hx, float hy) {
+    const float dx = x1 - x0, dy = y1 - y0;
+    const float p[4] = {-dx, dx, -dy, dy};
+    const float q[4] = {x0 + hx, hx - x0, y0 + hy, hy - y0};
+
+    float t0 = 0.0f, t1 = 1.0f;
+    for (int i = 0; i < 4; i++) {
+        if (std::fabs(p[i]) < 1e-9f) {
+            // Parallel to this slab: it is in or out for the whole segment.
+            if (q[i] <= 0.0f) return false;
+            continue;
+        }
+        const float r = q[i] / p[i];
+        if (p[i] < 0.0f) {
+            if (r > t1) return false;
+            if (r > t0) t0 = r;
+        } else {
+            if (r < t0) return false;
+            if (r < t1) t1 = r;
+        }
+    }
+    return t0 < t1;
+}
+
+}  // namespace
+
+bool Field::collidesBody(float x, float y, float cosT, float sinT,
+                         float halfLen, float halfWid, bool includeObstacles) const {
+    // Everything is tested in the robot's frame, where the body is the
+    // axis-aligned box [-halfLen, halfLen] x [-halfWid, halfWid].
+    auto toBody = [&](float wx, float wy) {
+        const float dx = wx - x, dy = wy - y;
+        return std::pair<float, float>{ dx * cosT + dy * sinT,
+                                       -dx * sinT + dy * cosT };
+    };
+
+    for (const auto& s : mSegments) {
+        // The perimeter always stops the robot; goal walls and anything drawn
+        // in the editor are obstacles, switchable with the posts.
+        if (s.kind != 0 && !includeObstacles) continue;
+        const auto [ax, ay] = toBody(s.x1, s.y1);
+        const auto [bx, by] = toBody(s.x2, s.y2);
+        if (segmentHitsBox(ax, ay, bx, by, halfLen, halfWid)) return true;
+    }
+
+    if (!includeObstacles) return false;
     for (const auto& c : mCircles) {
-        const float dx = x - c.x;
-        const float dy = y - c.y;
-        const float rr = c.r + radius;
-        if (dx * dx + dy * dy < rr * rr) return true;
+        // Post centre in the robot frame, then the nearest point on the body to
+        // it. Clamping inside the rectangle gives a zero separation, so a post
+        // swallowed by the body counts too.
+        const auto [lx, ly] = toBody(c.x, c.y);
+        const float qx = (lx < -halfLen) ? -halfLen : (lx > halfLen ? halfLen : lx);
+        const float qy = (ly < -halfWid) ? -halfWid : (ly > halfWid ? halfWid : ly);
+        const float px = lx - qx, py = ly - qy;
+        if (px * px + py * py < c.r * c.r) return true;
     }
     return false;
 }

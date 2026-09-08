@@ -24,6 +24,8 @@
 // filter can never disagree about where a sensor is.
 #pragma once
 
+#include <cstdint>
+
 #include "chad/util/util.hpp"
 
 namespace sim {
@@ -78,7 +80,8 @@ struct RobotParams {
     /// reads several inches short whenever the robot is not square to it.
     float distConeSigmaFrac{0.25f};
 
-    /// Whether the robot collides with goal posts. The perimeter always stops it.
+    /// Whether the robot collides with posts, goal walls and anything drawn in
+    /// the field editor. Perimeter segments always stop it.
     bool collideObstacles{true};
 
     // Robot footprint, used for collision and drawing.
@@ -143,6 +146,7 @@ private:
     void publishEncoders();
     void accumulateImu(double dThetaRad, double dtSec);
     void publishImu();
+    void seedImu();
     void updateDistanceSensors();
 
     RobotParams mParams;
@@ -152,10 +156,27 @@ private:
     float mRightCmdIn{0.0f};
 
     // Continuous ground-truth sensor values. These advance every physics tick;
-    // the publish* methods copy them onto the bus at device rate.
+    // the publish* methods fold them onto the bus at device rate.
     double mMotorDegLeft{0.0};
     double mMotorDegRight{0.0};
     double mImuRotationDeg{0.0};
+
+    // What the publish* methods last wrote, so they can add a DELTA rather
+    // than assign an absolute. A real device integrates its own counter, so
+    // tare_position() / reset_position() / tare_rotation() zero the value the
+    // library reads and travel accumulates from there. Assigning the absolute
+    // silently undid any such reset on the next device tick -- which teleported
+    // odometry by the whole distance driven when dead wheels were swapped in.
+    //
+    // Relies on every device existing before the first publish, which holds
+    // because they are all globals in gamespecific/config.cpp and the bridge.
+    // A device registered later would receive only deltas and read a constant
+    // offset; assigning the absolute used to paper over that.
+    double mPubMotorDegLeft{0.0};
+    double mPubMotorDegRight{0.0};
+    std::int32_t mPubPodVertCentideg{0};
+    std::int32_t mPubPodHorizCentideg{0};
+    double mPubImuRotationDeg{0.0};
 
     // Dead-wheel travel, published to the rotation-sensor slots so the sim can
     // run with tracking wheels as well as without.

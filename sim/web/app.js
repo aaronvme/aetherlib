@@ -56,8 +56,10 @@ const api = {
   recClear:     w('sim_record_clear', null, []),
   fieldClear:   w('sim_field_clear', null, []),
   fieldDefault: w('sim_field_default', null, []),
-  fieldAddSeg:  w('sim_field_add_segment', null, ['number', 'number', 'number', 'number']),
-  fieldAddCirc: w('sim_field_add_circle', null, ['number', 'number', 'number']),
+  fieldAddSeg:  w('sim_field_add_segment', null,
+                  ['number', 'number', 'number', 'number', 'number']),
+  fieldAddCirc: w('sim_field_add_circle', null,
+                  ['number', 'number', 'number', 'number']),
 };
 
 // RAMSETEParams::smoothSpacingIn's default, for the preview when a route does
@@ -637,9 +639,12 @@ function showFieldGeom() {
   fieldFacts.innerHTML =
     `<div class="k">segments</div><div class="v">${fieldGeom.segments.length}</div>` +
     `<div class="k">circles</div><div class="v">${fieldGeom.circles.length}</div>`;
+  // The trailing element is `kind`: 0 = perimeter, 1 = structure, 2 = added.
+  // Kept in the text rather than stripped, because applying it back is how the
+  // field is edited and a perimeter that returns as kind 2 stops being a wall.
   fieldJsonEl.value = JSON.stringify({
-    segments: fieldGeom.segments.map(s => s.slice(0, 4)),
-    circles: fieldGeom.circles.map(c => c.slice(0, 3)),
+    segments: fieldGeom.segments.map(s => s.slice(0, 5)),
+    circles: fieldGeom.circles.map(c => c.slice(0, 4)),
   }, null, 1);
 }
 showFieldGeom();
@@ -648,8 +653,10 @@ document.getElementById('btn-field-apply').addEventListener('click', () => {
   try {
     const g = JSON.parse(fieldJsonEl.value);
     api.fieldClear();
-    for (const s of g.segments || []) api.fieldAddSeg(s[0], s[1], s[2], s[3]);
-    for (const c of g.circles || []) api.fieldAddCirc(c[0], c[1], c[2]);
+    // Hand-written geometry may omit the kind; 2 (user-added) is the safe
+    // default for it, since claiming 0 would make it collide as a wall.
+    for (const s of g.segments || []) api.fieldAddSeg(s[0], s[1], s[2], s[3], s[4] ?? 2);
+    for (const c of g.circles || []) api.fieldAddCirc(c[0], c[1], c[2], c[3] ?? 2);
     showFieldGeom();
   } catch (err) {
     alert('field JSON: ' + err.message);
@@ -1051,10 +1058,16 @@ function drawPlan() {
   });
 }
 
+// The footprint the physics collides with, so the drawn box is the box that
+// stops on a wall rather than a 15 in stand-in for it.
+const BODY_L = api.getParam('robotLengthIn');
+const BODY_W = api.getParam('robotWidthIn');
+const MCL_PARTICLES = api.getParam('mclParticleCount');
+
 function drawRobot(pose, color, filled) {
   const rad = (90 - pose.h) * Math.PI / 180;
   const [px, py] = toPx(pose.x, pose.y);
-  const L = 15 * SCALE, W = 15 * SCALE;
+  const L = BODY_L * SCALE, W = BODY_W * SCALE;
   ctx.save();
   ctx.translate(px, py);
   ctx.rotate(-rad);
@@ -1185,7 +1198,7 @@ function updateHud(s) {
   // Injection above zero means the beam likelihoods stopped fitting -- the
   // cloud is being redrawn across the field to find the robot again.
   hud.neff.textContent = (s.locMode & 1)
-    ? `${s.mcl.nEff.toFixed(0)} / 1024`
+    ? `${s.mcl.nEff.toFixed(0)} / ${MCL_PARTICLES.toFixed(0)}`
       + (s.mclInject > 0.001 ? `  inject ${(s.mclInject * 100).toFixed(0)}%` : '')
     : '—';
   const ri = api.routeIndex();
@@ -1229,11 +1242,15 @@ function frame(now) {
 
 requestAnimationFrame(frame);
 
-// Drivetrain facts, straight from the compiled config.
+// Drivetrain facts, asked for rather than asserted. These were literals, and
+// two of them were wrong -- 10.4 in of track and a 3.25 in wheel against the
+// config's 11.67 and 2.6738 -- because they had been copied from RobotParams'
+// pre-init placeholders instead of the drivetrain the sim actually runs.
 document.getElementById('dt-facts').innerHTML = [
-  ['track width', '10.4 in'],
-  ['wheel', '3.25 in'],
-  ['drive RPM', '450'],
-  ['sensors', '4 × Distance'],
-  ['particles', '1024'],
+  ['track width', `${api.getParam('trackWidthIn').toFixed(2)} in`],
+  ['wheel', `${api.getParam('wheelDiameterIn').toFixed(4)} in`],
+  ['drive RPM', `${api.getParam('maxWheelRpm').toFixed(0)}`],
+  ['body', `${BODY_L.toFixed(1)} × ${BODY_W.toFixed(1)} in`],
+  ['sensors', `${api.getParam('distSensorCount').toFixed(0)} × Distance`],
+  ['particles', `${MCL_PARTICLES.toFixed(0)}`],
 ].map(([k, v]) => `<div class="k">${k}</div><div class="v">${v}</div>`).join('');

@@ -61,10 +61,31 @@ public:
     /// Distance only -- kept for callers that do not care about the normal.
     float raycast(float ox, float oy, float dc, float ds, float maxRange) const;
 
-    /// True when the point is outside the perimeter, or inside any circle when
-    /// `includeCircles`. Driving through posts is sometimes what you want while
-    /// testing a route, so it is switchable.
-    bool collides(float x, float y, float radius, bool includeCircles = true) const;
+    /// True when the robot's BODY -- an oriented rectangle, half-extents
+    /// (halfLen along its x, halfWid along its y) centred at (x, y) and rotated
+    /// by (cosT, sinT) -- overlaps any loaded geometry.
+    ///
+    /// Perimeter segments (kind 0) always stop the robot. Everything else --
+    /// goal walls, posts, whatever the editor drew -- is an obstacle and is
+    /// switchable, because driving through them is sometimes what you want
+    /// while testing a route.
+    ///
+    /// Exact, and against the geometry that is actually loaded. Two things this
+    /// is deliberately not:
+    ///
+    ///   * a circle standing in for the rectangle. No single radius works at
+    ///     both angles -- the circumscribed one (half a body diagonal) holds
+    ///     the robot a corner short of a wall it is square to, and the
+    ///     inscribed one lets a corner through by up to the difference, 3.1 in
+    ///     on a 15 in square measured against a post at 45 degrees.
+    ///   * a hardcoded +-70.2 box for the walls. That is where the VRC
+    ///     perimeter is, but asserting it here meant an edited field was half
+    ///     applied: clearing the walls left the raycaster seeing an empty field
+    ///     while the robot was still boxed in, and re-adding one anywhere put
+    ///     the box back wherever the segment happened to be.
+    bool collidesBody(float x, float y, float cosT, float sinT,
+                      float halfLen, float halfWid,
+                      bool includeObstacles = true) const;
 
     struct Nearest {
         float dist{0.0f};       // to the point, not to any footprint
@@ -74,11 +95,12 @@ public:
     /// Nearest wall or post to a point, with the contact point itself so a
     /// caller can allow for a footprint in that direction.
     ///
-    /// Unlike collides(), this counts goal SEGMENTS as well as the perimeter and
-    /// the posts. The two disagree on purpose: the sim only stops the robot on
-    /// the perimeter and the posts, so a route can drive clean through a goal
-    /// wall and look fine. Route planning wants to know that; the physics does
-    /// not simulate it.
+    /// Measures to a point, not to the body, so a caller has to allow for its
+    /// own footprint in the returned direction -- which is what the route
+    /// report's clearance column does. Counts everything loaded, so it and
+    /// collidesBody() now agree about what is there; they used to disagree on
+    /// purpose, because the physics only stopped on a hardcoded perimeter and
+    /// the posts and drove through goal walls this reported.
     Nearest nearest(float x, float y) const;
 
     const std::vector<Segment>& segments() const { return mSegments; }

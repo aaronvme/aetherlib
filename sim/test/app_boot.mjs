@@ -142,6 +142,24 @@ check('the editor was seeded with auton source',
       /chassis\.\w+\(/.test(el('editor').value),
       el('editor').value.split('\n').find(l => l.includes('chassis.')) ?? '(none)');
 
+// The drivetrain panel asks the wasm for these rather than asserting them, and
+// every other check here only proves nothing threw -- which is how it printed a
+// 3.25 in wheel on a 2.6738 in drivetrain for as long as it did. A missing or
+// misspelled getter returns NaN and formats as "NaN", so the values are checked
+// without naming any of them: hardcoding the robot's constants here is the
+// mistake being guarded against.
+{
+  const facts = el('dt-facts').innerHTML;
+  const values = [...facts.matchAll(/<div class="v">([^<]*)<\/div>/g)].map(m => m[1]);
+  check('the drivetrain panel filled in', values.length === 6,
+        `${values.length} values: ${values.join(' | ')}`);
+  // Positive, not merely non-NaN: a getter that exists but reads zero is the
+  // other way this goes wrong, and it is how "0 × Distance" shipped once.
+  check('every drivetrain fact is a positive number',
+        values.length > 0 && values.every(v => parseFloat(v) > 0),
+        values.join(' | '));
+}
+
 // ============================================================================
 // Frames
 // ============================================================================

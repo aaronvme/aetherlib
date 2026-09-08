@@ -241,11 +241,12 @@ Two details worth knowing:
 - **Cut off** is a heuristic, and the only one available: nothing in the
   `Chassis` API says why a motion returned, so a blocking motion whose duration
   reached its timeout within one loop tick is reported as cut off.
-- **Clearance** counts goal *segments*, which the physics does not collide
-  with -- only the perimeter and the posts stop the robot. So a route can drive
-  clean through a goal wall and still look fine on the field while the
-  clearance column goes negative. That disagreement is deliberate; the column
-  is the only warning you get.
+- **Clearance** is measured from the body's own extent in the direction the
+  obstacle actually lies, so it means what it says at any heading rather than
+  only when the robot is square. It counts everything loaded, and so does the
+  physics now -- the two used to disagree, because the physics stopped only on
+  a hardcoded perimeter and the posts and drove clean through goal walls the
+  column was warning about.
 
 Opcode numbers are the contract between `sim/web/route_dsl.js` and `RouteOp` in
 `sim/bridge/bridge.cpp`; `sim/test/dsl.mjs` reads the C++ enum back out and
@@ -284,11 +285,22 @@ disagrees with the robot about. Today that is seven numbers:
 
 | | robot | sim | why |
 |---|---|---|---|
-| `lateralKp` | 9.012 | 12 | at 9 the nine point motions take 16.5 s; at 12 they take 12.5 s. Not higher -- see below |
-| `targetToleranceIn` | 1.0 | 0.30 | the robot's has to exceed its localization error; the sim's dead reckoning is exact |
+| `lateralKp` | 9.5 | 12 | at the robot's gain the nine point motions take 16.5 s; at 12 they take 12.5 s. Not higher -- see below |
+| `lateralKd` | 0.4 | 0.8 | it has to be overridden **with** `kP`, not inherited: 12 against the robot's 0.4 is under-damped and every long straight overshoots 0.89 in and reverses. See below |
 | `ramseteMaxAccel` | 50 | 30 | RAMSETE's endpoint error IS its overshoot, so arriving slower is the whole fix: 0.48 in past the last point at 50, 0.18 in at 30 |
 | `ramseteB` | 48 | 96 | at 48 a path does not merely track worse, it times out: 0.89 in cross-track and 19.2 s over five paths against 13.3 s |
 | `boomLead` / `boomLeadDecay` / `boomMinSpeed` | 0.5 / 0.5 / 0 | 0.7 / 0.15 / 127 | boomerang throttles its own approach inside 6 in; `minSpeed` floors that scale, and at 127 it switches off |
+
+`targetToleranceIn` used to be here at 0.30, against a robot that shipped 1.0.
+The robot ships 0.2 now, so the override had quietly inverted into *loosening*
+the tolerance. Inheriting 0.2 scores better anyway -- cost 1.94 against 2.25,
+landing 0.194 in out against 0.209 -- for 1.0 s more over the battery, so the
+entry is gone rather than re-pinned.
+
+**A partial override is the trap this table sets.** Two of its rows were written
+against robot constants that later moved, and the sim went quietly wrong both
+times. Overriding one term of a gain set and inheriting the rest couples the
+sim's tuning to a hardware measurement that is *expected* to change.
 
 ### The overshoot trap, which caught this exact file
 
@@ -298,16 +310,26 @@ leaving saturation in time. The plant needs `v*tau` to stop -- 4.4 in from full
 speed -- and `127/kP` is how far from the target the output comes off the rail:
 10.6 in at `kP` 12, 7.9 in at 16. Past that the arithmetic stops working.
 
-Measured at the default 70 ms lag, over the nine point motions:
+Measured at the default 70 ms lag, over the nine point motions. **These were
+taken at `kD` 1.15**, which is what the robot shipped when they were measured
+and is why `lateralKd` is now an override in its own right -- at the robot's
+current 0.4 the same `kP` 12 overshoots 0.89 in and reverses once:
 
 | `lateralKp` | overshoot | reversals | total |
 |---|---|---|---|
-| 9.012 (robot) | 0.00 in | 0 | 16.5 s |
+| 9.012 (robot, then) | 0.00 in | 0 | 16.5 s |
 | 12 | 0.00 in | 0 | 12.5 s |
 | 14 | 0.00 in | 0 | 9.4 s |
 | 15 | 0.40 in | 0 | 9.6 s |
 | 16 | 1.22 in | 7 | 10.6 s |
 | 20 | 3.51 in | 9 | 10.8 s |
+
+`kD` swept the same way at `kP` 12, on the whole battery: 0.4 fails 8 cases,
+0.6 passes at worst 0.58, and 0.7 to 1.4 all pass with the cost flat from 2.22
+to 2.61. 0.8 sits in the flat part with room above the cliff. It holds from
+50 ms to 85 ms of lag; at 100 ms the battery does fail, but on turn overshoot
+and RAMSETE endpoints rather than anything along-track, and identically at
+`kD` 1.15 -- that ceiling is the angular gains and the follower, not this loop.
 
 14 is faster and this table says 12, because 14 only holds at 70 ms: at 100 ms
 it overshoots 0.82 in and reverses seven times, where 12 is still clean. 12 is
@@ -548,11 +570,16 @@ Two things about LTV worth knowing, neither of them faults:
 - Nothing in the project constructs an `LTVPathFollower`, so it had never run.
   The sim builds one on demand.
 
-`FeedforwardGains::kV` is volts per m/s and it matters a lot. This drivetrain
-does 450 rpm on a 3.25 in wheel at 12 V, about 1.95 m/s, so kV ~= 12 / 1.95 =
-**6.2**. At kV 0.9 the robot ends 9.1 in short of the path; at 6.2 it ends
+`FeedforwardGains::kV` is volts per m/s and it matters a lot. At kV 0.9 the
+robot ends 9.1 in short of the path; at the 6.2 `bridge.cpp` defaults to it ends
 0.42 in short. That is a tuning sensitivity rather than a bug, and the suite
 pins both numbers so it stays visible.
+
+6.2 was derived from "450 rpm on a 3.25 in wheel at 12 V, about 1.95 m/s". The
+drivetrain measures **2.6738 in** now, so 450 rpm is 63.0 in/s = 1.60 m/s and
+the same arithmetic gives kV ~= **7.5**. Left at 6.2 deliberately: nothing in
+the project constructs an `LTVPathFollower`, the follower is parked, and
+re-deriving its gains is work for whoever un-parks it.
 
 **`maxSensorRange` is set beyond what the hardware can do.**
 `config.cpp` sets `.maxSensorRange = 140.0f` inches (3556 mm). A V5 distance
@@ -564,6 +591,13 @@ what that costs.
 
 Geometry is data-driven. Edit `Field::loadDefault()` in `sim/world/field.cpp`,
 or paste JSON into the **View** tab's geometry box and hit Apply, no rebuild.
+
+The last element of each entry is its `kind`: **0 = perimeter, 1 = structure,
+2 = user-added**, and it is not cosmetic. Kind 0 always stops the robot; 1 and 2
+are obstacles and honour the `collide` switch. Omit it and you get 2, which is
+the safe answer for hand-written geometry — but it does mean that pasting the
+perimeter back without its `0` leaves walls you can drive through when
+`collide` is off.
 
 Only two things in the default layout are authoritative: the 140.4 in perimeter
 (fixed by the VRC spec, and matching `kFieldWalls`) and the nine posts, taken
@@ -580,9 +614,11 @@ where the two disagree is exactly where MCL will mislocalize on a real field.
   through a first-order lag, with no mass, torque or friction. So the sim
   rewards aggression whose cost it cannot show — sweep `responseTauMs` before
   trusting any tuning result that came out of it.
-- **Rectangle-to-segment collision.** The robot stops on the perimeter and the
-  goal posts, but drives straight through goal walls. The route report's
-  clearance column measures against them, which is why it is worth reading.
+- **Contact response.** Collision itself is exact -- the body is an oriented
+  rectangle tested against every segment and post actually loaded, rotation
+  included -- but a robot that touches something simply stops. It does not
+  slide along the surface, and it is not pushed off it. A route that grazes a
+  wall therefore reads as a hard stop rather than the scrape it would be.
 - Lift, intake and other subsystem simulation — the shims exist and the code
   runs, but nothing physical is modelled. Subsystem calls in a routed auton are
   skipped and listed rather than run.

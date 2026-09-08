@@ -26,6 +26,11 @@ const api = {
   routeRunning:c('sim_route_running', 'number', []),
   stopAuton:   c('sim_stop_auton', null, []),
   setParam:    c('sim_set_param', null, ['string', 'number']),
+  getParam:    c('sim_get_param', 'number', ['string']),
+  fieldClear:  c('sim_field_clear', null, []),
+  fieldDefault:c('sim_field_default', null, []),
+  addSeg:      c('sim_field_add_segment', null,
+                 ['number','number','number','number','number']),
   routeClear:  c('sim_route_clear', null, []),
   routePush:   c('sim_route_push', null, ['number','number','number','number','number']),
   routeRun:    c('sim_route_run', null, []),
@@ -736,6 +741,126 @@ const m1 = mclSample();
 const m2 = mclSample();
 check('MCL replays identically once seeded', m1 === m2, `${m1} vs ${m2}`);
 api.setLoc(0);
+
+// ============================================================================
+// Body collision
+// ============================================================================
+//
+// The routing battery drives through open field, so none of it ever parks
+// against a wall -- which is how a change that wedged the robot on contact got
+// through a green suite. These press on the contact case directly.
+//
+// The body is an oriented rectangle, so its reach toward an axis-aligned wall
+// is the bounding-box half-extent, not one radius: 7.5 in square-on and up to
+// 10.61 in at 45 degrees on a 15 in square.
+console.log('\n== body collision ==');
+
+const HALF_WALL = 70.2;
+const extent = (hDeg, L, W) => {
+  const t = (90 - hDeg) * Math.PI / 180;
+  return 0.5 * (L * Math.abs(Math.cos(t)) + W * Math.abs(Math.sin(t)));
+};
+
+// Posts off, so only the perimeter is in play and the geometry is unambiguous.
+api.setParam('collideObstacles', 0);
+const L = api.getParam('robotLengthIn');
+const W = api.getParam('robotWidthIn');
+
+/// Drive east out of (-30, 0) at `hDeg` until it stops, then report the gap
+/// between the body's leading extent and the wall it came to rest on.
+function wallGap(hDeg) {
+  api.reset(-30, 0, hDeg);
+  api.setDrive(9, 9);
+  run(20000);
+  api.setDrive(0, 0);
+  run(400);
+  const s = st();
+  const e = extent(s.true.h, L, W);
+  return Math.min(HALF_WALL - (Math.abs(s.true.x) + e),
+                  HALF_WALL - (Math.abs(s.true.y) + e));
+}
+
+for (const h of [90, 60, 45]) {
+  const gap = wallGap(h);
+  check(`the body stops ON the wall at ${h} deg, not through or short of it`,
+        gap > -0.02 && gap < 0.25, `gap ${gap.toFixed(3)} in`);
+}
+
+// Turning while parked used to be free, because a circle's footprint does not
+// change when it rotates. A rectangle's does, so an unchecked turn buried a
+// corner in the wall and then blocked translation in every direction.
+api.reset(-30, 0, 90);
+api.setDrive(9, 9);
+run(20000);
+api.setDrive(0, 0);
+run(300);
+const parkedX = st().true.x;
+api.setDrive(6, -6);          // spin in place against the wall
+run(1200);
+api.setDrive(0, 0);
+run(200);
+const spun = st();
+check('turning into a wall cannot bury the body in it',
+      HALF_WALL - (Math.abs(spun.true.x) + extent(spun.true.h, L, W)) > -0.02,
+      `h ${spun.true.h.toFixed(1)} deg, gap `
+      + `${(HALF_WALL - (Math.abs(spun.true.x) + extent(spun.true.h, L, W))).toFixed(3)} in`);
+
+api.setDrive(-9, -9);         // and it must still be able to leave
+run(1500);
+api.setDrive(0, 0);
+run(200);
+check('and the robot can still reverse away from it',
+      st().true.x < parkedX - 5,
+      `${parkedX.toFixed(2)} -> ${st().true.x.toFixed(2)}`);
+
+// The perimeter is geometry, not a hardcoded box: clearing it has to free the
+// robot, or the raycaster and the physics are describing different fields.
+api.fieldClear();
+api.reset(-30, 0, 90);
+api.setDrive(9, 9);
+run(20000);
+api.setDrive(0, 0);
+const escaped = st();
+check('with the walls cleared the robot is no longer boxed in',
+      escaped.true.x > HALF_WALL, `reached x ${escaped.true.x.toFixed(1)}`);
+check('and the sensors agree there is nothing there',
+      escaped.beams.every(b => !b.hit),
+      `${escaped.beams.filter(b => b.hit).length} of ${escaped.beams.length} still returning`);
+
+// Every wall in the default field is axis-aligned, so the general segment case
+// never runs unless a test asks for it. A diagonal wall met at a diagonal body
+// angle is the one that would expose a bad frame transform or a bad clip.
+api.fieldClear();
+api.addSeg(20, -40, -40, 20, 0);        // 45 deg, kind 0 so it is solid
+api.reset(-60, -60, 45);
+api.setDrive(9, 9);
+run(20000);
+api.setDrive(0, 0);
+run(400);
+{
+  const s = st();
+  // Exact separation between the body and the finite segment: sample the
+  // segment, take the point-to-box exterior distance in the body frame.
+  const t = (90 - s.true.h) * Math.PI / 180;
+  const ct = Math.cos(t), stt = Math.sin(t);
+  let sep = Infinity;
+  for (let i = 0; i <= 4000; i++) {
+    const u = i / 4000;
+    const dx = (20 + (-40 - 20) * u) - s.true.x;
+    const dy = (-40 + (20 - -40) * u) - s.true.y;
+    const lx =  dx * ct + dy * stt;
+    const ly = -dx * stt + dy * ct;
+    const ox = Math.max(Math.abs(lx) - L / 2, 0);
+    const oy = Math.max(Math.abs(ly) - W / 2, 0);
+    sep = Math.min(sep, Math.hypot(ox, oy));
+  }
+  check('a diagonal wall stops the body exactly, not through it',
+        s.colliding && sep < 0.05, `colliding=${s.colliding}, separation ${sep.toFixed(4)} in`);
+}
+
+api.fieldDefault();
+api.setParam('collideObstacles', 1);
+api.reset(-48, -60, 90);
 
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : failures + ' CHECK(S) FAILED'}\n`);
 process.exit(failures === 0 ? 0 : 1);
