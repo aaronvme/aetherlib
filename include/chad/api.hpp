@@ -28,6 +28,5 @@
 
 #include "chad/chassis.hpp"
 #include "chad/util/sensor_calibrator.hpp"
-#include "chad/movement_control/ltv.hpp"
 
 #include "chad/auton_selector/autonselector.hpp"

@@ -19,6 +19,8 @@ extern pros::MotorGroup liftMotor;
 extern ScaledIMU imu;
 extern pros::Optical frontOptic;
 
+extern pros::adi::Pneumatics claw;
+
 extern pros::adi::Pneumatics matchLoadGate;
 extern pros::adi::Pneumatics lift;
 extern pros::adi::Pneumatics leftDescoreArm;

@@ -5,6 +5,7 @@
 
 #include "chad/api.hpp"
 #include "chad/util/lift_fit.hpp"
+#include "gamespecific/lift.hpp"
 
 namespace chad {
 using namespace autons;
@@ -203,7 +204,7 @@ void autonCalibrateLift() {
     if (preferPivot) {
         const float horizontalRaw =
             static_cast<float>(loRaw) + sign * pivoted.horizontalMotorDeg;
-        out.result("LIFT_IS_PIVOTED = true");
+        out.result("LIFT_KIND = LiftKind::Pivoted");
         out.result("kG = %.1f", pivoted.kG);
         out.result("MOTOR_DEG_PER_ARM_DEG=%.2f", sign * ratio);
         out.result("HORIZONTAL_MOTOR_DEG=%.0f", horizontalRaw);
@@ -213,7 +214,8 @@ void autonCalibrateLift() {
             out.result("set kKnownRatio and rerun");
         }
     } else {
-        out.result("LIFT_IS_PIVOTED = false");
+        out.result("LIFT_KIND = LiftKind::Cascade");
+        out.result("LIFT_BOTTOM_MOTOR_DEG = %.0f", loRaw);
         if (sloped) {
             const float perRaw = sign * flat.perMotorDeg;
             const float baseRaw =
@@ -237,6 +239,16 @@ void autonCalibrateLift() {
     } else {
         out.result("friction <= %.1f, emf unsplit", gap1);
         out.result("gaps did not rise with speed");
+    }
+
+    const double lowIn = ::liftHeightAt(loRaw);
+    const double highIn = ::liftHeightAt(hiRaw);
+    if (std::isfinite(lowIn) && std::isfinite(highIn)) {
+        out.result("travel %.1f in / %.0f deg", std::fabs(highIn - lowIn),
+                   travel);
+    } else {
+        out.result("travel %.0f deg, no height yet", travel);
+        out.result("measure the spool and stages");
     }
 
     const float drift = std::fabs(flat.meanPower - flat2.meanPower);

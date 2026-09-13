@@ -216,12 +216,22 @@ void OdomTracking::startBackgroundOdom() {
 void OdomTracking::stopBackgroundOdom() {
     mBackgroundUpdatesEnabled = false;
     mRunning = false;
-    if (mTask != nullptr) {
-        pros::delay(20);
-        mTask->remove();
-        delete mTask;
-        mTask = nullptr;
+    if (mTask == nullptr) return;
+
+    const uint32_t start = pros::millis();
+    while (pros::millis() - start < 200) {
+        const uint32_t state = mTask->get_state();
+        if (state == pros::E_TASK_STATE_DELETED ||
+            state == pros::E_TASK_STATE_INVALID) break;
+        pros::delay(5);
     }
+    const uint32_t state = mTask->get_state();
+    if (state != pros::E_TASK_STATE_DELETED &&
+        state != pros::E_TASK_STATE_INVALID) {
+        mTask->remove();
+    }
+    delete mTask;
+    mTask = nullptr;
 }
 
 bool OdomTracking::isBackgroundOdomRunning() const {

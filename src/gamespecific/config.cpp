@@ -74,8 +74,8 @@ pros::MotorGroup liftMotor({20, 15, -14}, pros::v5::MotorGears::green, pros::v5:
 
 ScaledIMU imu(13, 360.0, 359.0);
 
-pros::adi::Pneumatics claw('D', false, false);
-pros::adi::Pneumatics flip('C', true, true);
+pros::adi::Pneumatics claw('A', false, false);
+// pros::adi::Pneumatics flip('C', true, true);
 
 Drivetrain drivetrain(&leftMotors, &rightMotors,
                       11.67f,
@@ -110,7 +110,7 @@ std::array<Pose, MAX_DISTANCE_SENSORS> sensorMounts = {{
 
 ChassisConfig chassisConfig = {
     .lateralGains = { 9.5f, 0.0f, 0.4f },
-    .angularGains = { 140.0, 0.0f, 7.0f },
+    .angularGains = { 140.0, 0.0f, 8.0f },
     .lateralWindupRange = 0.0f,
     .angularWindupRange = 0.0f,
     .lateralDerivativeFilter = 0.6f,
