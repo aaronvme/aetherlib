@@ -49,7 +49,11 @@ function mkEl(id) {
     disabled: false,
     width: 900,
     height: 900,
-    style: {},
+    style: {
+      vars: {},
+      setProperty(k, v) { this.vars[k] = v; },
+      removeProperty(k) { delete this.vars[k]; },
+    },
     dataset: {},
     children: [],
     classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
@@ -91,11 +95,23 @@ globalThis.document = {
   querySelectorAll: () => [],
   addEventListener() {},
   body: mkEl('body'),
+  documentElement: el('html'),
 };
 globalThis.window = globalThis;
 globalThis.devicePixelRatio = 1;
+globalThis.innerWidth = 1600;
+globalThis.getComputedStyle = () => ({
+  getPropertyValue: k => el('html').style.vars[k] ?? '0',
+});
 globalThis.addEventListener = () => {};
 globalThis.ResizeObserver = class { observe() {} disconnect() {} };
+// The field backdrop is loaded as an <img>; nothing here decodes one, so the
+// stub only has to let the load path run and report a miss.
+globalThis.Image = class {
+  set src(v) { this._src = v; if (this.onerror) this.onerror(); }
+  get src() { return this._src; }
+};
+globalThis.URL.createObjectURL = () => 'blob:stub';
 globalThis.performance = { now: () => nowMs };
 Object.defineProperty(globalThis.navigator, 'clipboard', {
   value: { writeText: async () => {} }, configurable: true,
@@ -286,6 +302,54 @@ try {
   err = `${e.constructor.name}: ${e.message}`;
 }
 check('dragging on the field does not throw', err === null, err ?? '');
+
+console.log('\n== panel resizing ==');
+
+// The stub reports every element as 900 px wide, so dragging 300 px left
+// should land the panel on 600 -- below the 720 px cap, so the clamp does
+// not mask the arithmetic.
+{
+  const vars = el('html').style.vars;
+  fire('gutter-left', 'pointerdown',
+       { preventDefault() {}, pointerId: 1, clientX: 900 });
+  fire('gutter-left', 'pointermove', { clientX: 600 });
+  check('dragging a gutter resizes the panel', vars['--left-w'] === '600px',
+        `--left-w = ${vars['--left-w']}`);
+
+  // Past the 45% cap, which exists so the field cannot be squeezed away.
+  fire('gutter-left', 'pointermove', { clientX: 3000 });
+  check('and is clamped to a fraction of the window',
+        parseFloat(vars['--left-w']) <= innerWidth * 0.45 + 0.5,
+        `--left-w = ${vars['--left-w']}, cap ${innerWidth * 0.45}`);
+
+  // And to a floor, so it cannot be dragged shut and become ungrabbable.
+  fire('gutter-left', 'pointermove', { clientX: -3000 });
+  check('and to a floor', parseFloat(vars['--left-w']) >= 150,
+        `--left-w = ${vars['--left-w']}`);
+
+  fire('gutter-left', 'pointerup', {});
+  check('the width is remembered',
+        store.get('chad-sim.panel.left') === String(parseFloat(vars['--left-w'])),
+        `stored ${store.get('chad-sim.panel.left')}`);
+
+  fire('gutter-left', 'dblclick', {});
+  check('double-click restores the default',
+        vars['--left-w'] === undefined &&
+        !store.has('chad-sim.panel.left'),
+        `--left-w = ${vars['--left-w']}`);
+}
+
+// A long route fills the report until it buries the run buttons under it.
+{
+  const card = el('report-card');
+  let collapsed = false;
+  card.classList.toggle = (name, on) => { collapsed = on; return on; };
+  card.classList.contains = () => collapsed;
+  fire('report-toggle', 'click', {});
+  check('the run report collapses', collapsed === true, `collapsed=${collapsed}`);
+  fire('report-toggle', 'click', {});
+  check('and reopens', collapsed === false, `collapsed=${collapsed}`);
+}
 
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : failures + ' CHECK(S) FAILED'}\n`);
 process.exit(failures === 0 ? 0 : 1);

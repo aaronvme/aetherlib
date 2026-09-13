@@ -604,6 +604,18 @@ not guess at dimensions I could not verify.
 Keep it in step with `kFieldWalls` / `kFieldCircles` in `mcl_tracking.hpp` —
 where the two disagree is exactly where MCL will mislocalize on a real field.
 
+### A field image behind it
+
+**View -> Field image** draws a render or photo under the vector geometry,
+stretched to the 144 in square; path.jerryio's field images work well. It loads
+`sim/web/field.png` on boot, or pick a file to swap one in for the session with
+no server involved.
+
+It is decoration. The physics still collides with the geometry drawn over it, so
+the image is aligned to the field rather than the other way round -- hence the
+scale slider, since most renders include the perimeter wall and the 144 in square
+does not. Not committed either: the VEX render is not ours to ship.
+
 ## Not built yet
 
 - **A load model.** Motion is kinematic: voltage maps to a target wheel speed

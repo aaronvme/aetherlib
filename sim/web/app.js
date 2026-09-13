@@ -129,6 +129,7 @@ fitCanvas();
 
 const LAYERS = [
   ['field',     'field',         true],
+  ['photo',     'field image',   true],
   ['grid',      'tile grid',     true],
   ['obstacles', 'goals & posts', true],
   ['robot',     'robot (true)',  true],
@@ -148,10 +149,36 @@ const layers = Object.fromEntries(LAYERS.map(([k, , v]) => [k, v]));
 const layersEl = document.getElementById('layers');
 for (const [key, label, on] of LAYERS) {
   const l = document.createElement('label');
-  l.innerHTML = `<input type="checkbox" ${on ? 'checked' : ''}> ${label}`;
+  l.innerHTML = `<input type="checkbox" data-layer="${key}" ${on ? 'checked' : ''}> ${label}`;
   l.querySelector('input').addEventListener('change', e => { layers[key] = e.target.checked; });
   layersEl.appendChild(l);
 }
+
+// ============================================================================
+// Field image
+// ============================================================================
+//
+// A render or photo drawn under the vector geometry -- path.jerryio's field
+// images work well. Decoration only: the physics still collides with
+// fieldGeom, so the image is aligned to the field rather than the other way
+// round, and scale exists because most renders include the perimeter wall
+// while the 144 in square does not.
+
+let fieldImg = null;
+const imgPref = k => Number(localStorage.getItem('chad-sim.fieldImg.' + k));
+let imgAlpha = imgPref('alpha') || 0.75;
+let imgScale = imgPref('scale') || 1.0;
+
+function setFieldImage(src) {
+  const img = new Image();
+  img.onload = () => { fieldImg = img; };
+  img.onerror = () => { fieldImg = null; };
+  img.src = src;
+}
+
+// Absent by default, and silently so: the VEX field render is not ours to
+// ship, so you drop your own in as sim/web/field.png.
+setFieldImage('field.png');
 
 // ============================================================================
 // Parameters
@@ -579,6 +606,86 @@ document.getElementById('btn-place').addEventListener('click', doReset);
   });
 }
 
+// ============================================================================
+// Panel sizing
+// ============================================================================
+//
+// The two gutters drive the grid's own track widths, so the field restyles
+// itself from the space actually left over and the canvas ResizeObserver
+// picks the new size up. Widths are remembered per side.
+
+{
+  const root = document.documentElement;
+  const SIDES = {
+    'gutter-left':  { prop: '--left-w',  key: 'left',  grows: 1 },
+    'gutter-right': { prop: '--right-w', key: 'right', grows: -1 },
+  };
+  const MIN = 150;
+  // A panel may not exceed 45% of the window, so the field cannot be
+  // squeezed to nothing. The fallback keeps the clamp finite if a host
+  // reports no width -- NaN here would set the track to NaNpx.
+  const MAX = () => Math.max(MIN, (window.innerWidth || 1200) * 0.45);
+
+  for (const [id, side] of Object.entries(SIDES)) {
+    const saved = Number(localStorage.getItem('chad-sim.panel.' + side.key));
+    if (saved >= MIN) root.style.setProperty(side.prop, saved + 'px');
+
+    const el = document.getElementById(id);
+    if (el === null) continue;
+
+    el.addEventListener('pointerdown', e => {
+      e.preventDefault();
+      el.setPointerCapture(e.pointerId);
+      el.classList.add('dragging');
+
+      // Measured off the neighbouring panel rather than the CSS variable,
+      // which may still be a clamp() expression on the first drag.
+      const panel = document.getElementById(side.key);
+      const start = panel.getBoundingClientRect().width;
+      const startX = e.clientX;
+
+      const move = ev => {
+        const w = start + (ev.clientX - startX) * side.grows;
+        root.style.setProperty(side.prop,
+                               Math.min(MAX(), Math.max(MIN, w)) + 'px');
+      };
+      const up = () => {
+        el.classList.remove('dragging');
+        el.removeEventListener('pointermove', move);
+        el.removeEventListener('pointerup', up);
+        localStorage.setItem('chad-sim.panel.' + side.key,
+                             String(parseFloat(
+                               getComputedStyle(root).getPropertyValue(side.prop))));
+      };
+      el.addEventListener('pointermove', move);
+      el.addEventListener('pointerup', up);
+    });
+
+    el.addEventListener('dblclick', () => {
+      root.style.removeProperty(side.prop);
+      localStorage.removeItem('chad-sim.panel.' + side.key);
+    });
+  }
+}
+
+// The report grows a row per motion, so a long route can bury the buttons
+// under it. Collapsed state sticks.
+{
+  const card = document.getElementById('report-card');
+  const btn = document.getElementById('report-toggle');
+  const apply = off => {
+    card.classList.toggle('collapsed', off);
+    btn.innerHTML = off ? '+' : '&minus;';
+    btn.title = off ? 'expand' : 'collapse';
+  };
+  apply(localStorage.getItem('chad-sim.reportOff') === '1');
+  btn.addEventListener('click', () => {
+    const off = !card.classList.contains('collapsed');
+    apply(off);
+    localStorage.setItem('chad-sim.reportOff', off ? '1' : '0');
+  });
+}
+
 document.getElementById('chk-collide').addEventListener('change', e => {
   api.setParam('collideObstacles', e.target.checked ? 1 : 0);
 });
@@ -749,6 +856,33 @@ document.getElementById('btn-field-apply').addEventListener('click', () => {
 document.getElementById('btn-field-reset').addEventListener('click', () => {
   api.fieldDefault();
   showFieldGeom();
+});
+
+const imgAlphaEl = document.getElementById('field-img-alpha');
+const imgScaleEl = document.getElementById('field-img-scale');
+imgAlphaEl.value = String(imgAlpha);
+imgScaleEl.value = String(imgScale);
+
+imgAlphaEl.addEventListener('input', e => {
+  imgAlpha = Number(e.target.value);
+  localStorage.setItem('chad-sim.fieldImg.alpha', String(imgAlpha));
+});
+imgScaleEl.addEventListener('input', e => {
+  imgScale = Number(e.target.value);
+  localStorage.setItem('chad-sim.fieldImg.scale', String(imgScale));
+});
+
+// Loaded straight off disk rather than uploaded, so this works with no
+// server at all. It lasts the session; drop the file in as sim/web/field.png
+// to have it back on the next reload.
+document.getElementById('field-img-file').addEventListener('change', e => {
+  const file = e.target?.files?.[0];
+  if (!file) return;
+  const url = URL.createObjectURL(file);
+  setFieldImage(url);
+  layers.photo = true;
+  const box = document.querySelector('#layers input[data-layer="photo"]');
+  if (box) box.checked = true;
 });
 
 // ============================================================================
@@ -981,6 +1115,21 @@ function drawGrid() {
   }
 }
 
+function drawFieldImage() {
+  if (!fieldImg) return;
+  const [x0, y0] = toPx(-72, 72);
+  const side = 144 * SCALE;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(x0, y0, side, side);
+  ctx.clip();
+  ctx.globalAlpha = imgAlpha;
+  const grown = side * imgScale;
+  const off = (side - grown) / 2;
+  ctx.drawImage(fieldImg, x0 + off, y0 + off, grown, grown);
+  ctx.restore();
+}
+
 function drawField() {
   const [x0, y0] = toPx(-72, 72);
   ctx.fillStyle = '#171a20';
@@ -1210,6 +1359,7 @@ function drawGhost(row) {
 function render(s) {
   ctx.clearRect(0, 0, SIZE, SIZE);
   if (layers.field) drawField();
+  if (layers.photo) drawFieldImage();
   if (layers.grid) drawGrid();
   if (layers.obstacles) drawObstacles();
   if (layers.plan) drawPlan();

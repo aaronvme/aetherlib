@@ -10,6 +10,7 @@
 
   --left-w:  clamp(184px, 16.5vw, 300px);
   --right-w: clamp(240px, 21.5vw, 380px);
+  --gutter-w: 5px;
   --scroll:       #39404e;
   --scroll-hover: #4c5566;
 
@@ -61,7 +62,8 @@ html, body {
 
 #app {
   display: grid;
-  grid-template-columns: var(--left-w) minmax(0, 1fr) var(--right-w);
+  grid-template-columns:
+    var(--left-w) var(--gutter-w) minmax(0, 1fr) var(--gutter-w) var(--right-w);
   height: 100%;
   min-height: 0;
 }
@@ -79,6 +81,19 @@ html, body {
 }
 #left  { border-right: 1px solid var(--line); }
 #right { border-left: 1px solid var(--line); }
+
+/* ---------------- resize gutters ----------------
+   Grid children rather than absolutely positioned overlays, so they
+   cannot end up on top of a panel control at some window size. */
+
+.gutter {
+  cursor: col-resize;
+  background: var(--panel);
+  border-left: 1px solid var(--line);
+  border-right: 1px solid var(--line);
+  touch-action: none;
+}
+.gutter:hover, .gutter.dragging { background: var(--scroll-hover); }
 
 /* ---------------- stage ---------------- */
 
@@ -144,6 +159,22 @@ html, body {
 /* Collapsed keeps the clock visible and gives the field back. */
 #hud.collapsed .row:not(:first-of-type) { display: none; }
 #hud.collapsed { min-width: 0; }
+
+/* A card header button, sized to sit on the h3 baseline. */
+.cardbtn {
+  float: right;
+  width: 1.5em;
+  height: 1.5em;
+  padding: 0;
+  line-height: 1.1;
+  text-align: center;
+  background: transparent;
+  color: var(--dim);
+  border: 0;
+  cursor: pointer;
+}
+.cardbtn:hover { color: var(--text); }
+#report-card.collapsed #route-report { display: none; }
 
 #hud-toggle {
   position: absolute;
@@ -289,7 +320,7 @@ input[type="range"] { accent-color: var(--accent); }
   /* Relative, so a short window shrinks the editor instead of overflowing the
      panel and pushing the run buttons off screen. */
   min-height: 8em;
-  resize: none;
+  resize: vertical;
   background: #12151a;
   color: #cfd6e4;
   border: 1px solid var(--line);
