@@ -402,8 +402,10 @@ void Chassis::executeCurrentMotion() {
         }
         case MotionType::TurnPoint: {
             angLimit = req.turnPointParams.maxSpeed;
+            const float faceOffset = req.turnPointParams.offset +
+                (req.turnPointParams.forwards ? 0.0f : 180.0f);
             float rawErrRad = headingToPointOffset(pose, req.targetX, req.targetY,
-                                                   req.turnPointParams.offset);
+                                                   faceOffset);
             float headingErrRad = resolveTurnError(rawErrRad, req.turnPointParams.direction);
             float tolRad = degToRad(req.turnPointParams.targetTolerance);
             if (std::fabs(rawErrRad) < tolRad) headingErrRad = rawErrRad;

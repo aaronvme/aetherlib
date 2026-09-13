@@ -31,6 +31,8 @@ struct TurntoHeadingParams {
 };
 
 struct TurnToPointParams {
+    // false turns the back of the robot toward the point
+    bool forwards{true};
     TurnDirection direction{TurnDirection::SHORTEST};
     float maxSpeed{127.0f};
     float minSpeed{0.0f};
