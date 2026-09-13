@@ -326,6 +326,29 @@ check('and the offset held through it',
       `odom - true was ${gapBefore.toFixed(1)} deg, now ${gapAfter.toFixed(1)}`);
 api.stopAuton();
 
+console.log('\n== the clock restarts with the routine ==');
+
+// t is what you read a route's timings against, so it has to be measured from
+// the start of the run and not from whenever the page booted.
+api.reset(-48, -60, 90);
+run(3000);
+const beforeRun = st().t;
+api.routeClear();
+api.routePush(OP.DELAY, 100, 0, 0, 0);
+api.routeRun();
+run(50);
+check('t is rewound when a route starts', st().t < 0.2,
+      `t was ${beforeRun.toFixed(2)} s, now ${st().t.toFixed(2)}`);
+api.stopAuton();
+
+run(2000);
+api.runAuton(0);
+run(50);
+check('and when a compiled auton starts', st().t < 0.2,
+      `t = ${st().t.toFixed(2)} s`);
+api.stopAuton();
+run(200);
+
 console.log('\n== auton source runs the real API ==');
 
 // Parse real C++, push it, run it to completion, and hand back the report.

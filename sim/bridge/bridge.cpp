@@ -354,12 +354,25 @@ const char* sim_auton_symbol(int i) {
     return kAutons[i].symbol;
 }
 
+/// Rewind the clock for a fresh run, so the HUD's t and every duration in the
+/// report are measured from the start of the routine rather than from boot.
+/// Paired with resyncSleepers(), or the background loops stay due at times
+/// that no longer exist and stall for one period.
+void beginRun() {
+    if (gRouteTask != sim::kInvalidTask) sim::sched().kill(gRouteTask);
+    gRouteTask = sim::kInvalidTask;
+    gManualActive = false;
+    sim::resetClock();
+    sim::sched().resyncSleepers();
+    // The sampler keys off the clock it was just handed a new zero for.
+    gRecordNextMs = 0.0;
+    breakTrails();
+}
+
 EMSCRIPTEN_KEEPALIVE
 void sim_run_auton(int index) {
     if (index < 0 || index >= kAutonCount) return;
-    if (gRouteTask != sim::kInvalidTask) sim::sched().kill(gRouteTask);
-
-    gManualActive = false;
+    beginRun();
     auto fn = kAutons[index].fn;
     // Runs on its own fiber, so blocking calls like waitUntilSettled() behave
     // exactly as they do on the brain.
@@ -897,8 +910,7 @@ void sim_route_async() {
 EMSCRIPTEN_KEEPALIVE
 void sim_route_run() {
     if (gRoute.empty()) return;
-    if (gRouteTask != sim::kInvalidTask) sim::sched().kill(gRouteTask);
-    gManualActive = false;
+    beginRun();
     gRouteMaxSpeed = 127.0f;
     gRouteTask = sim::sched().spawn([]() { execRoute(); }, "dsl-route");
 }
