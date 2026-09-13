@@ -91,10 +91,10 @@ void breakTrails() {
 
 struct AutonEntry { const char* name; void (*fn)(); };
 const AutonEntry kAutons[] = {
-    {"Example",   chad::autonExample},
-    {"Red Left",  chad::autonRedLeft},
-    {"Blue Left", chad::autonBlueLeft},
-    {"Skills",    chad::autonSkills},
+    {"Example",    chad::autonExample},
+    {"Red 3 Pin",  chad::autonRed3Pin},
+    {"Blue 3 Pin", chad::autonBlue3Pin},
+    {"Skills",     chad::autonSkills},
 };
 constexpr int kAutonCount = static_cast<int>(sizeof(kAutons) / sizeof(kAutons[0]));
 
