@@ -508,6 +508,18 @@ export function parseAuton(text) {
       continue;
     }
 
+    // --- claw.extend() / retract() / toggle() -------------------------------
+    // The only subsystem the sim models, because it is the only one with a
+    // state worth drawing. Everything else still lands in notes.
+    const clawCall = /^(?:chad::)?claw\s*\.\s*(extend|retract|toggle)\s*\(\s*\)$/
+      .exec(body);
+    if (clawCall) {
+      const how = { retract: 0, extend: 1, toggle: 2 }[clawCall[1]];
+      cmds.push([OP.CLAW, how, 0, 0, 0]);
+      opts.push({});
+      continue;
+    }
+
     // --- chassis.method(...) ------------------------------------------------
     const call = /^(?:chad::)?chassis\s*\.\s*([A-Za-z_]\w*)\s*\(([\s\S]*)\)$/.exec(body);
     if (!call) {

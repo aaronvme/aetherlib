@@ -157,7 +157,7 @@ const names = body.split('\n').slice(1)
 const expected = ['OP_SET_POSE', 'OP_MOVE_TO', 'OP_TURN_TO_HEADING', 'OP_TURN_TO_POINT',
                   'OP_DRIVE', 'OP_BOOMERANG', 'OP_ARC', 'OP_SWING', 'OP_DELAY',
                   'OP_WAIT_SETTLED', 'OP_LATERAL_GAINS', 'OP_ANGULAR_GAINS', 'OP_MAX_SPEED',
-                  'OP_FOLLOW_PATH'];
+                  'OP_FOLLOW_PATH', 'OP_CLAW'];
 check('bridge.cpp declares the ops in the expected order', eq(names, expected),
       names.join(' '));
 

@@ -31,6 +31,7 @@ export const OP = {
   SET_POSE: 0, MOVE_TO: 1, TURN_HEADING: 2, TURN_POINT: 3, DRIVE: 4,
   BOOMERANG: 5, ARC: 6, SWING: 7, DELAY: 8, WAIT_SETTLED: 9,
   LATERAL_GAINS: 10, ANGULAR_GAINS: 11, MAX_SPEED: 12, FOLLOW_PATH: 13,
+  CLAW: 14,
 };
 
 const truthy = v => v === 'true' || v === '1';

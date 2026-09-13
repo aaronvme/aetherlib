@@ -349,6 +349,39 @@ check('and when a compiled auton starts', st().t < 0.2,
 api.stopAuton();
 run(200);
 
+console.log('\n== the claw ==');
+
+// The one subsystem with a state worth drawing, so it is the one the route
+// opcodes reach. Everything else is still skipped and listed.
+api.reset(-48, -60, 90);
+api.routeClear();
+api.routePush(OP.CLAW, 1, 0, 0, 0);
+api.routeRun();
+run(100);
+check('extend opens the claw', st().claw === 1, `claw=${st().claw}`);
+
+api.routeClear();
+api.routePush(OP.CLAW, 0, 0, 0, 0);
+api.routeRun();
+run(100);
+check('retract closes it', st().claw === 0, `claw=${st().claw}`);
+
+api.routeClear();
+api.routePush(OP.CLAW, 2, 0, 0, 0);
+api.routeRun();
+run(100);
+check('toggle flips it', st().claw === 1, `claw=${st().claw}`);
+api.stopAuton();
+
+// Through the parser too, since that is how an auton reaches it.
+{
+  runSource('void a() {' +
+    ' chassis.setPose(Pose::fromVex(-48.0f, -60.0f, 90.0f));' +
+    ' claw.retract(); }', 3000);
+  check('a routed auton actuates the claw', st().claw === 0,
+        `claw=${st().claw}`);
+}
+
 console.log('\n== auton source runs the real API ==');
 
 // Parse real C++, push it, run it to completion, and hand back the report.

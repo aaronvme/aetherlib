@@ -440,5 +440,23 @@ console.log('\n== for loops ==');
         `${fixed.filter(p => p.xRange).length} of ${fixed.length} draggable`);
 }
 
+console.log('\n== the claw ==');
+
+{
+  const r = parseAuton('void a() { claw.extend(); claw.retract(); claw.toggle(); }');
+  check('claw calls route instead of being skipped',
+        !r.error && r.cmds.length === 3 && r.notes.length === 0,
+        r.error ?? `${r.cmds.length} commands, ${r.notes.length} skipped`);
+  check('and carry which way they move',
+        !r.error && r.cmds.map(c => c[1]).join(',') === '1,0,2',
+        r.error ?? r.cmds.map(c => c[1]).join(','));
+
+  // A different subsystem still goes to notes rather than erroring.
+  const lift = parseAuton('void a() { liftToPin(0, 1000); }');
+  check('other subsystems are still listed, not routed',
+        !lift.error && lift.cmds.length === 0 && lift.notes.length === 1,
+        lift.error ?? lift.notes.join(' | '));
+}
+
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : failures + ' CHECK(S) FAILED'}\n`);
 process.exit(failures === 0 ? 0 : 1);

@@ -422,6 +422,7 @@ enum RouteOp {
     OP_ANGULAR_GAINS,
     OP_MAX_SPEED,
     OP_FOLLOW_PATH,
+    OP_CLAW,             // a: 0 retract, 1 extend, 2 toggle
 };
 
 // One `.field = value` from a designated initializer in the route source.
@@ -768,6 +769,13 @@ void execRoute() {
             case OP_MAX_SPEED:
                 gRouteMaxSpeed = c.a;
                 break;
+            case OP_CLAW: {
+                const int how = static_cast<int>(c.a);
+                if (how == 0) chad::claw.retract();
+                else if (how == 1) chad::claw.extend();
+                else chad::claw.toggle();
+                break;
+            }
             case OP_FOLLOW_PATH: {
                 const int start = static_cast<int>(c.a);
                 const int count = static_cast<int>(c.b);
@@ -1511,6 +1519,7 @@ const char* sim_state_json() {
         "\"err\":{\"dist\":%.3f,\"heading\":%.2f},"
         "\"vel\":{\"lin\":%.2f,\"ang\":%.2f,\"left\":%.2f,\"right\":%.2f},"
         "\"colliding\":%s,\"routeRunning\":%s,\"settled\":%s,"
+        "\"claw\":%d,"
         "\"locMode\":%d,\"tasks\":%d,\"beams\":[",
         sim::preciseMillis() / 1000.0,
         t.x, t.y, chad::stdRadToVexDeg(t.theta),
@@ -1527,6 +1536,7 @@ const char* sim_state_json() {
         t.colliding ? "true" : "false",
         sim_route_running() ? "true" : "false",
         chad::chassis.isSettled() ? "true" : "false",
+        chad::claw.is_extended() ? 1 : 0,
         gLocMode, sim::sched().liveTaskCount());
 
     bool first = true;
