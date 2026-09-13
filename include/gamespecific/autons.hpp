@@ -24,6 +24,6 @@ void autonTuneLiftPresets();
 
 //tuffness
 void autonSkills();
-void autonRedLeft();
-void autonBlueLeft();
+void autonRed3Pin();
+void autonBlue3Pin();
 }

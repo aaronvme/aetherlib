@@ -2,6 +2,7 @@
 
 #include "gamespecific/gamespecific_api.hpp"
 #include "chad/api.hpp"
+#include "gamespecific/autons.hpp"
 
 using namespace chad;
 
@@ -17,7 +18,7 @@ void disabled() {}
 void competition_initialize() {}
 
 void autonomous() {
-    chassis.startTracking();
+    autonBlue3Pin();
 }
 
 void opcontrol() {
