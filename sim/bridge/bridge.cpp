@@ -619,6 +619,10 @@ void execRoute() {
     gReport.clear();
     gReport.reserve(gRoute.size());
 
+    // True until the first motion runs, which is what makes a setPose an
+    // opening pose rather than a re-localization.
+    bool startPhase = true;
+
     for (std::size_t i = 0; i < gRoute.size(); i++) {
         gRouteIndex = static_cast<int>(i);
         const RouteCmd& c = gRoute[i];
@@ -646,8 +650,12 @@ void execRoute() {
         switch (c.op) {
             case OP_SET_POSE: {
                 const chad::Pose p{c.a, c.b, chad::vexToStdRad(c.c)};
-                breakTrails();
-                sim::world().resetTo(p);
+                // A later setPose corrects the estimate only: moving ground
+                // truth would erase the error the sim exists to show.
+                if (startPhase) {
+                    breakTrails();
+                    sim::world().resetTo(p);
+                }
                 chad::chassis.setPose(p);
                 chad::chassis.mcl().setPose(p);
                 break;
@@ -764,6 +772,10 @@ void execRoute() {
             }
             default:
                 break;
+        }
+
+        if ((c.op >= OP_MOVE_TO && c.op <= OP_SWING) || c.op == OP_FOLLOW_PATH) {
+            startPhase = false;
         }
 
         gRouteSampling = false;

@@ -259,6 +259,34 @@ check('route drove toward its waypoint', s.true.x > -40,
       `true=(${s.true.x.toFixed(1)}, ${s.true.y.toFixed(1)})`);
 api.stopAuton();
 
+console.log('\n== setPose places the robot only at the start ==');
+
+// The opening setPose is where the auton says it begins, so it moves ground
+// truth. A later one is a re-localization: moving truth to it would erase the
+// error the sim exists to show.
+api.reset(0, 0, 0);
+api.routeClear();
+api.routePush(OP.SET_POSE, -48, -60, 90, 0);
+api.routePush(OP.DRIVE, 12, 0, 0, 2500);
+api.routePush(OP.SET_POSE, 24, 24, 45, 0);
+api.routeRun();
+// Sampled early: the drive that follows is already under way at 200 ms.
+run(50);
+s = st();
+check('the opening setPose places the robot',
+      Math.hypot(s.true.x + 48, s.true.y + 60) < 2,
+      `true=(${s.true.x.toFixed(1)}, ${s.true.y.toFixed(1)})`);
+
+run(5000);
+s = st();
+check('a later setPose leaves ground truth alone',
+      Math.hypot(s.true.x - 24, s.true.y - 24) > 20,
+      `true=(${s.true.x.toFixed(1)}, ${s.true.y.toFixed(1)})`);
+check('and still moves the estimate',
+      Math.hypot(s.odom.x - 24, s.odom.y - 24) < 1,
+      `odom=(${s.odom.x.toFixed(1)}, ${s.odom.y.toFixed(1)})`);
+api.stopAuton();
+
 console.log('\n== auton source runs the real API ==');
 
 // Parse real C++, push it, run it to completion, and hand back the report.
