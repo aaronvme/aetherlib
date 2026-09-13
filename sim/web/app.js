@@ -133,6 +133,7 @@ const LAYERS = [
   ['grid',      'tile grid',     true],
   ['obstacles', 'goals & posts', true],
   ['robot',     'robot (true)',  true],
+  ['claw',      'claw',          true],
   ['odom',      'odom pose',     true],
   ['mcl',       'mcl pose',      true],
   ['particles', 'MCL particles', true],
@@ -1291,6 +1292,34 @@ function drawPlan() {
   });
 }
 
+// Jaws on the BACK of the robot: every pin grab in the match autons reverses
+// into the pin, so that is the end the claw is on. Pivoted rather than slid,
+// because a pneumatic claw hinges.
+function drawClaw(pose, extended) {
+  const rad = (90 - pose.h) * Math.PI / 180;
+  const [px, py] = toPx(pose.x, pose.y);
+  const L = BODY_L * SCALE;
+  const reach = 0.34 * L;
+  const hinge = 0.17 * L;
+  const spread = extended ? 0.85 : -0.25;   // radians off the centre line
+
+  ctx.save();
+  ctx.translate(px, py);
+  ctx.rotate(-rad);
+  ctx.strokeStyle = extended ? '#f97316' : '#64748b';
+  ctx.lineWidth = 2.5;
+  ctx.lineCap = 'round';
+  for (const side of [-1, 1]) {
+    ctx.beginPath();
+    ctx.moveTo(-L / 2, side * hinge);
+    ctx.lineTo(-L / 2 - reach * Math.cos(spread),
+               side * (hinge + reach * Math.sin(spread)));
+    ctx.stroke();
+  }
+  ctx.lineCap = 'butt';
+  ctx.restore();
+}
+
 // The footprint the physics collides with, so the drawn box is the box that
 // stops on a wall rather than a 15 in stand-in for it.
 const BODY_L = api.getParam('robotLengthIn');
@@ -1372,6 +1401,7 @@ function render(s) {
   if (layers.mcl && (s.locMode & 1)) drawPoseMarker(s.mcl, '#f472b6');
   if (layers.ghost && replayRow) drawGhost(replayRow);
   if (layers.robot) drawRobot(s.true, s.colliding ? 'rgb(248,113,113)' : 'rgb(74,222,128)', true);
+  if (layers.claw) drawClaw(s.true, !!s.claw);
 }
 
 // ============================================================================
