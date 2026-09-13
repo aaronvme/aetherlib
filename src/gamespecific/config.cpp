@@ -74,8 +74,8 @@ pros::MotorGroup liftMotor({20, 15, -14}, pros::v5::MotorGears::green, pros::v5:
 
 ScaledIMU imu(13, 360.0, 359.0);
 
-pros::adi::Pneumatics claw('D', false, false);
-pros::adi::Pneumatics flip('C', true, true);
+pros::adi::Pneumatics claw('A', false, false);
+// pros::adi::Pneumatics flip('C', true, true);
 
 Drivetrain drivetrain(&leftMotors, &rightMotors,
                       11.67f,
