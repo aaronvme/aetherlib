@@ -17,9 +17,7 @@
 #include "../world/field.hpp"
 #include "../world/world.hpp"
 
-#include "chad/movement_control/ltv.hpp"
 #include "chad/movement_control/spline.hpp"
-#include "chad/movement_control/ltvlqr.hpp"
 
 #include "gamespecific/autons.hpp"
 #include "gamespecific/config.hpp"
@@ -462,54 +460,6 @@ chad::SwingParams gSwing;
 // route can follow several paths.
 std::vector<chad::Pose> gPath;
 
-// --- LTV / LQR follower -----------------------------------------------------
-//
-// Nothing in the project constructs an LTVPathFollower, so it ships untested.
-// The sim builds one on demand so the controller can actually be exercised.
-// Its trajectory arrives as the same "P = {...} / V = {...}" text blob
-// prepare_trajectory() parses on a robot -- positions in METRES, velocities in
-// m/s and rad/s, one sample per 10 ms tick.
-
-chad::LtvLqrFollower* gLqr = nullptr;
-chad::LtvLqrParams gLqrParams;
-
-chad::LtvLqrFollower& lqr() {
-    if (gLqr == nullptr) gLqr = new chad::LtvLqrFollower(chad::chassis, chad::drivetrain);
-    return *gLqr;
-}
-
-chad::LTVPathFollower* gLtv = nullptr;
-std::string gLtvPath;
-
-// Feedforward gains are settable so they can be tuned in the sim rather than
-// guessed. kV is volts per m/s: at 12 V this drivetrain runs about 1.95 m/s,
-// so the physically correct value is near 6.2, not the token default.
-// kV defaults to the value implied by the drivetrain itself: 12 V produces
-// 450 rpm on a 3.25 in wheel, i.e. ~1.95 m/s, so kV ~= 12 / 1.95 = 6.2 V per
-// m/s. Guessing low here shows up as a systematic along-track deficit, not as
-// a controller fault -- 0.9 leaves the path 9 in short, 6.2 lands within 0.5.
-chad::FeedforwardGains gLtvGains{
-    .kV = 6.2f,
-    .kaStraight = 0.0f,
-    .kaTurn = 0.0f,
-    .ksStraight = 0.3f,
-    .ksTurn = 0.0f,
-    .kP = 2.0f,
-};
-
-chad::LTVPathFollower& ltv() {
-    if (gLtv == nullptr) {
-        gLtv = new chad::LTVPathFollower(chad::chassis, chad::drivetrain, gLtvGains);
-    }
-    return *gLtv;
-}
-
-/// Rebuild the follower so new gains take effect (they are captured by value).
-void rebuildLtv() {
-    delete gLtv;
-    gLtv = nullptr;
-}
-
 /// Apply one option to whichever params struct is in hand.
 ///
 /// `requires` rather than eight hand-written appliers: the structs overlap
@@ -890,92 +840,6 @@ const char* sim_path_preview_json(int start, int count, float spacingIn) {
     }
     out += "]";
     return out.c_str();
-}
-
-// ============================================================================
-// LTV / LQR follower
-// ============================================================================
-
-/// Load the trajectory blob (P/V tuple text, metres and m/s).
-EMSCRIPTEN_KEEPALIVE
-void sim_ltv_set_path(const char* data) { gLtvPath = (data != nullptr) ? data : ""; }
-
-/// Report how long the loaded trajectory is, in inches. Also a cheap check that
-/// the blob parsed at all -- 0 means prepare_trajectory() rejected it.
-EMSCRIPTEN_KEEPALIVE
-float sim_ltv_path_length() {
-    return static_cast<float>(ltv().getPathLength(gLtvPath));
-}
-
-EMSCRIPTEN_KEEPALIVE
-void sim_ltv_run(int backwards, int endCorrection) {
-    if (gLtvPath.empty()) return;
-    gManualActive = false;
-    chad::LTVPathFollower::ltvConfig cfg;
-    cfg.backwards = (backwards != 0);
-    cfg.end_correction = (endCorrection != 0);
-    ltv().followPath(gLtvPath, cfg);
-}
-
-EMSCRIPTEN_KEEPALIVE
-void sim_ltv_set_gains(float kV, float ksStraight, float kP) {
-    gLtvGains.kV = kV;
-    gLtvGains.ksStraight = ksStraight;
-    gLtvGains.kP = kP;
-    rebuildLtv();
-}
-
-EMSCRIPTEN_KEEPALIVE
-int sim_ltv_running() { return ltv().isRunning() ? 1 : 0; }
-
-EMSCRIPTEN_KEEPALIVE
-void sim_ltv_cancel() { ltv().cancel(); }
-
-/// Follow gPath[start, start+count) with the speed-scheduled LQR.
-EMSCRIPTEN_KEEPALIVE
-void sim_lqr_follow(int start, int count, float timeoutMs) {
-    if (start < 0 || count <= 0 || start + count > static_cast<int>(gPath.size())) return;
-    if (gRouteTask != sim::kInvalidTask) sim::sched().kill(gRouteTask);
-    gManualActive = false;
-    // Own fiber, so the browser keeps driving the clock and can sample the run
-    // while it happens -- the same reason a route runs on one.
-    auto path = std::make_shared<std::vector<chad::Pose>>(
-        gPath.begin() + start, gPath.begin() + start + count);
-    gRouteTask = sim::sched().spawn([path, timeoutMs]() {
-        lqr().followPath(*path, gLqrParams, timeoutMs);
-    }, "lqr");
-}
-
-EMSCRIPTEN_KEEPALIVE
-int sim_lqr_running() { return lqr().isRunning() ? 1 : 0; }
-
-EMSCRIPTEN_KEEPALIVE
-float sim_lqr_peak() { return lqr().lastPeakError(); }
-
-EMSCRIPTEN_KEEPALIVE
-float sim_lqr_final() { return lqr().lastFinalError(); }
-
-EMSCRIPTEN_KEEPALIVE
-void sim_lqr_set(const char* name, float value) {
-    const std::string k(name);
-    if      (k == "qx")     gLqrParams.weights.qx = value;
-    else if (k == "qy")     gLqrParams.weights.qy = value;
-    else if (k == "qtheta") gLqrParams.weights.qtheta = value;
-    else if (k == "rv")     gLqrParams.weights.rv = value;
-    else if (k == "romega") gLqrParams.weights.romega = value;
-    else if (k == "maxSpeed")   gLqrParams.maxSpeed = value;
-    else if (k == "maxAccel")   gLqrParams.maxAccel = value;
-    else if (k == "maxLatAccel") gLqrParams.maxLateralAccel = value;
-    else if (k == "tolerance")  gLqrParams.targetTolerance = value;
-    else if (k == "headingTol") gLqrParams.headingTolerance = value;
-    else if (k == "velCtrl")    gLqrParams.useVelocityController = (value != 0.0f);
-    else if (k == "ffKv")       gLqrParams.ffGains.kV = value;
-    else if (k == "ffKs")       gLqrParams.ffGains.ksStraight = value;
-    else if (k == "ffKp")       gLqrParams.ffGains.kP = value;
-    else if (k == "ffKi")       gLqrParams.ffGains.kI = value;
-    else if (k == "ffKa")       gLqrParams.ffGains.kaStraight = value;
-    else if (k == "slewRise")   gLqrParams.slewRisePerSec = value;
-    else if (k == "slewFall")   gLqrParams.slewFallPerSec = value;
 }
 
 EMSCRIPTEN_KEEPALIVE

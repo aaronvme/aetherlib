@@ -64,7 +64,7 @@ public:
     Task(F&& func, const char* name)
         : mId(sim::sched().spawn(std::function<void()>(std::forward<F>(func)), name)) {}
 
-    // C form: pros::Task(trampoline, params, "LTVTask")
+    // C form: pros::Task(trampoline, params, "name")
     Task(task_fn_t function, void* parameters, const char* name = "sim_task")
         : mId(sim::sched().spawn([function, parameters]() { function(parameters); }, name)) {}
 

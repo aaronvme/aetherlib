@@ -41,7 +41,7 @@ possible at all.
 |---|---|
 | Localization | `OdomTracking`, `MclTracking`, `RclTracking` |
 | Control | `PID`, `ExitCondition`, `FeedforwardController` |
-| Motion | `moveToPoint`, `turnToPoint`, `moveDistance`, arc, boomerang, RAMSETE, LTV, swing |
+| Motion | `moveToPoint`, `turnToPoint`, `moveDistance`, arc, boomerang, RAMSETE, swing |
 | Support | velocity profiles, autotune, jam detection, sensor calibrator |
 | Config | your actual `config.cpp` — same ports, geometry, sensor mounts, MCL/RCL tuning |
 | Routines | your actual `autons.cpp` |
@@ -552,34 +552,6 @@ the default `headingTolerance` of 2 deg is never met and the motion runs out its
 timeout instead of settling. Position converges fine. Widen `headingTolerance`
 per call, or follow the path with a `turnToHeading`. Left as-is because
 loosening an accuracy tolerance is a call about your auton, not a bug fix.
-
-**LTV / LQR was never affected — the deadlock was RAMSETE specifically.**
-The two followers advance their reference completely differently, and only one
-was vulnerable. `LTVPathFollower` steps `for (int i = 0; i < trajectory_size; ++i)`
-with `delay_until(&t, 10)`, i.e. one sample per 10 ms tick: the reference moves
-on the clock, not on the robot's progress, so a zero starting velocity is simply
-the first sample and the next tick carries on. Verified in the sim from the exact
-pose that used to deadlock RAMSETE — it drives and lands 0.42 in from the path end.
-
-Two things about LTV worth knowing, neither of them faults:
-
-- Its trajectory is a **text blob**, not a pose vector: `P = {(x, y, theta), ...}`
-  in metres and `V = {(v, omega), ...}` in m/s. `parse_tuples()` keys on
-  **parentheses**; a brace-delimited blob parses to nothing and the follower
-  bails with "Empty trajectory". `sim/web/ltv_traj.js` generates the format.
-- Nothing in the project constructs an `LTVPathFollower`, so it had never run.
-  The sim builds one on demand.
-
-`FeedforwardGains::kV` is volts per m/s and it matters a lot. At kV 0.9 the
-robot ends 9.1 in short of the path; at the 6.2 `bridge.cpp` defaults to it ends
-0.42 in short. That is a tuning sensitivity rather than a bug, and the suite
-pins both numbers so it stays visible.
-
-6.2 was derived from "450 rpm on a 3.25 in wheel at 12 V, about 1.95 m/s". The
-drivetrain measures **2.6738 in** now, so 450 rpm is 63.0 in/s = 1.60 m/s and
-the same arithmetic gives kV ~= **7.5**. Left at 6.2 deliberately: nothing in
-the project constructs an `LTVPathFollower`, the follower is parked, and
-re-deriving its gains is work for whoever un-parks it.
 
 **`maxSensorRange` is set beyond what the hardware can do.**
 `config.cpp` sets `.maxSensorRange = 140.0f` inches (3556 mm). A V5 distance

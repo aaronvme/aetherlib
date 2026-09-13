@@ -48,15 +48,6 @@ const api = {
 };
 const { buildPath, parseRoute } = await import('../web/route_dsl.js');
 const { parseAuton, OP } = await import('../web/auton_cpp.js');
-const { buildLtvTrajectory } = await import('../web/ltv_traj.js');
-Object.assign(api, {
-  ltvSetPath:  c('sim_ltv_set_path', null, ['string']),
-  ltvLength:   c('sim_ltv_path_length', 'number', []),
-  ltvGains:    c('sim_ltv_set_gains', null, ['number', 'number', 'number']),
-  ltvRun:      c('sim_ltv_run', null, ['number', 'number']),
-  ltvRunning:  c('sim_ltv_running', 'number', []),
-  ltvCancel:   c('sim_ltv_cancel', null, []),
-});
 
 let failures = 0;
 const check = (label, cond, detail = '') => {
@@ -624,58 +615,6 @@ check('peak speed follows the velocity profile', fromStart.peak < 60,
 check('the profile still shapes the run, the floor does not',
       fromStart.peak > 25,
       `peak ${fromStart.peak.toFixed(1)} in/s, floor is ~7.2 in/s`);
-
-console.log('\n== LTV / LQR follower ==');
-api.setLoc(0);
-
-const ltvSpline = buildPath(parseRoute(
-  'via(x:-40,y:-40); via(x:-10,y:-25); via(x:20,y:-40); followPath();').paths[0]);
-const ltvTraj = buildLtvTrajectory(ltvSpline, 40, 60);
-
-check('trajectory is time-sampled at 10 ms',
-      ltvTraj.samples.length > 100 &&
-      Math.abs(ltvTraj.samples.length * 10 - ltvTraj.durationMs) < 60,
-      `${ltvTraj.samples.length} samples over ${ltvTraj.durationMs.toFixed(0)} ms`);
-check('trajectory starts from rest', ltvTraj.samples[0].v < 1e-6,
-      `first v = ${ltvTraj.samples[0].v.toFixed(4)} in/s`);
-
-api.ltvSetPath(ltvTraj.text);
-// parse_tuples() keys on parentheses; a brace-delimited blob silently parses
-// to nothing and the follower bails with "Empty trajectory".
-check('blob parses into a trajectory', api.ltvLength() > 50,
-      `${api.ltvLength().toFixed(1)} in of path`);
-
-const runLtv = (kV) => {
-  api.ltvGains(kV, 0.3, 2.0);
-  api.ltvSetPath(ltvTraj.text);
-  api.reset(-40, -40, 61);
-  api.ltvRun(0, 0);
-  let guard = 0;
-  while (api.ltvRunning() === 1 && guard++ < 2000) api.step(10);
-  for (let i = 0; i < 50; i++) api.step(10);
-  const q = st().true;
-  api.ltvCancel();
-  for (let i = 0; i < 40; i++) api.step(10);
-  return { q, err: Math.hypot(q.x - 20, q.y + 40) };
-};
-
-// The case that deadlocks RAMSETE: begin at the path start, from rest. LTV
-// advances its reference one sample per tick regardless of robot progress, so
-// it has no equivalent failure.
-const tuned = runLtv(6.2);
-check('LTV starts from rest at the path start',
-      Math.hypot(tuned.q.x + 40, tuned.q.y + 40) > 20,
-      `moved to (${tuned.q.x.toFixed(1)}, ${tuned.q.y.toFixed(1)})`);
-check('LTV tracks to the path end with a correct kV', tuned.err < 3,
-      `end error ${tuned.err.toFixed(2)} in`);
-
-// kV is volts per m/s; too low starves the feedforward and the robot lags
-// along-track. This is a tuning sensitivity, not a controller fault -- worth
-// pinning so a future change that hides it is visible.
-const starved = runLtv(0.9);
-check('too-low kV shows up as an along-track deficit', starved.err > tuned.err + 3,
-      `kV 0.9 ends ${starved.err.toFixed(2)} in short vs ${tuned.err.toFixed(2)} at kV 6.2`);
-api.ltvGains(6.2, 0.3, 2.0);
 
 console.log('\n== run recording ==');
 check('samples were recorded', api.recCount() > 10, `${api.recCount()} rows`);
