@@ -476,15 +476,15 @@ Pose EkfTracking::update() {
     if (mConfig.autoSync) {
         const Pose odomPose = mOdom.getPose();
         if (mSnapNextSync) {
-            mOdom.setPose(fused);
+            mOdom.syncPose(fused);
             mSnapNextSync = false;
         } else {
             const float k = clamp(mConfig.syncProp, 0.0f, 1.0f);
             const float kt = clamp(mConfig.thetaSyncProp, 0.0f, 1.0f);
             const float dTheta = angleDiffRad(odomPose.theta, fused.theta);
-            mOdom.setPose({odomPose.x + k * (fused.x - odomPose.x),
-                           odomPose.y + k * (fused.y - odomPose.y),
-                           wrapRad(odomPose.theta + kt * dTheta)});
+            mOdom.syncPose({odomPose.x + k * (fused.x - odomPose.x),
+                            odomPose.y + k * (fused.y - odomPose.y),
+                            wrapRad(odomPose.theta + kt * dTheta)});
         }
     }
     return fused;

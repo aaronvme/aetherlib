@@ -125,19 +125,25 @@ float OdomTracking::currentHorizDistance() const {
     return 0.0f;
 }
 
-float OdomTracking::currentHeadingRad() const {
+float OdomTracking::rawHeadingRad() const {
     if (!mSensors.imuCollection.empty() && mSensors.imuCollection[0] != nullptr) {
         float rawHeading = mSensors.imuCollection[0]->get_heading();
 
         if (!std::isfinite(rawHeading)) {
             ++mImuFaults;
-            return mPrevHeadingRad;
+            return NAN;
         }
 
         float scaledHeading = rawHeading * mSensors.imuScaleFactor;
         return vexToStdRad(scaledHeading);
     }
     return 0.0f;
+}
+
+float OdomTracking::currentHeadingRad() const {
+    const float raw = rawHeadingRad();
+    if (!std::isfinite(raw)) return mPrevHeadingRad;
+    return wrapRad(raw + mHeadingOffsetRad);
 }
 
 void OdomTracking::update(bool force) {
@@ -258,6 +264,24 @@ void OdomTracking::setPose(const Pose& pose) {
     std::lock_guard<pros::Mutex> lock(mMutex);
     mPose = pose;
 
+    // The IMU cannot be told where north is, so carry the difference here
+    // instead. Without it update() overwrites theta from the boot frame on
+    // the next tick and the heading asked for is gone.
+    const float raw = rawHeadingRad();
+    if (std::isfinite(raw)) mHeadingOffsetRad = wrapRad(pose.theta - raw);
+
+    // Rebase, or the next tick reads the offset jump as a real rotation.
+    mPrevHeadingRad = currentHeadingRad();
+
+    mPrevVertDist  = currentVertDistance();
+    mPrevHorizDist = currentHorizDistance();
+}
+
+void OdomTracking::syncPose(const Pose& pose) {
+    std::lock_guard<pros::Mutex> lock(mMutex);
+    mPose.x = pose.x;
+    mPose.y = pose.y;
+
     mPrevVertDist  = currentVertDistance();
     mPrevHorizDist = currentHorizDistance();
 }
@@ -277,11 +301,13 @@ void OdomTracking::reset() {
         if (wheel != nullptr) wheel->reset();
     }
     mPose = Pose{};
+    mHeadingOffsetRad = 0.0f;
 
     mPrevVertDist   = currentVertDistance();
     mPrevHorizDist  = currentHorizDistance();
 
     mPrevHeadingRad = currentHeadingRad();
+    mPose.theta     = mPrevHeadingRad;
 
     mLastDelta = {};
     for (auto& acc : mAccumDelta) acc = {};

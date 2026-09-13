@@ -287,6 +287,45 @@ check('and still moves the estimate',
       `odom=(${s.odom.x.toFixed(1)}, ${s.odom.y.toFixed(1)})`);
 api.stopAuton();
 
+console.log('\n== a declared heading sticks ==');
+
+// The IMU has no settable zero, so odometry carries the offset from its boot
+// frame to the field. Without it update() reassigns theta from the raw IMU on
+// the next 10 ms tick and the heading just asked for is gone.
+const declared = st();
+check('setPose takes the heading it was given',
+      Math.abs(angErr(declared.odom.h, 45)) < 1,
+      `odom h=${declared.odom.h.toFixed(1)} deg, asked 45`);
+
+run(500);
+s = st();
+check('and it survives the odometry tick',
+      Math.abs(angErr(s.odom.h, 45)) < 1,
+      `odom h=${s.odom.h.toFixed(1)} deg after 50 ticks`);
+check('ground truth did not rotate to meet it',
+      Math.abs(angErr(s.true.h, declared.true.h)) < 2,
+      `true h=${s.true.h.toFixed(1)} vs ${declared.true.h.toFixed(1)}`);
+
+// The offset is a constant, so turning still reads as a turn -- a botched
+// rebase would show up here as a phantom rotation on the first tick.
+const beforeTurn = st();
+api.routeClear();
+api.routePush(OP.TURN_HEADING, beforeTurn.odom.h + 60, 0, 0, 2500);
+api.routeRun();
+run(3000);
+s = st();
+check('a turn still moves both frames together',
+      Math.abs(angErr(s.odom.h - beforeTurn.odom.h,
+                      s.true.h - beforeTurn.true.h)) < 3,
+      `odom +${angErr(s.odom.h - beforeTurn.odom.h, 0).toFixed(1)} deg, ` +
+      `true +${angErr(s.true.h - beforeTurn.true.h, 0).toFixed(1)} deg`);
+const gapBefore = angErr(beforeTurn.odom.h, beforeTurn.true.h);
+const gapAfter = angErr(s.odom.h, s.true.h);
+check('and the offset held through it',
+      Math.abs(angErr(gapAfter, gapBefore)) < 1,
+      `odom - true was ${gapBefore.toFixed(1)} deg, now ${gapAfter.toFixed(1)}`);
+api.stopAuton();
+
 console.log('\n== auton source runs the real API ==');
 
 // Parse real C++, push it, run it to completion, and hand back the report.

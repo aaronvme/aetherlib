@@ -663,7 +663,7 @@ void MclTracking::syncToOdometry() {
     float delta = angleDiffRad(odomPose.theta, mRawEstimate.theta);
     float newTheta = odomPose.theta + mConfig.thetaSyncProp * delta;
 
-    mOdom.setPose({newX, newY, wrapRad(newTheta)});
+    mOdom.syncPose({newX, newY, wrapRad(newTheta)});
 }
 
 void MclTracking::setDistanceSensors(const std::array<pros::Distance*, SENSOR_COUNT>& sensors) {
