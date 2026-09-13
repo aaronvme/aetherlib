@@ -427,18 +427,13 @@ void Chassis::executeCurrentMotion() {
                 (std::cos(angleDiffRad(pose.theta, chordBearingRad)) >= 0.0f)
                     ? 1.0f : -1.0f;
 
-            if (radius < 1e-6f) {
-                lateralOut = mLateralPID.update(chordSign * chordDist);
-                float headingErrRad = angleDiffRad(pose.theta, chordBearingRad);
-                angularOut = mAngularPID.update(headingErrRad);
-            } else {
-                float targetHeadingRad =
-                    arcStartHeading(pose, req.targetX, req.targetY, req.targetRadius);
-                float headingErrRad = angleDiffRad(pose.theta, targetHeadingRad);
+            const float targetHeadingRad =
+                (radius < 1e-6f)
+                    ? chordBearingRad
+                    : arcStartHeading(pose, req.targetX, req.targetY, req.targetRadius);
 
-                lateralOut = mLateralPID.update(chordSign * chordDist);
-                angularOut = mAngularPID.update(headingErrRad);
-            }
+            lateralOut = mLateralPID.update(chordSign * chordDist);
+            angularOut = mAngularPID.update(angleDiffRad(pose.theta, targetHeadingRad));
             settled = chordDist < req.arcParams.targetTolerance;
             break;
         }
@@ -489,8 +484,10 @@ void Chassis::executeCurrentMotion() {
             angularOut = mAngularPID.update(blendedHeadingErrRad);
 
             float speedScale = std::min(distToTarget / 6.0f, 1.0f);
-            if (speedScale < req.boomerangParams.minSpeed / req.boomerangParams.maxSpeed) {
-                speedScale = req.boomerangParams.minSpeed / req.boomerangParams.maxSpeed;
+            if (req.boomerangParams.maxSpeed > 1e-6f) {
+                const float floorScale =
+                    req.boomerangParams.minSpeed / req.boomerangParams.maxSpeed;
+                if (speedScale < floorScale) speedScale = floorScale;
             }
             lateralOut *= speedScale;
 
@@ -603,16 +600,13 @@ void Chassis::executeCurrentMotion() {
         case MotionType::Swing: {
             angLimit = req.swingParams.maxSpeed;
 
-            float headingErrRad = angleDiffRad(pose.theta, req.targetHeadingRad);
+            float rawErrRad = angleDiffRad(pose.theta, req.targetHeadingRad);
+            float headingErrRad = resolveTurnError(rawErrRad, req.swingParams.direction);
 
-            TurnDirection dir = req.swingParams.direction;
-            if (dir == TurnDirection::CW) {
-                headingErrRad = -std::fabs(headingErrRad);
-            } else if (dir == TurnDirection::CCW) {
-                headingErrRad = std::fabs(headingErrRad);
-            }
+            float tolRad = degToRad(req.swingParams.targetTolerance);
+            if (std::fabs(rawErrRad) < tolRad) headingErrRad = rawErrRad;
 
-            angularOut = mAngularPID.update(headingErrRad);
+            angularOut = clamp(mAngularPID.update(headingErrRad), -angLimit, angLimit);
             lateralOut = 0;
 
             if (req.swingSide == SwingSide::Left) {
@@ -624,7 +618,7 @@ void Chassis::executeCurrentMotion() {
             }
             useCustomOutput = true;
 
-            settled = std::fabs(headingErrRad) < degToRad(req.swingParams.targetTolerance);
+            settled = std::fabs(rawErrRad) < tolRad;
             break;
         }
         default:
