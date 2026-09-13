@@ -100,6 +100,7 @@ const AutonEntry kAutons[] = {
     CHAD_AUTON("Example",    autonExample),
     CHAD_AUTON("Red 3 Pin",  autonRed3Pin),
     CHAD_AUTON("Blue 3 Pin", autonBlue3Pin),
+    CHAD_AUTON("Blue 3 Pin PID", autonBlue3PinPid),
     CHAD_AUTON("Skills",     autonSkills),
 };
 constexpr int kAutonCount = static_cast<int>(sizeof(kAutons) / sizeof(kAutons[0]));
