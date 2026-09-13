@@ -12,6 +12,10 @@ int lookaheadIndex(const std::vector<Pose>& path, const Pose& pose,
                    float lookaheadDist);
 
 struct RAMSETEParams {
+    // false drives the path back-first: the reference heading flips and the
+    // commanded velocity goes negative.
+    bool forwards{true};
+
     float b{48.0f};
     float zeta{0.85f};
 

@@ -528,13 +528,18 @@ void Chassis::executeCurrentMotion() {
                                     (req.ramseteParams.minSpeed / 127.0f));
             }
 
+            if (!req.ramseteParams.forwards) v_d = -v_d;
+
             float w_d = 0.0f;
             if (targetIdx > 0 && targetIdx < static_cast<int>(path.size()) - 1) {
                 const Pose& prev = path[targetIdx - 1];
                 const Pose& next = path[targetIdx + 1];
                 float segDist = distanceToPoint(prev, next.x, next.y);
                 if (segDist > 1e-3f) {
-                    w_d = v_d * angleDiffRad(prev.theta, next.theta) / segDist;
+                    // Speed, not velocity: the robot covers the path start to end
+                    // either way, so its heading rate keeps the curve's sign.
+                    w_d = std::fabs(v_d) * angleDiffRad(prev.theta, next.theta)
+                          / segDist;
                 }
             }
 
@@ -817,6 +822,12 @@ void Chassis::moveRAMSETE(const std::vector<Pose>& path, float timeout, const RA
     req.ramsetePath = (params.smoothSpacingIn > 0.0f)
                           ? splinePath(path, params.smoothSpacingIn)
                           : path;
+
+    // After splining, not before: splinePath() derives every heading from the
+    // forward tangent and would undo this.
+    if (!params.forwards) {
+        for (Pose& p : req.ramsetePath) p.theta = wrapRad(p.theta + PI);
+    }
     req.ramseteParams = params;
     req.ramseteParams.targetTolerance =
         orConfig(params.targetTolerance, mConfig.targetToleranceIn);

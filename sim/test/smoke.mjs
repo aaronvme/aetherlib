@@ -657,6 +657,66 @@ check('RAMSETE tracks the uploaded path to its end', nearestEnd < 3,
 api.stopAuton();
 run(200);
 
+// --- the same path, driven back-first ---------------------------------------
+//
+// Measured as cross-track error, not arrival. The endpoint alone cannot tell a
+// correct angular feedforward from one with the sign flipped, because the
+// feedback terms close the gap either way given enough timeout -- the wrong
+// one still arrived within 0.01 in on a gentle path. It shows up on corners.
+//
+// w_d must NOT flip with v_d: the robot covers the path start to end either
+// way, so its heading rate keeps the curve's sign. Negating it too costs 3.7 in
+// of cross-track and 5 in at the end on this path.
+const curvy = buildPath(parseRoute(
+  'via(x:-40,y:-35); via(x:-20,y:-10); via(x:0,y:-35); via(x:20,y:-10);'
+  + ' followPath();').paths[0]);
+
+api.pathClear();
+for (const q of curvy) api.pathPush(q.x, q.y, q.h);
+const curve = JSON.parse(api.pathPreview(0, curvy.length, 2.0) || '[]');
+const offPath = (x, y) =>
+  curve.reduce((m, p) => Math.min(m, Math.hypot(p.x - x, p.y - y)), Infinity);
+
+// Same path both ways, so forward doubles as the yardstick: on a symmetric
+// drivetrain a correct reverse should track it just as well.
+const trackPath = reverse => {
+  api.pathClear();
+  for (const q of curvy) api.pathPush(q.x, q.y, q.h);
+  api.reset(curvy[0].x, curvy[0].y, curvy[0].h + (reverse ? 180 : 0));
+  api.routeClear();
+  api.routePush(13, 0, curvy.length, 0, 6000);
+  if (reverse) api.routeOpt('forwards', 0);
+  api.routeRun();
+  run(500);
+  let worst = 0;
+  for (let i = 0; i < 900; i++) {
+    api.step(10);
+    const q = st().true;
+    worst = Math.max(worst, offPath(q.x, q.y));
+    if (api.routeRunning() !== 1) break;
+  }
+  const end = st().true;
+  api.stopAuton();
+  run(200);
+  return { worst, end,
+           endErr: Math.hypot(end.x - curve.at(-1).x, end.y - curve.at(-1).y) };
+};
+
+const fwdRun = trackPath(false);
+const revRun = trackPath(true);
+
+check('RAMSETE reaches the path end in reverse', revRun.endErr < 1.5,
+      `${revRun.endErr.toFixed(2)} in from the end`);
+check('and holds the path as well backwards as forwards',
+      revRun.worst < fwdRun.worst + 1.0,
+      `worst off-path ${revRun.worst.toFixed(2)} in reverse ` +
+      `vs ${fwdRun.worst.toFixed(2)} forward`);
+// Spinning round and driving forwards would arrive too, so the heading on
+// arrival is what says it actually went back-first.
+check('and arrives facing back down the path',
+      Math.abs(angErr(revRun.end.h, curve.at(-1).h + 180)) < 25,
+      `true h=${revRun.end.h.toFixed(1)} deg, path end ${curve.at(-1).h.toFixed(1)} + 180`);
+
 // --- regression: RAMSETE starts from progress 0 -----------------------------
 // v_d is read from the profile by arc-length position and a trapezoid is 0 at
 // its start, so v_d was 0 there. Every term of the law scales with v_d, so v
