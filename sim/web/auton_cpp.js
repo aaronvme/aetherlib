@@ -343,6 +343,66 @@ const UNROUTABLE = new Set([
 // Parsing
 // ============================================================================
 
+const MAX_ITERATIONS = 200;
+const MAX_UNROLLED = 2000;
+
+/// The values a `for` header's counter takes, or an error explaining why it
+/// could not be read. Simulated rather than solved, so <, <=, >, >=, != and a
+/// += step all fall out without four more branches to get wrong.
+function loopValues(head) {
+  const parts = head.split(';');
+  if (parts.length !== 3) {
+    return { error: 'for() wants init; condition; increment' };
+  }
+
+  const init = /^\s*(?:[A-Za-z_][\w:]*\s+)?([A-Za-z_]\w*)\s*=\s*([\s\S]+)$/.exec(parts[0]);
+  const cond = /^\s*([A-Za-z_]\w*)\s*(<=|>=|<|>|!=)\s*([\s\S]+)$/.exec(parts[1]);
+  if (!init) return { error: `for(): cannot read "${parts[0].trim()}"` };
+  if (!cond) return { error: `for(): cannot read "${parts[1].trim()}"` };
+  if (cond[1] !== init[1]) {
+    return { error: `for(): counts ${init[1]} but tests ${cond[1]}` };
+  }
+
+  const bump = parts[2].trim();
+  const add = /^([A-Za-z_]\w*)\s*\+=\s*([\s\S]+)$/.exec(bump);
+  let step = 1;
+  if (add) step = evalExpr(add[2]);
+  else if (/^(?:--[A-Za-z_]\w*|[A-Za-z_]\w*--)$/.test(bump)) step = -1;
+  else if (!/^(?:\+\+[A-Za-z_]\w*|[A-Za-z_]\w*\+\+)$/.test(bump)) {
+    return { error: `for(): cannot read the increment "${bump}"` };
+  }
+
+  const from = evalExpr(init[2]);
+  const to = evalExpr(cond[3]);
+  if (!Number.isFinite(from) || !Number.isFinite(to) || !Number.isFinite(step)) {
+    return { error: 'for(): the bounds must work out to numbers' };
+  }
+  if (step === 0) return { error: 'for(): the increment never moves' };
+
+  const op = cond[2];
+  const test = v => op === '<' ? v < to
+                  : op === '<=' ? v <= to
+                  : op === '>' ? v > to
+                  : op === '>=' ? v >= to
+                  : v !== to;
+
+  const list = [];
+  for (let v = from; test(v); v += step) {
+    list.push(v);
+    if (list.length > MAX_ITERATIONS) {
+      return { error: `for(): runs more than ${MAX_ITERATIONS} times` };
+    }
+  }
+  return { name: init[1], list };
+}
+
+/// Substitute the counter for one iteration's value. Parenthesised, so that
+/// `i * 24` becomes `(2) * 24` and not something with a different precedence.
+function substitute(text, name, value) {
+  const out = text.replace(new RegExp(`\\b${name}\\b`, 'g'), `(${value})`);
+  return { text: out, changed: out !== text };
+}
+
 /**
  * @returns {{cmds, opts, plan, paths, notes, fnName} | {error: string}}
  */
@@ -358,7 +418,11 @@ export function parseAuton(text) {
   const pathVars = new Map();     // name -> index into paths
   let fnName = null;
 
-  for (const stmt of splitStatements(scan)) {
+  // Indexed rather than for..of: unrolling a loop splices its body back into
+  // this list in place of the original statements.
+  const stmts = splitStatements(scan);
+  for (let si = 0; si < stmts.length; si++) {
+    const stmt = stmts[si];
     const body = stmt.text.trim();
     if (!body) continue;
 
@@ -367,6 +431,47 @@ export function parseAuton(text) {
     if (fn) { fnName ??= fn[1]; continue; }
     if (/^namespace\b/.test(body) || /^using\b/.test(body)) continue;
     if (/^extern\b/.test(body)) continue;
+
+    // --- for (int i = 0; i < n; i++) { ... } --------------------------------
+    //
+    // Unrolled into the flat opcode list the bridge executes. It used to be
+    // skipped with a note, which read as harmless but was not: the body was
+    // still parsed, once, so a three-lap loop previewed and drove as one lap.
+    if (/^for\b/.test(body)) {
+      const head = /^for\s*\(([\s\S]*)\)$/.exec(body);
+      if (!head) return { error: `for(): cannot read ${summarise(body)}` };
+
+      const open = stmt.start + stmt.text.length;
+      if (!stmt.structural || scan[open] !== '{') {
+        return { error: 'for() needs a { } body' };
+      }
+      const close = matchBrace(scan, open);
+      if (close === -1) return { error: 'for(): unterminated body' };
+
+      const counter = loopValues(head[1]);
+      if (counter.error) return counter;
+
+      const inner = splitStatements(scan.slice(open + 1, close))
+        .map(s => ({ ...s, start: s.start + open + 1 }));
+
+      const expanded = [];
+      for (const value of counter.list) {
+        for (const s of inner) {
+          const swapped = substitute(s.text, counter.name, value);
+          // A rewritten statement no longer lines up with the source, so its
+          // waypoints lose the ranges that make them draggable.
+          expanded.push({ ...s, text: swapped.text, rewritten: swapped.changed });
+        }
+      }
+      if (expanded.length > MAX_UNROLLED) {
+        return { error: `for(): unrolls to ${expanded.length} statements` };
+      }
+
+      let after = si + 1;
+      while (after < stmts.length && stmts[after].start < close) after++;
+      stmts.splice(si + 1, after - si - 1, ...expanded);
+      continue;
+    }
 
     // --- std::vector<Pose> path = { ... } -----------------------------------
     const vec =
@@ -421,7 +526,13 @@ export function parseAuton(text) {
 
     cmds.push(parsed.cmd);
     opts.push(parsed.opt);
-    if (parsed.waypoint) plan.push(parsed.waypoint);
+    if (parsed.waypoint) {
+      if (stmt.rewritten) {
+        delete parsed.waypoint.xRange;
+        delete parsed.waypoint.yRange;
+      }
+      plan.push(parsed.waypoint);
+    }
     if (parsed.note) notes.push(parsed.note);
   }
 

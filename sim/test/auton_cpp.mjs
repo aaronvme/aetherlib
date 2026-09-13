@@ -380,5 +380,65 @@ if (AUTON_SOURCES === null) {
   }
 }
 
+console.log('\n== for loops ==');
+
+// Unrolled into the flat opcode list. The old behaviour was worse than
+// refusing: the header was noted as skipped but the body still parsed once,
+// so a three-lap loop previewed and drove as a single lap.
+{
+  const wrap = inner => `void a() { ${inner} }`;
+  const cmds = src => { const r = parseAuton(wrap(src)); return r.error ?? r.cmds; };
+
+  const thrice = cmds('for (int i = 0; i < 3; i++)'
+                      + ' { chassis.moveDistance(12, 500); }');
+  check('a loop body runs once per iteration', thrice.length === 3,
+        `${thrice.length} commands`);
+
+  const counted = cmds('for (int i = 0; i < 3; i++)'
+                       + ' { chassis.moveToPoint(i * 24, 0, 1000); }');
+  check('the counter reaches the arguments',
+        counted.map(c => c[1]).join(',') === '0,24,48',
+        counted.map(c => c[1]).join(','));
+
+  check('an empty body is a no-op',
+        cmds('for (int i = 0; i < 5; i++) {}').length === 0);
+
+  check('<= includes the bound',
+        cmds('for (int i = 1; i <= 3; i++) { chassis.moveDistance(i, 500); }')
+          .map(c => c[1]).join(',') === '1,2,3');
+  check('a += step is honoured',
+        cmds('for (int i = 0; i < 6; i += 2) { chassis.moveDistance(i, 500); }')
+          .map(c => c[1]).join(',') === '0,2,4');
+  check('counting down works',
+        cmds('for (int i = 3; i > 0; i--) { chassis.moveDistance(i, 500); }')
+          .map(c => c[1]).join(',') === '3,2,1');
+
+  // Refused rather than unrolled, because either would take the browser down.
+  check('a runaway loop is refused',
+        String(cmds('for (int i = 0; i < 99999; i++)'
+                    + ' { chassis.moveDistance(1, 500); }')).includes('200'),
+        String(cmds('for (int i = 0; i < 99999; i++)'
+                    + ' { chassis.moveDistance(1, 500); }')));
+  check('a range-for is refused, not silently skipped',
+        typeof cmds('for (auto q : path) { chassis.moveDistance(1, 500); }')
+          === 'string');
+
+  // Its coordinates are computed, so there is no literal in the source to
+  // rewrite and the point must not offer itself for dragging.
+  const plan = parseAuton(wrap('for (int i = 0; i < 2; i++)'
+                               + ' { chassis.moveToPoint(i * 24, 0, 1000); }')).plan;
+  check('a computed waypoint is not draggable',
+        plan.length === 2 && plan.every(p => !p.xRange),
+        `${plan.filter(p => p.xRange).length} of ${plan.length} draggable`);
+
+  // This one is literal in the source, so dragging it should still edit that
+  // literal -- and move every iteration, which is what the source says.
+  const fixed = parseAuton(wrap('for (int i = 0; i < 2; i++)'
+                                + ' { chassis.moveToPoint(24, 0, 1000); }')).plan;
+  check('a literal waypoint stays draggable',
+        fixed.length === 2 && fixed.every(p => !!p.xRange),
+        `${fixed.filter(p => p.xRange).length} of ${fixed.length} draggable`);
+}
+
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : failures + ' CHECK(S) FAILED'}\n`);
 process.exit(failures === 0 ? 0 : 1);
