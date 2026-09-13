@@ -22,6 +22,7 @@ const api = {
   particleCnt: c('sim_particle_count', 'number', []),
   autonCount:  c('sim_auton_count', 'number', []),
   autonName:   c('sim_auton_name', 'string', ['number']),
+  autonSymbol: c('sim_auton_symbol', 'string', ['number']),
   runAuton:    c('sim_run_auton', null, ['number']),
   routeRunning:c('sim_route_running', 'number', []),
   stopAuton:   c('sim_stop_auton', null, []),
@@ -58,6 +59,8 @@ const check = (label, cond, detail = '') => {
 
 const st = () => JSON.parse(api.stateJson());
 const run = (ms, dt = 10) => { for (let i = 0; i < ms / dt; i++) api.step(dt); };
+/// Signed difference between two headings in degrees, wrapped to +/-180.
+const angErr = (a, b) => ((((a - b) % 360) + 540) % 360) - 180;
 
 console.log('\n== init ==');
 api.init();
@@ -126,8 +129,11 @@ check('estimator did not teleport with it',
 console.log('\n== motion controllers run on their own fiber ==');
 api.setLoc(0);
 api.reset(-48, -60, 90);
-check('autons registered', api.autonCount() === 4,
-      [...Array(api.autonCount()).keys()].map(i => api.autonName(i)).join(', '));
+const autonIdx = [...Array(api.autonCount()).keys()];
+check('autons registered',
+      api.autonCount() >= 4 &&
+      autonIdx.every(i => api.autonName(i) && api.autonSymbol(i)),
+      autonIdx.map(i => `${api.autonName(i)}=${api.autonSymbol(i)}()`).join(', '));
 
 api.runAuton(0);
 run(400);

@@ -357,5 +357,28 @@ check('example.cpp covers every motion opcode',
 check('example.cpp loses nothing to the skip list',
       ex.notes?.length === 0, JSON.stringify(ex.notes));
 
+// sim/build.sh lifts these same functions out for the browser, so the front
+// end can draw a compiled auton's route. Skipped when the sim has not been
+// built -- the module is generated, not committed.
+let AUTON_SOURCES = null;
+try {
+  ({ AUTON_SOURCES } = await import('../web/auton_sources.js'));
+} catch { /* not generated yet */ }
+
+if (AUTON_SOURCES === null) {
+  console.log('  [skip] auton_sources.js not generated; run sim/build.sh');
+} else {
+  const emitted = Object.keys(AUTON_SOURCES);
+  check('the generated module carries every routable auton',
+        routable.every(f => emitted.some(k => readFileSync(f, 'utf8').includes(k))),
+        emitted.join(', '));
+  for (const [name, src] of Object.entries(AUTON_SOURCES)) {
+    const p = parseAuton(src);
+    check(`${name} survives the trip through the generator`,
+          !p.error && p.cmds.length > 0,
+          p.error ?? `${p.cmds.length} commands`);
+  }
+}
+
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : failures + ' CHECK(S) FAILED'}\n`);
 process.exit(failures === 0 ? 0 : 1);

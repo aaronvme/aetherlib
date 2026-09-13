@@ -9,6 +9,14 @@ import {
 } from './auton_cpp.js';
 
 
+// Written by sim/build.sh from the same tree the wasm was compiled from, so a
+// planned path cannot disagree with the auton that runs. Absent until the first
+// build, which only costs the compiled autons their preview.
+let AUTON_SOURCES = {};
+try {
+  ({ AUTON_SOURCES } = await import('./auton_sources.js'));
+} catch { /* not generated yet */ }
+
 const M = await createChadSim();
 
 // ============================================================================
@@ -36,6 +44,7 @@ const api = {
   trailOdomCnt: w('sim_trail_odom_count', 'number', []),
   autonCount:   w('sim_auton_count', 'number', []),
   autonName:    w('sim_auton_name', 'string', ['number']),
+  autonSymbol:  w('sim_auton_symbol', 'string', ['number']),
   runAuton:     w('sim_run_auton', null, ['number']),
   stopAuton:    w('sim_stop_auton', null, []),
   routeRunning: w('sim_route_running', 'number', []),
@@ -245,6 +254,7 @@ const routeNotes = document.getElementById('route-notes');
 editor.value = localStorage.getItem('chad-sim.auton') || DEFAULT_AUTON;
 
 let plan = [];
+let shownAuton = -1;        // dropdown entry the editor holds, -1 = scratch
 let parsed = null;
 let slices = [];            // one [start, count) of controls per path
 let sampledPaths = [];      // the curve moveRAMSETE will drive, for drawing
@@ -310,8 +320,14 @@ function refreshPlan() {
   return r;
 }
 
+/// Only your own text survives a reload. A loaded auton does not need to:
+/// it is regenerated from source on every build.
+const saveScratch = () => {
+  if (shownAuton < 0) localStorage.setItem('chad-sim.auton', editor.value);
+};
+
 editor.addEventListener('input', () => {
-  localStorage.setItem('chad-sim.auton', editor.value);
+  saveScratch();
   refreshPlan();
 });
 refreshPlan();
@@ -404,7 +420,7 @@ document.getElementById('btn-copy').addEventListener('click', async () => {
   } catch {
     // Clipboard access needs a secure context; file:// does not have one.
     editor.value = text;
-    localStorage.setItem('chad-sim.auton', editor.value);
+    saveScratch();
     refreshPlan();
     routeStatus.textContent = 'clipboard blocked — wrapped it in the editor instead';
     routeStatus.className = 'status';
@@ -440,7 +456,7 @@ savedSel.addEventListener('change', () => {
   if (!savedSel.value) return;
   editor.value = loadSaved()[savedSel.value];
   routeName.value = savedSel.value;
-  localStorage.setItem('chad-sim.auton', editor.value);
+  saveScratch();
   refreshPlan();
 });
 
@@ -449,14 +465,82 @@ savedSel.addEventListener('change', () => {
 // ============================================================================
 
 const autonSel = document.getElementById('auton');
+const autonSymbols = [];
+
+// Picking a compiled auton shows the source it was built from, so its route
+// draws like any other. Your own text parks in the scratch slot rather than
+// being overwritten.
+for (const [value, label] of [[-1, 'scratch']]) {
+  const o = document.createElement('option');
+  o.value = value; o.textContent = label;
+  autonSel.appendChild(o);
+}
 for (let i = 0; i < api.autonCount(); i++) {
   const o = document.createElement('option');
   o.value = i; o.textContent = api.autonName(i);
+  autonSymbols.push(api.autonSymbol(i));
   autonSel.appendChild(o);
 }
+
+let scratchText = editor.value;
+
+/// The text this build compiled the entry from, or '' if it was not emitted.
+const autonSource = i => AUTON_SOURCES[autonSymbols[i]] || '';
+
+autonSel.addEventListener('change', () => {
+  const i = parseInt(autonSel.value, 10);
+  if (i === shownAuton) return;
+
+  let next = scratchText;
+  if (i >= 0) {
+    next = autonSource(i);
+    if (!next) {
+      routeStatus.textContent =
+        `no source for ${api.autonName(i)} — rebuild with sim/build.sh`;
+      routeStatus.className = 'status err';
+      autonSel.value = String(shownAuton);
+      return;
+    }
+  }
+  if (shownAuton < 0) scratchText = editor.value;
+  editor.value = next;
+  shownAuton = i;
+  refreshPlan();
+});
+
+const MOTION_OPS = new Set([OP.MOVE_TO, OP.TURN_HEADING, OP.TURN_POINT,
+                           OP.DRIVE, OP.BOOMERANG, OP.ARC, OP.SWING,
+                           OP.FOLLOW_PATH]);
+
+/// The pose an auton opens with, mirroring the bridge's rule that only a
+/// setPose before the first motion places the robot.
+function openingPose(cmds) {
+  let pose = null;
+  for (const [op, a, b, c] of cmds) {
+    if (MOTION_OPS.has(op)) break;
+    if (op === OP.SET_POSE) pose = { x: a, y: b, h: c };
+  }
+  return pose;
+}
+
 document.getElementById('btn-run-auton').addEventListener('click', () => {
+  const i = parseInt(autonSel.value, 10);
+  if (!(i >= 0)) {
+    routeStatus.textContent = 'pick an auton to run the compiled one';
+    routeStatus.className = 'status err';
+    return;
+  }
+
+  // Start where the auton says it starts. chassis.setPose() moves the
+  // estimate and not the robot, so without this the compiled routine drives
+  // its whole route from wherever the last run happened to end.
+  const src = autonSource(i);
+  const r = src ? parseAuton(src) : null;
+  const start = (r && !r.error) ? openingPose(r.cmds) : null;
+  if (start) api.reset(start.x, start.y, start.h);
+
   api.recClear();
-  api.runAuton(parseInt(autonSel.value, 10));
+  api.runAuton(i);
   running = true;
   btnPlay.textContent = 'Pause';
 });
@@ -587,7 +671,7 @@ canvas.addEventListener('pointerdown', e => {
 
   if (e.shiftKey) {
     editor.value = appendStatement(editor.value, moveToStatement(x, y));
-    localStorage.setItem('chad-sim.auton', editor.value);
+    saveScratch();
     refreshPlan();
     return;
   }
@@ -612,7 +696,7 @@ canvas.addEventListener('pointermove', e => {
     const wp = plan[dragWaypoint];
     if (!wp) return;
     editor.value = moveWaypoint(editor.value, wp, x, y);
-    localStorage.setItem('chad-sim.auton', editor.value);
+    saveScratch();
     refreshPlan();          // re-parse so the ranges follow the new text
     return;
   }

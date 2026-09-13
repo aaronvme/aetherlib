@@ -68,6 +68,17 @@ else
 fi
 
 mkdir -p sim/web
+
+# The front end draws a compiled auton's route by parsing the source it was
+# built from, so emit that next to the wasm and they cannot drift.
+if command -v python3 >/dev/null 2>&1; then
+    python3 sim/auton_sources.py
+elif command -v python >/dev/null 2>&1; then
+    python sim/auton_sources.py
+else
+    echo "warning: no python, compiled autons will have no planned path" >&2
+fi
+
 echo "building ${#SOURCES[@]} sources -> $OUT ($MODE)"
 em++ "${SOURCES[@]}" "${FLAGS[@]}" -o "$OUT"
 

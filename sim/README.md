@@ -151,6 +151,30 @@ void autonBlueLeft() {
 it out; paste and compile. That is the whole point -- what you tuned on screen
 is what ships, with no translation step in between to get wrong.
 
+### Running the autons you actually shipped
+
+The dropdown beside **Run auton** lists what `kAutons` in `sim/bridge/bridge.cpp`
+exposes, and those entries run the *compiled* function -- not the text in the
+editor. Selecting one loads the source it was built from, so its route draws
+like any other; your own text parks in the **scratch** slot and comes back when
+you pick it again.
+
+That source is generated, never committed. `sim/build.sh` runs
+`sim/auton_sources.py` over `src/gamespecific/autons/` and writes
+`sim/web/auton_sources.js` next to the wasm -- same tree, same build, so a drawn
+path cannot disagree with the routine that runs. Delete it and the app still
+boots; the compiled autons just lose their preview.
+
+**Run auton** resets to the pose the auton opens with before starting it.
+`chassis.setPose()` moves the estimate and not the robot, so without that the
+routine drives its whole route from wherever the last run happened to end.
+
+### setPose places the robot once
+
+Only a `setPose` before the first motion moves ground truth. A later one is a
+re-localization: it corrects the estimate and leaves the robot alone, because
+moving truth to meet the estimate would erase the error the sim exists to show.
+
 ### What it understands, and what it refuses
 
 Designated initializers are honoured, per motion, by name:

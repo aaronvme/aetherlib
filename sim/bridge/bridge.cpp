@@ -89,12 +89,18 @@ void breakTrails() {
     if (!gOdomTrail.xy.empty()) pushTrail(gOdomTrail, nan, nan);
 }
 
-struct AutonEntry { const char* name; void (*fn)(); };
+
+struct AutonEntry { const char* name; const char* symbol; void (*fn)(); };
+
+/// The symbol is stringised so sim/build.sh can pair each entry with the .cpp
+/// that defines it, and the browser can draw that source as a planned path.
+#define CHAD_AUTON(label, f) { label, #f, chad::f }
+
 const AutonEntry kAutons[] = {
-    {"Example",    chad::autonExample},
-    {"Red 3 Pin",  chad::autonRed3Pin},
-    {"Blue 3 Pin", chad::autonBlue3Pin},
-    {"Skills",     chad::autonSkills},
+    CHAD_AUTON("Example",    autonExample),
+    CHAD_AUTON("Red 3 Pin",  autonRed3Pin),
+    CHAD_AUTON("Blue 3 Pin", autonBlue3Pin),
+    CHAD_AUTON("Skills",     autonSkills),
 };
 constexpr int kAutonCount = static_cast<int>(sizeof(kAutons) / sizeof(kAutons[0]));
 
@@ -338,6 +344,13 @@ EMSCRIPTEN_KEEPALIVE
 const char* sim_auton_name(int i) {
     if (i < 0 || i >= kAutonCount) return "";
     return kAutons[i].name;
+}
+
+/// The C++ function name, which keys the source the browser draws a plan from.
+EMSCRIPTEN_KEEPALIVE
+const char* sim_auton_symbol(int i) {
+    if (i < 0 || i >= kAutonCount) return "";
+    return kAutons[i].symbol;
 }
 
 EMSCRIPTEN_KEEPALIVE
