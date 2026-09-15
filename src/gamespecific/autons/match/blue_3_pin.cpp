@@ -18,9 +18,9 @@ void autonBlue3Pin() {
 
 //pin1=========================================
     chassis.moveToPoint(55, 20.0, 1250, {.forwards=false, .maxSpeed=60.0f}, true);
-    liftToPinAbove(0, 15,1000);
+    liftToPinAbove(0, 10,1000);
     chassis.waitUntilSettled();
-    pros::delay(200);
+    // pros::delay(200);
     claw.toggle();
     claw.toggle();
     pros::delay(350);
@@ -33,22 +33,22 @@ void autonBlue3Pin() {
     pros::delay(200);
     claw.toggle();
     pros::delay(280);
-    chassis.turnToPoint(87.5,23.5,800,{ .forwards=false}, true);
+    chassis.turnToPoint(87.5,23.5,500,{ .forwards=false}, true);
     liftToPinAbove(1, 105,1000);
     chassis.moveToPoint(87.5,23.5, 850,{ .forwards=false, .maxSpeed=60.0f}, false);
     claw.toggle();
     pros::delay(500);
 
 //pin3=========================================
-    chassis.moveToPoint(34.5, 19, 1000, {}, true);
+    chassis.moveToPoint(34.5, 19, 650, {}, true);
     liftToPin(0, 1000);
-    chassis.turnToHeading(215, 800);
+    chassis.turnToHeading(215, 500);
     chassis.moveToPoint(50.6,41.8,1300, {.forwards=false, .maxSpeed=60.0f},false);
     claw.toggle();
     pros::delay(250);
-    chassis.turnToPoint(51.6,35.1, 800 ,{ .forwards=false}, true);
+    chassis.turnToPoint(51.6,35.1, 500 ,{ .forwards=false}, true);
     liftToPinAbove(2, 105);
-    chassis.moveDistance(-12.0f, 800, {.maxSpeed=50.0f}, false);
+    chassis.moveDistance(-12.0f, 650, {.maxSpeed=50.0f}, false);
     pros::delay(500);
     claw.toggle();
 }
