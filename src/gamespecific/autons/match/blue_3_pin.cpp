@@ -1,3 +1,4 @@
+#include "chad/chassis.hpp"
 #include "chad/movement_control/movetopoint.hpp"
 #include "gamespecific/autons.hpp"
 #include "gamespecific/lift.hpp"
@@ -19,19 +20,19 @@ void autonBlue3Pin() {
 
 //pin1=========================================
     chassis.moveToPoint(44, -10.0, 1250, {.forwards=false, .maxSpeed=60.0f}, true);
-    liftToPinAbove(0, 17,1000);
+    liftToPinAbove(0, 15,1000);
     chassis.waitUntilSettled();
     pros::delay(270);
     claw.toggle();
     claw.toggle();
-    pros::delay(35 );
+    pros::delay(100 );
 
 //pin2=========================================
     chassis.moveToPoint(58,-1.5, 500, {}, false);
     chassis.moveToPoint(41.8, -28, 1150,{.forwards=false, .maxSpeed=60.0f}, true);
     liftToPin(0, 1000);
     chassis.waitUntilSettled();
-    pros::delay(200);
+    pros::delay(150);
     claw.toggle();
     pros::delay(280);
     chassis.turnToPoint(41,-20,800,{ .forwards=false}, true);
@@ -43,18 +44,21 @@ void autonBlue3Pin() {
 //pin3=========================================
     chassis.moveToPoint(45, -30.5, 1000, {}, true);
     liftToPin(0, 1000);
-    chassis.turnToHeading(125, 800);
+    chassis.turnToHeading(125, 700);
     chassis.moveToPoint(22.4,-16.6,1300, {.forwards=false, .maxSpeed=60.0f},false);
     claw.toggle();
     pros::delay(250);
     chassis.turnToPoint(28.9,-13.4, 800 ,{ .forwards=false}, true);
     liftToPinAbove(2, 105);
     chassis.moveDistance(-12.0f, 800, {.maxSpeed=50.0f}, false);
-    pros::delay(500);
+    pros::delay(400);
     claw.toggle();
+    pros::delay(50);
 //middle
     chassis.moveToPoint(26.7, -13.9, 1000, {}, true);
     pros::delay(50);
-
+    chassis.turnToPoint(56, -42, 800, {.forwards=false}, true);
+    liftToPin(0, 1000);
+    chassis.moveToPoint(56, -42, 800, {.forwards=false}, false);
 }
 }

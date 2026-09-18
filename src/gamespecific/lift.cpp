@@ -10,9 +10,9 @@
 
 using namespace chad;
 
-static const double kP = 5.0;
-static const double kI = 0.0;
-static const double kD = 0.02;
+static const double kP = 5.0;//old 5.0
+static const double kI = 0.0;//old 0.0
+static const double kD = 0.02;//old 0.02
 
 static const LiftKind LIFT_KIND            = LiftKind::Cascade;
 
