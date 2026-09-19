@@ -20,6 +20,7 @@ void autonTuneRamsete();
 void autonCalibrateLift();
 void autonTuneLiftPresets();
 void autonProbeMcl();
+void autonProbeGeometry();
 
 
 
