@@ -77,6 +77,7 @@ void autonTuneRamsete() {
     out("ramsete: b then zeta");
     if (!headingOk(out)) return;
     out("place near 19,-22 facing 180");
+    waitForStart(out, "want all four beams reading");
 
     setFilters(false);
     auto ch = makeCharacterizer(out);
