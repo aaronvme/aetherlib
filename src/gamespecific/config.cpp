@@ -142,7 +142,7 @@ ChassisConfig chassisConfig = {
         .maxThetaDeviation = 0.08f,
         .trackingWheelVariance = 0.08f,
         .imeVariance = 0.0040f,
-        .imuVariance = 0.00017f,
+        .imuVariance = 0.005f,
         .horizDependentVarianceProp = 0.0040f,
         .horizConstantNoise = 0.03f,
         .distSyncProp = 0.10f,
@@ -165,7 +165,7 @@ ChassisConfig chassisConfig = {
         .rangeSigmaBase = 0.0872f,
         .rangeSigmaProp = 0.030f,
         .maxRangeIn = 78.0f,
-        .imuSigmaRad = 0.00017f
+        .imuSigmaRad = 0.006f
     },
 };
 

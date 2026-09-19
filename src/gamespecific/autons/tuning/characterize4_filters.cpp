@@ -11,7 +11,11 @@ namespace chad {
 using namespace autons;
 
 namespace {
-constexpr float kImuSigmaFloorRad = 0.01f * DEG_TO_RAD;
+// Measured parked, so it only ever sees drift, never the timing skew
+// between the heading a cycle predicts with and the moment its readings
+// were latched. At 150 deg/s that skew dwarfs any drift, and a floor of
+// 0.01 deg leaves particles with no heading spread to absorb it.
+constexpr float kImuSigmaFloorRad = 0.30f * DEG_TO_RAD;
 
 // This one parks against bare wall and never drives at a post, so the map is
 // a liability rather than a help: a post that is a couple of inches from
