@@ -137,7 +137,7 @@ ChassisConfig chassisConfig = {
         .particleCount = 1024,
         .resampleThreshold = 512,
         .maxSensorRange = 78.0f,
-        .distResampleVariance = 1.5f,
+        .distResampleVariance = 1.0f,
         .thetaResampleVariance = 0.01f,
         .maxThetaDeviation = 0.08f,
         .trackingWheelVariance = 0.08f,
@@ -151,9 +151,9 @@ ChassisConfig chassisConfig = {
         .confidenceThreshold = 10,
         .minSensorRange = 1.0f,
         .rangeSigmaCloseIn = 0.0872f,
-        .rangeSigmaProp = 0.05f,
+        .rangeSigmaProp = 0.010f,
         .maxRandomFrac = 0.25f,
-        .injectResampleFloor = 0.10f,
+        .injectResampleFloor = 0.20f,
         .autoSync = true
     },
 
