@@ -11,16 +11,18 @@ namespace chad {
 using namespace autons;
 
 namespace {
-// The weave used to sit at x=-40. Its curve cleared the posts fine, but
-// start and end share an x, so toStart drove the straight line between
-// them -- down x=-52, three inches off the post at (-47,-23.5), seven
-// times a session. Centred at x=+31 the whole thing has 16 in to spare.
+// A full cosine period over 48 in asks for a 4.9 in turn radius. Half the
+// track width is 5.75, so the inner wheel has to reverse -- RAMSETE cannot
+// follow that at speed, and a sweep over b would have been comparing how
+// each gain blows up in the corners rather than how it tracks. Half a
+// period is the same 24 in of lateral displacement at R = 19.5 in, and it
+// still bends both ways. It runs (24,0) -> (0,48); the diagonal toStart
+// takes back to the start clears the posts by 18 in.
 std::vector<Pose> weavePath(int n) {
     std::vector<Pose> out;
     for (int i = 0; i <= n; ++i) {
         const float u = static_cast<float>(i) / static_cast<float>(n);
-        out.push_back({31.0f - 12.0f * std::cos(TWO_PI * u),
-                       -24.0f + 48.0f * u, 0.0f});
+        out.push_back({12.0f + 12.0f * std::cos(PI * u), 48.0f * u, 0.0f});
     }
     for (size_t i = 0; i < out.size(); ++i) {
         const Pose& a = out[i == 0 ? 0 : i - 1];
@@ -76,7 +78,7 @@ void autonTuneRamsete() {
     Report out;
     out("ramsete: b then zeta");
     if (!headingOk(out)) return;
-    out("place near 19,-22 facing 180");
+    out("place near 32,0 facing 180");
     waitForStart(out, "want all four beams reading");
 
     setFilters(false);
