@@ -142,7 +142,7 @@ ChassisConfig chassisConfig = {
         .maxThetaDeviation = 0.08f,
         .trackingWheelVariance = 0.08f,
         .imeVariance = 0.0040f,
-        .imuVariance = 0.005f,
+        .imuVariance = 0.00017f,
         .horizDependentVarianceProp = 0.0040f,
         .horizConstantNoise = 0.03f,
         .distSyncProp = 0.10f,
@@ -150,16 +150,17 @@ ChassisConfig chassisConfig = {
         .updatePeriodMs = 25.0f,
         .confidenceThreshold = 10,
         .minSensorRange = 1.0f,
-        .rangeSigmaCloseIn = 0.0680f,
+        .rangeSigmaCloseIn = 0.0872f,
         .rangeSigmaProp = 0.05f,
-        .autoSync = true,
+        .autoSync = true
     },
 
     .ekfConfig = {
         .vertNoiseProp = 0.0040f,
         .slipNoiseProp = 0.0040f,
-        .rangeSigmaBase = 0.0680f,
+        .rangeSigmaBase = 0.0872f,
         .rangeSigmaProp = 0.030f,
+        .imuSigmaRad = 0.00017f,
     },
 };
 
