@@ -26,4 +26,5 @@ void autonTuneLiftPresets();
 void autonSkills();
 void autonRed3Pin();
 void autonBlue3Pin();
+void autonBlue3PinPid();
 }

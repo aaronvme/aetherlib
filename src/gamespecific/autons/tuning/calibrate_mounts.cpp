@@ -12,11 +12,32 @@
 namespace chad {
 using namespace autons;
 
+namespace {
+// Face to face along the robot's own axes, by ruler. Neither needs you to
+// find the turning centre -- that is what the spin measures. Front-to-back
+// is enough; left-to-right is a cross-check, and either one alone will do.
+constexpr float kSensorSpanXIn = 2.0f;   // front sensor face -> back face
+constexpr float kSensorSpanYIn = 9.5f;   // left sensor face -> right face
+
+constexpr int kFront = 0, kLeft = 1, kBack = 2, kRight = 3;
+
+// D = (interceptA + interceptB + meanCos * span) / 2
+bool solveWallDistance(const CalibrationResult* r, int a, int b, float spanIn,
+                       float& distOut) {
+    if (spanIn <= 0.0f) return false;
+    if (!r[a].valid || !r[b].valid) return false;
+    const float meanCos = 0.5f * (r[a].meanCosTheta + r[b].meanCosTheta);
+    if (!(meanCos > 0.1f)) return false;
+    distOut = 0.5f * (r[a].interceptIn + r[b].interceptIn + meanCos * spanIn);
+    return true;
+}
+}
+
 void autonCalibrateMounts() {
     Report out;
     out("mounts: sensor y offsets");
     if (!headingOk(out)) return;
-    out("square to a wall, 20-40 in");
+    waitForStart(out, "square to a wall, 20-40 in");
     out("it turns a full circle");
     setFilters(false);
 
@@ -41,12 +62,34 @@ void autonCalibrateMounts() {
 
     SensorCalibrator::Config scfg;
     scfg.sweepAnglesDeg = {-30.0f, -15.0f, 0.0f, 15.0f, 30.0f};
+    // The default second is not enough for the 90 deg hop between sensors.
+    // The reading cap only has to reject a no-return; a wall that is further
+    // than expected should still be fitted, and the residual will say if it
+    // was not a wall.
+    scfg.turnTimeoutMs = 2500.0f;
+    scfg.maxValidReadingMm = 2600.0f;
     scfg.verbose = false;
     SensorCalibrator cal(chassis, scfg);
 
     out("%d sensors, ~%d s", static_cast<int>(cfgs.size()),
         static_cast<int>(cfgs.size() * 9));
     const auto results = cal.calibrateAll(cfgs);
+
+    // The intercepts are only comparable across sensors if they came from the
+    // same spin at the same wall, so gather them before anything is applied.
+    CalibrationResult bySlot[MAX_DISTANCE_SENSORS];
+    for (size_t k = 0; k < results.size(); ++k) bySlot[slots[k]] = results[k];
+
+    float wallDist = 0.0f;
+    bool haveDist = solveWallDistance(bySlot, kFront, kBack, kSensorSpanXIn,
+                                      wallDist);
+    float wallDistY = 0.0f;
+    const bool haveY = solveWallDistance(bySlot, kLeft, kRight, kSensorSpanYIn,
+                                         wallDistY);
+    if (!haveDist && haveY) {
+        wallDist = wallDistY;
+        haveDist = true;
+    }
 
     int applied = 0;
     for (size_t k = 0; k < results.size(); ++k) {
@@ -58,8 +101,14 @@ void autonCalibrateMounts() {
         }
 
         out.result("s%d across %+.2f r%.2f", i, r.offsetIn, r.confidence);
-        tuning::applyMountOffset(sensorMounts[i].theta, r.offsetIn,
-                                 &sensorMounts[i].x, &sensorMounts[i].y);
+        if (haveDist && r.meanCosTheta > 0.1f) {
+            const float along = (wallDist - r.interceptIn) / r.meanCosTheta;
+            tuning::setMountFromBeam(sensorMounts[i].theta, along, r.offsetIn,
+                                     &sensorMounts[i].x, &sensorMounts[i].y);
+        } else {
+            tuning::applyMountOffset(sensorMounts[i].theta, r.offsetIn,
+                                     &sensorMounts[i].x, &sensorMounts[i].y);
+        }
         out.result("s%d -> x%+.2f y%+.2f", i, sensorMounts[i].x,
                    sensorMounts[i].y);
         applied++;
@@ -70,7 +119,16 @@ void autonCalibrateMounts() {
         out.result("flat and in range at +-30?");
         return;
     }
-    out.result("copy the y values into");
+    if (!haveDist) {
+        out.result("along NOT measured: set");
+        out.result("kSensorSpanXIn, rerun");
+    } else {
+        out.result("wall %.2f in from centre", wallDist);
+        if (haveY && kSensorSpanXIn > 0.0f) {
+            out.result("x/y spans disagree %+.2f", wallDist - wallDistY);
+        }
+    }
+    out.result("copy BOTH x and y into");
     out.result("sensorMounts in config.cpp.");
 
     out.result("reboot for MCL to use them");

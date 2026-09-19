@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
+#include <string>
 
 #include "liblvgl/lvgl.h"
 #include "pros/screen.hpp"
@@ -60,13 +61,15 @@ void Report::result(const char* fmt, ...) {
 }
 
 void setFilters(bool on) {
+    // Starting the filters by hand skipped what Chassis::startTracking does
+    // to keep them out of each other's way: with EKF running, MCL's autoSync
+    // has to be off, or both of them write corrections into the same odom
+    // pose and it jitters between them. Anything that then drives to a field
+    // coordinate -- moveDistance included -- chases that.
     if (on) {
-        chassis.mcl().startTracking();
-        chassis.ekf().startTracking();
+        chassis.startTracking();
     } else {
-        chassis.ekf().stopTracking();
-        chassis.mcl().stopTracking();
-        chassis.rcl().stopTracking();
+        chassis.stopTracking();
     }
     pros::delay(200);
 }
@@ -118,28 +121,88 @@ void waitForA(Report& out, const char* why) {
     master.set_text(0, 0, "running-hands off ");
 }
 
-bool solvePark(const tuning::RangeNoiseFit& beams, float theta,
-               float& cx, float& cy, int& pinned) {
-    bool gotX = false, gotY = false;
-    const float c = std::cos(theta), s = std::sin(theta);
-    for (int i = 0; i < MAX_DISTANCE_SENSORS; ++i) {
-        if (beams.samples[i] <= 8) continue;
-        const Pose& m = sensorMounts[i];
-        const float ox = m.x * c - m.y * s;
-        const float oy = m.x * s + m.y * c;
-        const float aw = theta + m.theta;
-        const float bx = std::cos(aw), by = std::sin(aw);
-        const float d = beams.meanIn[i];
-        if (std::fabs(bx) > 0.7f) {
-            cx = tuning::solveAxisSingle(d, bx, ox, Field::FIELD_HALF_WALL);
-            gotX = true;
-        } else if (std::fabs(by) > 0.7f) {
-            cy = tuning::solveAxisSingle(d, by, oy, Field::FIELD_HALF_WALL);
-            gotY = true;
+void waitForStart(Report& out, const char* what) {
+    out("%s", what);
+    out("A starts. live beams below:");
+    master.set_text(0, 0, "place it, press A ");
+    pros::delay(60);
+    master.rumble("-");
+
+    const uint32_t t0 = pros::millis();
+    uint32_t nextDraw = 0;
+    int page = 0;
+    while (pros::millis() - t0 < 180000u) {
+        if (master.get_digital(pros::E_CONTROLLER_DIGITAL_A)) break;
+        if (pros::millis() >= nextDraw) {
+            nextDraw = pros::millis() + 250;
+
+            float in[MAX_DISTANCE_SENSORS] = {};
+            int row = kBeamRow;
+            for (int i = 0; i < MAX_DISTANCE_SENSORS; ++i) {
+                if (distSensors[i] == nullptr) continue;
+                const int mm = distSensors[i]->get();
+                const int conf = distSensors[i]->get_confidence();
+                in[i] = static_cast<float>(mm) / 25.4f;
+                pros::screen::print(pros::E_TEXT_SMALL, row++,
+                                    "s%d %6d mm  c%3d  %6.1f in   ", i, mm,
+                                    conf, static_cast<double>(in[i]));
+            }
+            // The brain is on the robot and the robot is against a wall, so
+            // put it on the controller too.
+            if (page == 0) {
+                master.set_text(1, 0, "F" + std::to_string(static_cast<int>(in[0])) +
+                                      " L" + std::to_string(static_cast<int>(in[1])) + "    ");
+            } else {
+                master.set_text(2, 0, "B" + std::to_string(static_cast<int>(in[2])) +
+                                      " R" + std::to_string(static_cast<int>(in[3])) + "    ");
+            }
+            page ^= 1;
         }
+        pros::delay(20);
     }
+    while (master.get_digital(pros::E_CONTROLLER_DIGITAL_A)) pros::delay(20);
+    master.set_text(0, 0, "running-hands off ");
+}
+
+bool solvePark(const tuning::RangeNoiseFit& beams, float theta,
+               float& cx, float& cy, int& pinned, bool* mapDisagrees) {
+    if (mapDisagrees != nullptr) *mapDisagrees = false;
+
+    BeamRead reads[MAX_DISTANCE_SENSORS];
+    bool gotX = false, gotY = false;
+    const auto cfg = chassis.mcl().config();
+    for (int i = 0; i < MAX_DISTANCE_SENSORS; ++i) {
+        reads[i] = BeamRead{};
+        if (distSensors[i] == nullptr) continue;
+        const Pose& m = sensorMounts[i];
+        const float aw = theta + m.theta;
+        reads[i].present = true;
+        reads[i].bx = std::cos(aw);
+        reads[i].by = std::sin(aw);
+        reads[i].alongX = tuning::mountAlongAxis(m.x, m.y, theta, true);
+        reads[i].alongY = tuning::mountAlongAxis(m.x, m.y, theta, false);
+        if (beams.samples[i] <= 8) continue;
+
+        reads[i].valid = true;
+        reads[i].inches = beams.meanIn[i];
+        reads[i].sigmaIn = beams.sigmaIn[i] > 0.0f
+                               ? beams.sigmaIn[i]
+                               : tuning::beamSigmaBase(beams.meanIn[i],
+                                                       cfg.rangeSigmaCloseIn,
+                                                       cfg.rangeSigmaProp);
+        if (std::fabs(reads[i].bx) > 0.7f) gotX = true;
+        else if (std::fabs(reads[i].by) > 0.7f) gotY = true;
+    }
+
     pinned = (gotX ? 1 : 0) + (gotY ? 1 : 0);
-    return gotX && gotY;
+    if (pinned < 2) return false;
+
+    if (kFieldIsClear) return solveWallTruthClear(reads, cx, cy);
+
+    int inliers = 0;
+    if (solveWallTruthMapped(reads, cx, cy, inliers)) return true;
+    if (mapDisagrees != nullptr) *mapDisagrees = true;
+    return false;
 }
 
 tuning::Characterizer makeCharacterizer(Report& out) {
@@ -158,22 +221,27 @@ int readBeams(BeamRead* out, float robotThetaRad) {
     for (int i = 0; i < MAX_DISTANCE_SENSORS; ++i) {
         out[i] = BeamRead{};
         if (distSensors[i] == nullptr) continue;
+
+        // Geometry is filled for every fitted sensor, reading or not: a
+        // sensor that stayed quiet has still told the solve something.
+        const Pose& m = sensorMounts[i];
+        const float aw = robotThetaRad + m.theta;
+        out[i].present = true;
+        out[i].bx = std::cos(aw);
+        out[i].by = std::sin(aw);
+        out[i].alongX = tuning::mountAlongAxis(m.x, m.y, robotThetaRad, true);
+        out[i].alongY = tuning::mountAlongAxis(m.x, m.y, robotThetaRad, false);
+
         const int mm = distSensors[i]->get();
         if (mm <= static_cast<int>(cfg.minSensorRange) || mm > 9000) continue;
         if (distSensors[i]->get_confidence() < cfg.confidenceThreshold) continue;
         const float inches = static_cast<float>(mm) / 25.4f;
         if (inches > cfg.maxSensorRange) continue;
 
-        const Pose& m = sensorMounts[i];
-        const float aw = robotThetaRad + m.theta;
         out[i].valid = true;
         out[i].inches = inches;
         out[i].sigmaIn = tuning::beamSigmaBase(inches, cfg.rangeSigmaCloseIn,
                                                cfg.rangeSigmaProp);
-        out[i].bx = std::cos(aw);
-        out[i].by = std::sin(aw);
-        out[i].alongX = tuning::mountAlongAxis(m.x, m.y, robotThetaRad, true);
-        out[i].alongY = tuning::mountAlongAxis(m.x, m.y, robotThetaRad, false);
         ++n;
     }
     return n;
@@ -235,12 +303,52 @@ bool solveWallTruthClear(const BeamRead* beams, float& cx, float& cy) {
     return bestX < 1e9f && bestY < 1e9f;
 }
 
+namespace {
+int loadFieldCircles(tuning::MapCircle* out, int cap) {
+    int n = 0;
+    for (const auto& c : fieldCircleObstacles()) {
+        if (n >= cap) break;
+        out[n++] = {c.x, c.y, c.radius};
+    }
+    return n;
+}
+}
+
+bool solveWallTruthMapped(const BeamRead* beams, float& cx, float& cy,
+                          int& inliers) {
+    inliers = 0;
+    if (beams == nullptr) return false;
+
+    tuning::MapCircle circles[kMaxFieldCircles];
+    const int n = loadFieldCircles(circles, kMaxFieldCircles);
+
+    const auto fix = tuning::solveMapped(beams, MAX_DISTANCE_SENSORS, circles,
+                                         n, Field::FIELD_HALF_WALL,
+                                         chassis.mcl().config().maxSensorRange);
+    if (!fix.trusted) return false;
+    cx = fix.x;
+    cy = fix.y;
+    inliers = fix.inliers;
+    return true;
+}
+
 bool solveTruth(const BeamRead* beams, const BeamPair* pairs, int nPairs,
-                float kSigmas, float& cx, float& cy, float& worstBracketIn) {
+                float kSigmas, float& cx, float& cy, float& worstBracketIn,
+                int* inliers) {
     worstBracketIn = 0.0f;
-    if (kFieldIsClear) return solveWallTruthClear(beams, cx, cy);
-    return solveWallTruth(beams, pairs, nPairs, kSigmas, cx, cy,
-                          worstBracketIn);
+    if (inliers != nullptr) *inliers = 0;
+    if (kFieldIsClear) {
+        return solveWallTruthClear(beams, cx, cy);
+    }
+    if (solveWallTruth(beams, pairs, nPairs, kSigmas, cx, cy,
+                       worstBracketIn)) {
+        if (inliers != nullptr) *inliers = kBracketedFix;
+        return true;
+    }
+    int n = 0;
+    if (!solveWallTruthMapped(beams, cx, cy, n)) return false;
+    if (inliers != nullptr) *inliers = n;
+    return true;
 }
 
 bool solveWallTruth(const BeamRead* beams, const BeamPair* pairs, int nPairs,

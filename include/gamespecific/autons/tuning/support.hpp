@@ -37,20 +37,25 @@ std::function<float()> tiltProbe();
 
 void waitForA(Report& out, const char* why);
 
+// Like waitForA, but for the gate before a routine moves. It prints as
+// progress, not as a result: the first result() call freezes the screen into
+// the results page and everything after it stops showing.
+void waitForStart(Report& out, const char* what);
+
 bool solvePark(const tuning::RangeNoiseFit& beams, float theta,
-               float& cx, float& cy, int& pinned);
+               float& cx, float& cy, int& pinned,
+               bool* mapDisagrees = nullptr);
 
 tuning::Characterizer makeCharacterizer(Report& out);
 
-constexpr bool kFieldIsClear = true;
+constexpr bool kFieldIsClear = false;
 
-struct BeamRead {
-    bool valid{false};
-    float inches{0.0f};
-    float sigmaIn{0.0f};
-    float bx{0.0f}, by{0.0f};
-    float alongX{0.0f}, alongY{0.0f};
-};
+using BeamRead = tuning::MapBeam;
+
+constexpr int kMaxFieldCircles = 16;
+
+// Where waitForStart draws the live beam readout, below the progress lines.
+constexpr int kBeamRow = 14;
 
 struct BeamPair {
     int plus{-1}, minus{-1};
@@ -67,6 +72,18 @@ bool solveWallTruth(const BeamRead* beams, const BeamPair* pairs, int nPairs,
 
 bool solveWallTruthClear(const BeamRead* beams, float& cx, float& cy);
 
+bool solveWallTruthMapped(const BeamRead* beams, float& cx, float& cy,
+                          int& inliers);
+
+// An opposing pair brackets a blockage outright, so it reports as this rather
+// than an inlier count.
+constexpr int kBracketedFix = -1;
+
 bool solveTruth(const BeamRead* beams, const BeamPair* pairs, int nPairs,
-                float kSigmas, float& cx, float& cy, float& worstBracketIn);
+                float kSigmas, float& cx, float& cy, float& worstBracketIn,
+                int* inliers = nullptr);
+
+inline bool fixVerified(int inliers) {
+    return inliers == kBracketedFix || inliers >= tuning::MAP_VERIFIED_INLIERS;
+}
 }

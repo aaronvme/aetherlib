@@ -13,6 +13,17 @@ using namespace autons;
 namespace {
 constexpr float kImuSigmaFloorRad = 0.01f * DEG_TO_RAD;
 
+// This one parks against bare wall and never drives at a post, so the map is
+// a liability rather than a help: a post that is a couple of inches from
+// where it is registered would move the fix. Off for the routine, back on
+// however it exits.
+struct PostMapOff {
+    PostMapOff() { clearFieldObstacles(); }
+    ~PostMapOff() { registerFieldObstacles(); }
+    PostMapOff(const PostMapOff&) = delete;
+    PostMapOff& operator=(const PostMapOff&) = delete;
+};
+
 bool fitSigma(const std::vector<float>& x, const std::vector<float>& y,
               float& a, float& b, float& originSlope) {
     const int n = static_cast<int>(x.size());
@@ -35,6 +46,8 @@ void autonCharacterize4Filters() {
     out("phase 4: sensor + pose noise");
     if (!headingOk(out)) return;
     out("stays parked. do not touch it");
+    out("posts ignored: bare wall only");
+    PostMapOff postsOff;
 
     setFilters(false);
     auto ch = makeCharacterizer(out);
@@ -60,7 +73,7 @@ void autonCharacterize4Filters() {
     }
     if (beams.worstSigmaIn <= 0.0f) {
         out.result("no beam saw a wall. park");
-        out.result("within ~70 in of two walls");
+        out.result("nearer two walls, no post");
         return;
     }
 
@@ -75,9 +88,15 @@ void autonCharacterize4Filters() {
     const float th = chassis.getPose().theta;
     float px = 0.0f, py = 0.0f;
     int pinned = 0;
-    if (!solvePark(beams, th, px, py, pinned)) {
-        out.result("only %d of 2 axes pinned --", pinned);
-        out.result("park in a corner and rerun");
+    bool mapDisagrees = false;
+    if (!solvePark(beams, th, px, py, pinned, &mapDisagrees)) {
+        if (mapDisagrees) {
+            out.result("beams do not name one spot");
+            out.result("square up to bare wall");
+        } else {
+            out.result("only %d of 2 axes pinned --", pinned);
+            out.result("need a wall on each axis");
+        }
         out.result("mcl.rangeSigmaCloseIn = %.4ff", beams.worstSigmaIn);
         out.result("ekf.rangeSigmaBase = %.4ff", beams.worstSigmaIn);
         return;
@@ -100,6 +119,12 @@ void autonCharacterize4Filters() {
 
     out.result("gate streak %d reloc %d",
                chassis.ekf().mclRejectStreak(), chassis.ekf().relocateCount());
+
+    // The sweep wants beam noise at a few ranges; it does not want a pose a
+    // filter is still correcting. moveDistance drives to a field coordinate
+    // fixed when the move starts, so a correction mid-move is a target that
+    // moved.
+    setFilters(false);
 
     constexpr int kStops = 3;
     constexpr float kStopIn = 8.0f;

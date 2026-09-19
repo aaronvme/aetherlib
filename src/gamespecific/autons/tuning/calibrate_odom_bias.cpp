@@ -22,6 +22,7 @@ constexpr uint32_t kDriveTimeoutMs = 5000u;
 struct Fix {
     float x{0.0f}, y{0.0f};
     float bracketIn{0.0f};
+    int inliers{0};
     bool ok{false};
 };
 
@@ -31,8 +32,8 @@ Fix takeFix(float theta) {
     readBeams(beams, theta);
     BeamPair pairs[2];
     const int n = findBeamPairs(beams, pairs);
-    if (n == 0 && !kFieldIsClear) return f;
-    f.ok = solveTruth(beams, pairs, n, kBracketSigmas, f.x, f.y, f.bracketIn);
+    f.ok = solveTruth(beams, pairs, n, kBracketSigmas, f.x, f.y, f.bracketIn,
+                      &f.inliers);
     return f;
 }
 }
@@ -46,7 +47,7 @@ void autonCalibrateOdomBias() {
         clearFieldObstacles();
         out("clear field: 1 beam per axis");
     } else {
-        out("obstacles fine, it rejects");
+        out("posts fine: pair, then map");
     }
 
     setFilters(false);
@@ -58,7 +59,7 @@ void autonCalibrateOdomBias() {
     }
 
     std::vector<tuning::BiasLeg> legs;
-    int rejected = 0, noFix = 0;
+    int rejected = 0, noFix = 0, unverified = 0;
     float dir = 1.0f;
 
     for (int li = 0; li < kNumLengths; ++li) {
@@ -112,6 +113,9 @@ void autonCalibrateOdomBias() {
                     out("  moved %.1f, wanted %.0f", trueLen, len);
                 } else {
                     legs.push_back(leg);
+                    if (!fixVerified(a.inliers) || !fixVerified(b.inliers)) {
+                        unverified++;
+                    }
                     out("  along %+.2f cross %+.2f", leg.alongErrIn,
                         leg.crossErrIn);
                 }
@@ -156,6 +160,12 @@ void autonCalibrateOdomBias() {
     }
     if (noFix + rejected > 0) {
         out.result("no fix %d, rejected %d", noFix, rejected);
+    }
+    if (unverified > 0) {
+        out.result("%d/%d legs ran on a 2 beam", unverified,
+                   static_cast<int>(legs.size()));
+        out.result("fix: unchecked, drive nearer");
+        out.result("a corner or trust it less");
     }
 }
 }

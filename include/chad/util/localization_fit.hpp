@@ -287,6 +287,316 @@ inline WallSolve solveAxisBracketed(float readingPlus, float dirPlus,
     return out;
 }
 
+struct MapCircle {
+    float x{0.0f}, y{0.0f}, radius{0.0f};
+};
+
+struct MapBeam {
+    // A configured sensor whose geometry below is filled in. Silence from one
+    // of these is a measurement: whatever it was pointed at was out of reach.
+    bool present{false};
+    bool valid{false};
+    float inches{0.0f};
+    float sigmaIn{0.0f};
+    float bx{0.0f}, by{0.0f};
+    float alongX{0.0f}, alongY{0.0f};
+};
+
+struct MapSolve {
+    float x{0.0f}, y{0.0f};
+    int inliers{0};
+    bool trusted{false};
+};
+
+constexpr float MAP_FAR_IN = 200.0f;
+constexpr float MAP_INLIER_IN = 1.0f;
+constexpr float MAP_SIGMAS = 3.0f;
+// The shipped rangeSigmaProp is 0.05, which at 60 in asks for a 9 in inlier
+// window -- wide enough to call a post a wall. Phase 4 fits that number, but
+// the solve cannot wait for it.
+constexpr float MAP_TOL_MAX_IN = 3.0f;
+// A ray either hits a 2 in circle or it does not, and at a graze that flips
+// the predicted range by the length of the field. Admitting a near miss, with
+// the chord going to zero as it leaves, keeps the objective walkable.
+constexpr float MAP_GRAZE_PAD_IN = 1.0f;
+constexpr float MAP_GRAZE_PENALTY = 4.0f;
+// A wall this far inside the sensor's reach would have been reported, so a
+// pose that puts one there and calls the silence normal is paying for it.
+constexpr float MAP_SILENCE_MARGIN_IN = 5.0f;
+constexpr float MAP_SILENCE_COST_IN = 3.0f;
+constexpr int MAP_MIN_INLIERS = 2;
+constexpr int MAP_MAX_OUTLIERS = 1;
+// Below this the fix was not cross-checked: one beam per axis explains itself
+// however short it reads.
+constexpr int MAP_VERIFIED_INLIERS = 3;
+
+inline float castFieldMap(float sx, float sy, float dx, float dy,
+                          const MapCircle* circles, int nCircles,
+                          float halfSpanIn, float farIn = MAP_FAR_IN) {
+    float best = farIn;
+
+    if (dx > 1e-6f) best = std::fmin(best, (halfSpanIn - sx) / dx);
+    else if (dx < -1e-6f) best = std::fmin(best, (-halfSpanIn - sx) / dx);
+    if (dy > 1e-6f) best = std::fmin(best, (halfSpanIn - sy) / dy);
+    else if (dy < -1e-6f) best = std::fmin(best, (-halfSpanIn - sy) / dy);
+    if (best < 0.0f) best = 0.0f;
+
+    for (int k = 0; k < nCircles; k++) {
+        const float fx = sx - circles[k].x;
+        const float fy = sy - circles[k].y;
+        const float b = 2.0f * (fx * dx + fy * dy);
+        const float c = fx * fx + fy * fy - circles[k].radius * circles[k].radius;
+        float disc = b * b - 4.0f * c;
+        if (disc < 0.0f) continue;
+        disc = std::sqrt(disc);
+        const float t1 = (-b - disc) * 0.5f;
+        const float t2 = (-b + disc) * 0.5f;
+        if (t1 >= 0.0f) { if (t1 < best) best = t1; }
+        else if (t2 >= 0.0f && t2 < best) best = t2;
+    }
+    return best;
+}
+
+inline float mapBeamTolerance(float sigmaIn) {
+    const float tol = MAP_SIGMAS * sigmaIn;
+    if (tol < MAP_INLIER_IN) return MAP_INLIER_IN;
+    if (tol > MAP_TOL_MAX_IN) return MAP_TOL_MAX_IN;
+    return tol;
+}
+
+// How far the reading is from the nearest thing on the map that could have
+// produced it: the wall, or any post the ray passes close enough to.
+// Distance to the first thing on the map the ray certainly strikes. Nothing
+// standing behind it can explain a reading, and if it is well inside the
+// sensor's reach the sensor had no business staying quiet.
+inline float mapSolidRange(float sx, float sy, float dx, float dy,
+                           const MapCircle* circles, int nCircles,
+                           float halfSpanIn) {
+    float solid = MAP_FAR_IN;
+    if (dx > 1e-6f) solid = std::fmin(solid, (halfSpanIn - sx) / dx);
+    else if (dx < -1e-6f) solid = std::fmin(solid, (-halfSpanIn - sx) / dx);
+    if (dy > 1e-6f) solid = std::fmin(solid, (halfSpanIn - sy) / dy);
+    else if (dy < -1e-6f) solid = std::fmin(solid, (-halfSpanIn - sy) / dy);
+    if (solid < 0.0f) solid = 0.0f;
+
+    for (int k = 0; k < nCircles; k++) {
+        const float ox = circles[k].x - sx;
+        const float oy = circles[k].y - sy;
+        const float along = ox * dx + oy * dy;
+        if (along <= 0.0f) continue;
+        const float r = circles[k].radius;
+        const float perp = std::fabs(oy * dx - ox * dy);
+        if (perp >= r) continue;
+        const float hit = along - std::sqrt(r * r - perp * perp);
+        if (hit > 0.0f && hit < solid) solid = hit;
+    }
+    return solid;
+}
+
+inline float mapBeamResidual(float sx, float sy, float dx, float dy,
+                             float readingIn, const MapCircle* circles,
+                             int nCircles, float halfSpanIn) {
+    const float solid =
+        mapSolidRange(sx, sy, dx, dy, circles, nCircles, halfSpanIn);
+
+    float best = std::fabs(readingIn - solid);
+    for (int k = 0; k < nCircles; k++) {
+        const float ox = circles[k].x - sx;
+        const float oy = circles[k].y - sy;
+        const float along = ox * dx + oy * dy;
+        if (along <= 0.0f) continue;
+        const float r = circles[k].radius;
+        const float perp = std::fabs(oy * dx - ox * dy);
+        const float over = perp - r;
+        if (over > MAP_GRAZE_PAD_IN) continue;
+        const float chord = over < 0.0f ? std::sqrt(r * r - perp * perp) : 0.0f;
+        const float postRange = along - chord;
+        if (postRange <= 0.0f || postRange > solid) continue;
+        // A ray that misses by `over` did not hit, and saying so costs that
+        // much. Zero at the rim, it keeps the objective continuous without
+        // handing a clean miss the same credit as a hit.
+        const float resid = std::fabs(readingIn - postRange) +
+                            (over > 0.0f ? over * MAP_GRAZE_PENALTY : 0.0f);
+        if (resid < best) best = resid;
+    }
+    return best;
+}
+
+inline int scoreMapCandidate(const MapBeam* beams, int nBeams, float cx,
+                             float cy, const MapCircle* circles, int nCircles,
+                             float halfSpanIn, float maxRangeIn, float& cost) {
+    cost = 0.0f;
+    int inliers = 0;
+    for (int i = 0; i < nBeams; i++) {
+        const MapBeam& b = beams[i];
+        if (!b.valid) {
+            // Silence only fits a pose with nothing in reach down that ray.
+            if (!b.present || maxRangeIn <= 0.0f) continue;
+            const float solid = mapSolidRange(cx + b.alongX, cy + b.alongY,
+                                              b.bx, b.by, circles, nCircles,
+                                              halfSpanIn);
+            if (solid < maxRangeIn - MAP_SILENCE_MARGIN_IN) {
+                cost += MAP_SILENCE_COST_IN;
+            }
+            continue;
+        }
+        const float resid =
+            mapBeamResidual(cx + b.alongX, cy + b.alongY, b.bx, b.by,
+                            b.inches, circles, nCircles, halfSpanIn);
+        const float tol = mapBeamTolerance(b.sigmaIn);
+        if (resid <= tol) { inliers++; cost += resid; }
+        else { cost += tol; }
+    }
+    return inliers;
+}
+
+constexpr int MAX_MAP_BEAMS = 8;
+
+// The pose is searched, not proposed. Reading each beam as a clean wall hit
+// and solving gives a candidate set with a blind spot: where every beam on an
+// axis is looking at a post, the true pose is not in the set at all, and the
+// solve cannot even see that it has an alias. The post lattice is periodic, so
+// those aliases are real -- (-48,-14) and (-48,-61.7) agree on every beam to
+// within 0.65 in. A sweep is the only thing that finds both.
+constexpr float MAP_COARSE_IN = 1.0f;
+constexpr float MAP_FINE_IN = 0.05f;
+constexpr float MAP_RIVAL_SEP_IN = 6.0f;
+constexpr float MAP_RIVAL_MARGIN_IN = 0.75f;
+
+struct MapScore {
+    float x{0.0f}, y{0.0f};
+    float cost{0.0f};
+    int inliers{-1};
+};
+
+inline bool mapBetter(const MapScore& a, const MapScore& b) {
+    if (b.inliers < 0) return true;
+    if (a.inliers != b.inliers) return a.inliers > b.inliers;
+    return a.cost < b.cost;
+}
+
+// Local descent onto the cell the coarse sweep landed in. A pattern search,
+// not an axis-at-a-time walk: the latter stalls on this objective, and a best
+// that is polished while its rival is not makes the two incomparable.
+inline void refineMapScore(MapScore& best, const MapBeam* beams, int nBeams,
+                           const MapCircle* circles, int nCircles,
+                           float halfSpanIn, float maxRangeIn) {
+    static constexpr float kDx[8] = {1, -1, 0, 0, 1, 1, -1, -1};
+    static constexpr float kDy[8] = {0, 0, 1, -1, 1, -1, 1, -1};
+
+    float step = MAP_COARSE_IN;
+    for (int guard = 0; guard < 256 && step >= MAP_FINE_IN; guard++) {
+        MapScore local = best;
+        for (int k = 0; k < 8; k++) {
+            MapScore t;
+            t.x = best.x + kDx[k] * step;
+            t.y = best.y + kDy[k] * step;
+            if (std::fabs(t.x) > halfSpanIn || std::fabs(t.y) > halfSpanIn) {
+                continue;
+            }
+            t.inliers = scoreMapCandidate(beams, nBeams, t.x, t.y, circles,
+                                          nCircles, halfSpanIn, maxRangeIn,
+                                          t.cost);
+            if (mapBetter(t, local)) local = t;
+        }
+        if (mapBetter(local, best)) best = local;
+        else step *= 0.5f;
+    }
+}
+
+inline MapSolve solveMapped(const MapBeam* beams, int nBeams,
+                            const MapCircle* circles, int nCircles,
+                            float halfSpanIn, float maxRangeIn = 0.0f) {
+    MapSolve out;
+    if (beams == nullptr || nBeams <= 0 || nBeams > MAX_MAP_BEAMS) return out;
+    if (circles == nullptr) nCircles = 0;
+    if (!(halfSpanIn > 0.0f)) return out;
+
+    int nValid = 0;
+    float observedMax = 0.0f;
+    for (int i = 0; i < nBeams; i++) {
+        if (!beams[i].valid) continue;
+        nValid++;
+        if (beams[i].inches > observedMax) observedMax = beams[i].inches;
+    }
+    if (nValid < MAP_MIN_INLIERS) return out;
+
+    // Understating the reach excuses silence that should not be excused, and
+    // that is how a wrong pose gets believed. A beam that actually returned
+    // 117 in proves the sensor sees at least that far, whatever it was told.
+    if (observedMax > maxRangeIn) maxRangeIn = observedMax;
+
+    const int steps = static_cast<int>(2.0f * halfSpanIn / MAP_COARSE_IN) + 1;
+
+    MapScore best;
+    for (int ix = 0; ix < steps; ix++) {
+        const float x = -halfSpanIn + ix * MAP_COARSE_IN;
+        for (int iy = 0; iy < steps; iy++) {
+            MapScore t;
+            t.x = x;
+            t.y = -halfSpanIn + iy * MAP_COARSE_IN;
+            t.inliers = scoreMapCandidate(beams, nBeams, t.x, t.y, circles,
+                                          nCircles, halfSpanIn, maxRangeIn,
+                                          t.cost);
+            if (mapBetter(t, best)) best = t;
+        }
+    }
+    if (best.inliers < 0) return out;
+    refineMapScore(best, beams, nBeams, circles, nCircles, halfSpanIn,
+                   maxRangeIn);
+
+    // In a corner only the two near walls are in a sensor's reach, so the
+    // floor has to be what is actually visible. One beam may be lost to
+    // something the map does not carry; two is not survivable.
+    const int need = nValid - MAP_MAX_OUTLIERS > MAP_MIN_INLIERS
+                         ? nValid - MAP_MAX_OUTLIERS
+                         : MAP_MIN_INLIERS;
+    if (best.inliers < need) return out;
+
+    // The same sweep again, ignoring everything near the winner. Whatever is
+    // left is the best rival explanation of these beams; if it explains them
+    // about as well, the beams do not name one pose.
+    MapScore rival;
+    for (int ix = 0; ix < steps; ix++) {
+        const float x = -halfSpanIn + ix * MAP_COARSE_IN;
+        for (int iy = 0; iy < steps; iy++) {
+            MapScore t;
+            t.x = x;
+            t.y = -halfSpanIn + iy * MAP_COARSE_IN;
+            if (std::fabs(t.x - best.x) <= MAP_RIVAL_SEP_IN &&
+                std::fabs(t.y - best.y) <= MAP_RIVAL_SEP_IN) {
+                continue;
+            }
+            t.inliers = scoreMapCandidate(beams, nBeams, t.x, t.y, circles,
+                                          nCircles, halfSpanIn, maxRangeIn,
+                                          t.cost);
+            if (mapBetter(t, rival)) rival = t;
+        }
+    }
+    if (rival.inliers >= 0) {
+        refineMapScore(rival, beams, nBeams, circles, nCircles, halfSpanIn,
+                       maxRangeIn);
+        // Descent can walk the rival back into the winner's basin, and a pose
+        // compared against itself always ties. That is not a rival.
+        const bool separate =
+            std::fabs(rival.x - best.x) > MAP_RIVAL_SEP_IN ||
+            std::fabs(rival.y - best.y) > MAP_RIVAL_SEP_IN;
+        if (separate) {
+            if (rival.inliers > best.inliers) return out;
+            if (rival.inliers == best.inliers &&
+                rival.cost <= best.cost + MAP_RIVAL_MARGIN_IN) {
+                return out;
+            }
+        }
+    }
+
+    out.x = best.x;
+    out.y = best.y;
+    out.inliers = best.inliers;
+    out.trusted = true;
+    return out;
+}
+
 constexpr int MAX_BIAS_GROUPS = 8;
 
 struct BiasLeg {

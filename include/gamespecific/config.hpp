@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <vector>
 
 #include "main.h"
 #include "chad/api.hpp"
@@ -44,6 +45,8 @@ extern Chassis chassis;
 extern AutonSelector selector;
 
 void registerFieldObstacles();
+
+const std::vector<MclTracking::CircleObstacle>& fieldCircleObstacles();
 
 void clearFieldObstacles();
 

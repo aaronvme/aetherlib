@@ -4,11 +4,13 @@
 #include "chad/api.hpp"
 #include "gamespecific/autons.hpp"
 #include "gamespecific/lift.hpp"
+#include "pros/motors.h"
 
 using namespace chad;
 
 void initialize() {
     chassis.calibrate();
+    registerFieldObstacles();
     startPoseTelemetry();
     liftMotor.tare_position();
     claw.set_value(true);
@@ -29,7 +31,10 @@ void autonomous() {
 }
 
 void opcontrol() {
-    // autonCalibrateLift();      // kG, friction, travel
+    chassis.setBrakeMode(pros::E_MOTOR_BRAKE_BRAKE);
+    autonCharacterize4Filters();  // sensor + pose noise
+    // autonCalibrateMounts();   // distance sensor mount offsets
+    // autonCalibrateLift();     // kG, friction, travel
     // autonTuneLiftPresets();   // the 7 macro heights
 
     driverControl();

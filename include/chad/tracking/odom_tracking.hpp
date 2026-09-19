@@ -99,6 +99,10 @@ public:
     }
 
     void setPose(const Pose& pose);
+
+    /// Position-only correction from a filter. Which way zero points is
+    /// setPose's business, not an estimator's.
+    void syncPose(const Pose& pose);
     Pose getPose() const;
 
     void reset();
@@ -123,6 +127,9 @@ private:
     float mPrevHorizDist{0.0f};
     float mPrevHeadingRad{0.0f};
 
+    // Rotation from the IMU's boot zero to the field frame, set by setPose.
+    float mHeadingOffsetRad{0.0f};
+
     mutable uint32_t mImuFaults{0};
     std::atomic<bool> mBackgroundUpdatesEnabled{false};
 
@@ -136,6 +143,8 @@ private:
     float currentVertDistance() const;
 
     float currentHorizDistance() const;
+
+    float rawHeadingRad() const;
 
     float currentHeadingRad() const;
 

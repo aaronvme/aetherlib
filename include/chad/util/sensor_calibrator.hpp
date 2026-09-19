@@ -25,6 +25,13 @@ struct CalibrationResult {
 
     float confidence{CALIBRATION_FAILED_SCORE};
 
+    // d*cos(theta) = -offset*sin(theta) + (D - along*meanCosTheta), where D is
+    // the rotation centre's distance to the wall. One wall, one spin, so D is
+    // shared by every sensor -- which is what lets a single tape measurement
+    // split the intercepts into along offsets.
+    float interceptIn{0.0f};
+    float meanCosTheta{0.0f};
+
     int samplesUsed{0};
     bool valid{false};
 };

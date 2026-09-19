@@ -79,9 +79,16 @@ void autonTuneRamsete() {
     const auto beams = ch.measureRangeNoise(distSensors);
     float px = 0.0f, py = 0.0f;
     int pinned = 0;
-    if (!solvePark(beams, chassis.getPose().theta, px, py, pinned)) {
-        out.result("cannot fix position (%d/2 axes)", pinned);
-        out.result("move nearer two walls");
+    bool mapDisagrees = false;
+    if (!solvePark(beams, chassis.getPose().theta, px, py, pinned,
+                   &mapDisagrees)) {
+        if (mapDisagrees) {
+            out.result("beams fight the post map;");
+            out.result("park clear of a post");
+        } else {
+            out.result("cannot fix position (%d/2 axes)", pinned);
+            out.result("move nearer two walls");
+        }
         return;
     }
     chassis.setPose({px, py, chassis.getPose().theta});

@@ -938,12 +938,67 @@ be numbers off a simulator sweep. Driven by `autonCalibrateLocalization`
 **What is on the field decides how it measures, and what it can measure at
 all.** `kFieldIsClear` in `gamespecific/autons/tuning/support.hpp` says which.
 
+`solveTruth` has three ways to get it, and tries them in that order.
+
 Wall truth from an opposing beam pair brackets an obstacle, and pays for that
 by needing both opposing walls in reach at once: on a 140.4 in span against a
 V5 sensor's roughly 79 in, only within 8.8 in of a centre line. On a bare
 field `solveAxisSingle` takes one beam per axis and the near wall is never
 more than half the span away, so the whole field is usable — at the cost of
 no blockage detection, which is why it is declared and not detected.
+
+`solveMapped` is what covers the rest of a field that has posts on it. It
+**sweeps** the pose over a 1 in grid of the field, scoring every cell by how
+well the walls and the registered posts explain all the beams at once, then
+descends onto the winner. It costs about 3 ms on a host and well under 0.1 s
+on a brain, which a hand-supervised routine can afford.
+
+It sweeps rather than solving because proposing candidates has a blind spot
+that cannot be seen from inside. Reading each beam as a clean wall hit and
+solving gives one candidate per beam -- but where *every* beam on an axis is
+looking at a post, the true pose is never proposed, so the solve returns an
+alias and reports it as verified. The post lattice is periodic, so those
+aliases are real: (-48,-14) and (-48,-61.7) agree on every beam to within
+0.65 in. A sweep finds both and refuses.
+
+Three things make the objective usable. A ray either hits a 2 in circle or it
+does not, and at a graze that flips the prediction by the length of the field,
+so a near miss is admitted with its cost growing from zero at the rim rather
+than being free or fatal. Nothing behind a solid blocker may explain a
+reading. And the inlier window is capped at `MAP_TOL_MAX_IN`, because the
+shipped `rangeSigmaProp` of 0.05 asks for a 9 in window at 60 in -- wide
+enough to call a post a wall.
+
+**Silence is a measurement.** A configured sensor that returned nothing says
+whatever it pointed at was out of reach, and that is often the only thing
+separating a corner from its alias: at (-50,-50) two beams reach a wall and
+"19.7 in to my left" is equally the wall at x=-50 or the post at (-23.5,-47)
+at x=-2.6, but at the second pose the silent front sensor would have seen a
+wall at 71.8 in. So `MapBeam::present` is set for every fitted sensor,
+reading or not, and `solveMapped` takes the sensor's reach.
+
+That reach has to be honest, and it is not symmetric. Overstating it is safe:
+silence stops carrying information and the solve degrades to what it was
+without it. Understating it excuses silence that should not be excused, which
+is how a confident wrong pose happens -- measured at 10 verified-wrong fixes
+across the field. `solveMapped` therefore raises the reach it was given to the
+largest reading it can actually see, since a beam that returned 117 in proves
+the sensor reaches that far. **`config.cpp` ships `maxSensorRange = 140`,
+which is past what a V5 sensor really does; phase 4 measures the truth.**
+
+The inlier floor is relative, `nValid - MAP_MAX_OUTLIERS`, because how many
+beams *can* agree is set by where the robot is: in a corner the far walls are
+past a V5 sensor's reach and only two beams read at all, and a fixed floor of
+three would refuse every corner on the field.
+
+That leaves one thing the solve cannot do, and it reports rather than hides
+it. A two-beam fix is one beam per axis, and a beam that reads short simply
+moves the candidate to where it explains itself — there is no third beam to
+contradict it. Such a fix comes back with `inliers` under
+`MAP_VERIFIED_INLIERS`, and phases 5 and 6 count them, so a run that leaned
+on unchecked truth says so on the results page instead of quietly biasing a
+fit. An opposing pair reports as `kBracketedFix` and is always verified: it
+detects blockage outright.
 
 The beam mixture is the one fit a bare field **cannot** do. Its short term
 describes an occluded reading; with nothing on the field there is no tail, EM
@@ -957,7 +1012,9 @@ calibration do not care what is on the field and still run.
 A registered obstacle that is not physically there is worse than none:
 `clearFieldObstacles()` exists because MCL deadzones any beam a particle can
 point at one, so every phantom post is somewhere a wrong particle hides
-instead of explaining its reading.
+instead of explaining its reading. `solveMapped` raises the stakes on that,
+because it now believes the post list closely enough to place the robot from
+it. A wrong `kFieldPosts` is a wrong tuning run, silently.
 
 ```cpp
 struct BeamMixture {
@@ -982,6 +1039,24 @@ BeamMixture    perBeamFromPair(const BeamMixture&);
 float          opposingPairSum(float fieldSpanIn, float alongA, float alongB);
 float          mountAlongAxis(float mx, float my, float thetaRad, bool xAxis);
 float          beamSigmaBase(float readingIn, float closeIn, float prop);
+
+struct MapCircle { float x, y, radius; };
+struct MapBeam   { bool present, valid;
+                   float inches, sigmaIn, bx, by, alongX, alongY; };
+struct MapSolve  { float x, y; int inliers; bool trusted; };
+
+// castFieldMap predicts a reading; mapBeamResidual asks how far a reading is
+// from anything that could have produced it. They are not the same model --
+// only the second forgives a graze.
+float    castFieldMap(float sx, float sy, float dx, float dy,
+                      const MapCircle*, int nCircles,
+                      float halfSpanIn, float farIn = MAP_FAR_IN);
+float    mapBeamResidual(float sx, float sy, float dx, float dy,
+                         float readingIn, const MapCircle*, int nCircles,
+                         float halfSpanIn);
+MapSolve solveMapped(const MapBeam*, int nBeams,
+                     const MapCircle*, int nCircles, float halfSpanIn,
+                     float maxRangeIn = 0.0f);
 ```
 
 ### The truth signal needs no pose
@@ -1779,8 +1854,10 @@ void registerAutonDisableLine(float lifetimeMs = 16000.0f);
 ```
 
 `registerFieldObstacles()` feeds the alliance studs and neutral goals to both RCL
-and MCL. `registerAutonDisableLine()` marks the diagonal auton line as a
-temporary obstacle so readings across it aren't mistaken for walls.
+and MCL, and `initialize()` calls it, so the map is live for every run.
+`fieldCircleObstacles()` hands the same list to the tuning autons, which solve
+wall truth against it. `registerAutonDisableLine()` marks the diagonal auton
+line as a temporary obstacle so readings across it aren't mistaken for walls.
 
 ### autons.hpp / controls.hpp
 

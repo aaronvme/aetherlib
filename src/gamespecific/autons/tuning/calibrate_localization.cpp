@@ -62,7 +62,7 @@ void autonCalibrateLocalization() {
         clearFieldObstacles();
         out("clear field: anywhere square-ish");
     } else {
-        out("square-ish, 2 walls in view");
+        out("square-ish, a wall per axis");
     }
 
     const float span = 2.0f * Field::FIELD_HALF_WALL;
@@ -70,7 +70,7 @@ void autonCalibrateLocalization() {
     std::vector<float> resid;
     std::vector<float> repSigma, absErr;
     std::vector<tuning::RecoveryTrial> trials[kSettings];
-    int placements = 0, pairsSeen = 0, noPair = 0, blocked = 0;
+    int placements = 0, pairsSeen = 0, noPair = 0, blocked = 0, unverified = 0;
 
     const int total = kSettings * kTrialsPerSetting;
     for (int idx = 0; idx < total; ++idx) {
@@ -85,11 +85,6 @@ void autonCalibrateLocalization() {
         BeamPair pairs[2];
         const int nPairs = findBeamPairs(beams, pairs);
 
-        if (nPairs == 0 && !kFieldIsClear) {
-            noPair++;
-            out("no opposing pair -- skipped");
-            continue;
-        }
         if (nPairs == 0) noPair++;
         pairsSeen += nPairs;
 
@@ -122,14 +117,16 @@ void autonCalibrateLocalization() {
         }
 
         float tx = 0.0f, ty = 0.0f, bracket = 0.0f;
+        int inliers = 0;
         if (!solveTruth(beams, pairs, nPairs, kBracketSigmas, tx, ty,
-                        bracket)) {
+                        bracket, &inliers)) {
             out("blocked or 1 axis (%.1f in)", bracket);
             blocked++;
             placements++;
             continue;
         }
         placements++;
+        if (!fixVerified(inliers)) unverified++;
 
         auto cfg = chassis.mcl().config();
         cfg.distResampleVariance = kCandidates[setting].distVar;
@@ -189,19 +186,8 @@ void autonCalibrateLocalization() {
         if (tuning::recoveryBetterThan(sc, bestScore)) { bestScore = sc; best = s; }
     }
 
-    if (!fit.valid && !kFieldIsClear) {
-        out.result("beam fit needs 12+ samples,");
-        out.result("got %d over %d placements", static_cast<int>(resid.size()),
-                   placements);
-        if (noPair > 0) {
-            out.result("%d placements saw no pair:", noPair);
-            out.result("keep it square to 2 walls");
-        }
-        return;
-    }
-
     auto mcl = chassis.mcl().config();
-    if (!kFieldIsClear) {
+    if (!kFieldIsClear && fit.valid) {
         const auto perBeam = tuning::perBeamFromPair(fit.params);
         mcl.shortWeight = perBeam.shortWeight;
         mcl.shortDecaySigmas = perBeam.shortDecaySigmas;
@@ -221,14 +207,19 @@ void autonCalibrateLocalization() {
     }
 
     out.result("copy to config.cpp:");
-    if (!kFieldIsClear) {
+    if (kFieldIsClear) {
+        out.result("beam mixture NOT fitted:");
+        out.result("clear field has no tail.");
+        out.result("keep the shipped shortWeight");
+    } else if (fit.valid) {
         const auto perBeam = tuning::perBeamFromPair(fit.params);
         out.result("mcl.shortWeight = %.3ff", perBeam.shortWeight);
         out.result("mcl.shortDecaySigmas = %.2ff", perBeam.shortDecaySigmas);
         out.result("mcl.randWeight = %.5ff", perBeam.randWeight);
     } else {
-        out.result("beam mixture NOT fitted:");
-        out.result("clear field has no tail.");
+        out.result("mixture needs 12+ pair");
+        out.result("samples, got %d over %d", static_cast<int>(resid.size()),
+                   placements);
         out.result("keep the shipped shortWeight");
     }
     if (cal.valid) {
@@ -252,9 +243,17 @@ void autonCalibrateLocalization() {
         out.result("TAIL on a clear field --");
         out.result("something is in the way");
     }
+    if (noPair > 0) {
+        out.result("%d placements saw no pair;", noPair);
+        out.result("nearer a centre line for one");
+    }
     if (blocked > 0) {
-        out.result("%d placements had a beam", blocked);
-        out.result("blocked: no sigma sample");
+        out.result("%d placements had no fix:", blocked);
+        out.result("beams fight the post map");
+    }
+    if (unverified > 0) {
+        out.result("%d fixes ran on 2 beams:", unverified);
+        out.result("truth there was unchecked");
     }
 }
 }

@@ -81,10 +81,17 @@ CalibrationResult SensorCalibrator::solveLeastSquares(const std::string& name,
         totalError += residual * residual;
     }
 
+    double sumCos = 0.0;
+    for (std::size_t i = 0; i < count; i++) {
+        sumCos += std::cos(static_cast<double>(thetaRad[i]));
+    }
+
     CalibrationResult result;
     result.name = name;
     result.offsetIn = static_cast<float>(offsetIn);
     result.confidence = static_cast<float>(totalError / n);
+    result.interceptIn = static_cast<float>(intercept);
+    result.meanCosTheta = static_cast<float>(sumCos / n);
     result.samplesUsed = static_cast<int>(count);
     result.valid = std::isfinite(result.offsetIn) && std::isfinite(result.confidence);
     if (!result.valid) return failedResult(name, static_cast<int>(count));

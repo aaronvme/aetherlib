@@ -398,7 +398,7 @@ void RclTracking::syncUpdate() {
         dy *= scale;
     }
 
-    mOdom.setPose({
+    mOdom.syncPose({
         odomPose.x + dx,
         odomPose.y + dy,
         odomPose.theta
@@ -428,9 +428,9 @@ bool RclTracking::updateBotPoseFromBestSensor() {
 
     Pose odomPose = mOdom.getPose();
     if (type == CoordType::X) {
-        mOdom.setPose({coord, odomPose.y, odomPose.theta});
+        mOdom.syncPose({coord, odomPose.y, odomPose.theta});
     } else {
-        mOdom.setPose({odomPose.x, coord, odomPose.theta});
+        mOdom.syncPose({odomPose.x, coord, odomPose.theta});
     }
     mLatestEstimate = mOdom.getPose();
     return true;

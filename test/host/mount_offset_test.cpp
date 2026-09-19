@@ -112,3 +112,80 @@ CHAD_TEST(mountOffset, nullPointersAreIgnored) {
     applyMountOffset(0.5f, 2.0f, &v, nullptr);
     CHECK(v == 1.0f);
 }
+
+// --- along-beam recovery -----------------------------------------------
+//
+// One spin, one wall: every sensor's fitted intercept is D - along*meanCos
+// for the same D. A single face-to-face tape measurement splits them.
+
+namespace {
+
+// What the sweep fit would report for a sensor at beam-frame (along, across)
+// with the rotation centre D from the wall.
+double interceptFor(double D, double along, double meanCos) {
+    return D - along * meanCos;
+}
+
+double solveD(double iA, double iB, double meanCos, double spanIn) {
+    return 0.5 * (iA + iB + meanCos * spanIn);
+}
+
+}  // namespace
+
+CHAD_TEST(mountAlong, one_span_recovers_every_along_offset) {
+    // front +1.00 forward, back 0.50 behind, left 6.25 out, right 6.75 out
+    const double D = 41.7;
+    const double meanCos = 0.9333;          // the +-30 deg five point sweep
+    const double alongF = 1.00, alongB = 0.50, alongL = 6.25, alongR = 6.75;
+
+    const double iF = interceptFor(D, alongF, meanCos);
+    const double iB = interceptFor(D, alongB, meanCos);
+    const double iL = interceptFor(D, alongL, meanCos);
+    const double iR = interceptFor(D, alongR, meanCos);
+
+    // tape: front face to back face along the robot's x axis
+    const double spanX = alongF + alongB;
+    const double Dhat = solveD(iF, iB, meanCos, spanX);
+    CHECK_NEAR(Dhat, D, 1e-6);
+
+    CHECK_NEAR((Dhat - iF) / meanCos, alongF, 1e-4);
+    CHECK_NEAR((Dhat - iB) / meanCos, alongB, 1e-4);
+    // the other axis falls out of the same D without a second measurement
+    CHECK_NEAR((Dhat - iL) / meanCos, alongL, 1e-4);
+    CHECK_NEAR((Dhat - iR) / meanCos, alongR, 1e-4);
+}
+
+CHAD_TEST(mountAlong, either_span_gives_the_same_wall_distance) {
+    const double D = 33.0, meanCos = 0.9333;
+    const double aF = 1.0, aB = 0.5, aL = 6.25, aR = 6.75;
+    const double dx = solveD(interceptFor(D, aF, meanCos),
+                             interceptFor(D, aB, meanCos), meanCos, aF + aB);
+    const double dy = solveD(interceptFor(D, aL, meanCos),
+                             interceptFor(D, aR, meanCos), meanCos, aL + aR);
+    CHECK_NEAR(dx, dy, 1e-6);
+}
+
+CHAD_TEST(mountAlong, a_wrong_tape_shifts_every_sensor_the_same_way) {
+    // Half the error lands in D, so all four move together and the shape of
+    // the sensor ring survives -- a mis-measured span is a common-mode bias,
+    // not a scramble.
+    const double D = 40.0, meanCos = 0.9333;
+    const double aF = 1.0, aB = 0.5;
+    const double iF = interceptFor(D, aF, meanCos);
+    const double iB = interceptFor(D, aB, meanCos);
+    const double bad = solveD(iF, iB, meanCos, (aF + aB) + 1.0);   // 1 in long
+    CHECK_NEAR((bad - iF) / meanCos - aF, 0.5, 1e-4);
+    CHECK_NEAR((bad - iB) / meanCos - aB, 0.5, 1e-4);
+}
+
+CHAD_TEST(mountAlong, setMountFromBeam_round_trips_the_shipped_mounts) {
+    for (const Mount& m : kShipped) {
+        const double th = m.thetaDeg * kPi / 180.0;
+        const float along = static_cast<float>(m.x * std::cos(th) + m.y * std::sin(th));
+        const float across = acrossBeamOffset(m.x, m.y, static_cast<float>(th));
+        float x = 0.0f, y = 0.0f;
+        chad::tuning::setMountFromBeam(static_cast<float>(th), along, across, &x, &y);
+        CHECK_NEAR(x, m.x, 1e-4);
+        CHECK_NEAR(y, m.y, 1e-4);
+    }
+}
