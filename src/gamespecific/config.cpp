@@ -33,6 +33,10 @@ void registerFieldObstacles() {
     chassis.ekf().setObstacles(&gMclCircleObstacles);
 }
 
+const std::vector<MclTracking::CircleObstacle>& fieldCircleObstacles() {
+    return gMclCircleObstacles;
+}
+
 void clearFieldObstacles() {
     gMclCircleObstacles.clear();
     gMclLineObstacles.clear();
@@ -78,8 +82,8 @@ pros::adi::Pneumatics claw('A', false, false);
 // pros::adi::Pneumatics flip('C', true, true);
 
 Drivetrain drivetrain(&leftMotors, &rightMotors,
-                      11.67f,
-                      2.6738f,
+                      11.50f,
+                      2.75f,
                       450.0f,
                       &leftBlueMotors,
                       &rightBlueMotors);
@@ -91,21 +95,23 @@ OdomSensors odomSensors = {
     .drivetrain = &drivetrain,
 };
 
-pros::Distance front_dist(7);
-pros::Distance left_dist(9);
-pros::Distance back_dist(10);
-pros::Distance right_dist(8);
+pros::Distance front_dist(1);
+pros::Distance left_dist(4);
+pros::Distance back_dist(3);
+pros::Distance right_dist(2);
+pros::Distance claw_dist(5);
 
 std::array<pros::Distance*, MAX_DISTANCE_SENSORS> distSensors = {
     &front_dist, &left_dist, &back_dist, &right_dist,
     nullptr, nullptr, nullptr, nullptr
 };
 
+
 std::array<Pose, MAX_DISTANCE_SENSORS> sensorMounts = {{
-    {  1.0f,  -3.75f,  0.0f        },
-    {  0.5f,  6.25f,  HALF_PI    },
-    { -0.5f,  5.0f,  PI         },
-    {  -0.75f, -6.75f,  3.0f * HALF_PI },
+    {  -1.00f,  -3.75f,  0.0f        },
+    {  -0.50f,  4.50f,  HALF_PI    },
+    { -3.00f,  5.50f,  PI         },
+    {  -0.50f, -4.75f,  3.0f * HALF_PI }
 }};
 
 ChassisConfig chassisConfig = {
