@@ -11,9 +11,12 @@ namespace chad {
 using namespace autons;
 
 namespace {
-constexpr float kLengths[] = {12.0f, 36.0f, 72.0f};
+// The exponent is fitted in log space, so what the shape check costs when
+// the lane is short is the ratio between the ends, not the inches. Six reps
+// instead of four buys back some of what the shorter span loses.
+constexpr float kLengths[] = {12.0f, 24.0f, 48.0f};
 constexpr int kNumLengths = 3;
-constexpr int kRepsPerLength = 4;
+constexpr int kRepsPerLength = 6;
 constexpr int kMaxAttempts = 3;
 constexpr float kBracketSigmas = 3.0f;
 constexpr float kSettleMs = 350.0f;
@@ -58,7 +61,7 @@ void autonCalibrateOdomBias() {
         return;
     }
 
-    waitForStart(out, "x=-60 lane, 72in clear ahead");
+    waitForStart(out, "x=-60 lane, 48in clear ahead");
 
     std::vector<tuning::BiasLeg> legs;
     int rejected = 0, noFix = 0, unverified = 0;

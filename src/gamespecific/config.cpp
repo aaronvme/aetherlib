@@ -115,7 +115,7 @@ std::array<Pose, MAX_DISTANCE_SENSORS> sensorMounts = {{
 }};
 
 ChassisConfig chassisConfig = {
-    .lateralGains = { 9.5f, 0.0f, 0.4f },
+    .lateralGains = { 9.5f, 0.0f, 0.65f},
     .angularGains = { 140.0, 0.0f, 8.0f },
     .lateralWindupRange = 0.0f,
     .angularWindupRange = 0.0f,
