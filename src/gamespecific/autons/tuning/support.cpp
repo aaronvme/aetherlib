@@ -60,6 +60,12 @@ void Report::result(const char* fmt, ...) {
     }
 }
 
+void Report::clear() {
+    if (!mPage.empty()) return;
+    pros::screen::erase();
+    mLine = 1;
+}
+
 void setFilters(bool on) {
     // Starting the filters by hand skipped what Chassis::startTracking does
     // to keep them out of each other's way: with EKF running, MCL's autoSync

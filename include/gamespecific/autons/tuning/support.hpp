@@ -21,6 +21,9 @@ public:
 
     void result(const char* fmt, ...);
 
+    // Start the progress page over. Ignored once results are showing.
+    void clear();
+
 private:
     static constexpr int kProgressLines = 24;
     static constexpr int kResultLines = 11;
