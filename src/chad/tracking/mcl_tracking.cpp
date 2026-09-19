@@ -244,6 +244,7 @@ void MclTracking::predict() {
     float dHorizPure = delta.dHoriz + mHorizDrift;
 
     mLatestSpeed = std::hypot(dVertPure, dHorizPure) * (1000.0f / mConfig.updatePeriodMs);
+    mLatestTurnRate = std::fabs(dThetaRad) * (1000.0f / mConfig.updatePeriodMs);
 
     float driftVariance = std::hypot(mVertDrift, mHorizDrift) * 0.5f;
 
@@ -618,14 +619,28 @@ Pose MclTracking::update() {
     }
 
     predict();
-    updateWeights();
+
+    // Spinning fast enough and the beams have swept onto different geometry
+    // between predicting a pose and reading them. Every particle then looks
+    // wrong, which collapses the weights and reads as a lost filter rather
+    // than as a blind moment. Hold the update and let odometry carry it; the
+    // weights are left alone so the collapse never enters the fast/slow
+    // averages and never triggers injection.
+    mSensorsHeld = mConfig.maxTurnRateRadS > 0.0f &&
+                   mLatestTurnRate > mConfig.maxTurnRateRadS;
+    if (!mSensorsHeld) {
+        updateWeights();
+    }
 
     auto estimate = getEstimate();
 
     float distSinceResample = distanceToPoint(mLastResamplePose, estimate.first.x, estimate.first.y);
 
     bool shouldResample = false;
-    if (estimate.second < mConfig.resampleThreshold * 0.5f) {
+    if (mSensorsHeld) {
+        // Resampling on weights nothing refreshed only throws away spread.
+        shouldResample = false;
+    } else if (estimate.second < mConfig.resampleThreshold * 0.5f) {
         shouldResample = true;
     } else if (estimate.second < mConfig.resampleThreshold &&
                distSinceResample > 5.0f &&

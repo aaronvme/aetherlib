@@ -58,6 +58,11 @@ public:
         float maxRandomFrac = 0.0f;
         float injectResampleFloor = 0.03f;
 
+        // Above this the beams sweep further per cycle than the particle
+        // spread can bracket, so the weights say only that every particle is
+        // wrong. Coast on odometry instead. Zero disables the gate.
+        float maxTurnRateRadS = 0.0f;
+
         bool autoSync = true;
     };
 
@@ -141,6 +146,11 @@ public:
     void setAutoSync(bool enabled) { mConfig.autoSync = enabled; }
 
     float randomInjectFraction() const { return mInjectFrac; }
+
+    float latestTurnRateRadS() const { return mLatestTurnRate; }
+
+    // True while the turn-rate gate is holding the beams out of the filter.
+    bool sensorsHeld() const { return mSensorsHeld; }
 
     int snapshotParticles(float* out, int maxParticles) const;
 
@@ -244,6 +254,8 @@ private:
     Pose mRawEstimate{};
     float mLastImuHeading{0.0f};
     float mLatestSpeed{0.0f};
+    float mLatestTurnRate{0.0f};
+    bool  mSensorsHeld{false};
 
     float mLogWSlow{0.0f};
     float mLogWFast{0.0f};

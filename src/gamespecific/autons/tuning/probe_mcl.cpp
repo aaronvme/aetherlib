@@ -41,8 +41,14 @@ void autonProbeMcl() {
     int pinned = 0;
     bool disagree = false;
     if (!solvePark(beams, chassis.getPose().theta, px, py, pinned, &disagree)) {
-        out.result("no fix to start from.");
-        out.result("park nearer two walls");
+        out.result("no fix: %d/2 axes seen", pinned);
+        out.result(disagree ? "beams fight the post map"
+                                : "need a wall on each axis");
+        for (int i = 0; i < MAX_DISTANCE_SENSORS; ++i) {
+            if (beams.samples[i] > 8) {
+                out.result("  s%d %.1f in", i, beams.meanIn[i]);
+            }
+        }
         return;
     }
     const float th = chassis.getPose().theta;
@@ -50,11 +56,15 @@ void autonProbeMcl() {
     chassis.startTracking();
 
     pros::screen::erase();
+    // Fully buffered stdout holds short lines until 4KB accumulates, which
+    // for a 100-byte telemetry line is most of a minute and for a two-line
+    // failure message is forever.
+    std::setvbuf(stdout, nullptr, _IOLBF, 0);
     // The screen rows go nowhere a log can reach. These do: printf is what
     // `pros terminal` streams, so the run can be read back off the wire
     // instead of off the brain.
     std::printf("mclhdr,ms,px,py,ph,mx,my,sx,sy,neff,inj,gate,reloc,"
-                "r0,r1,r2,r3\n");
+                "rate,held,r0,r1,r2,r3\n");
     const uint32_t tStart = pros::millis();
     float worst = 0.0f;
     float tx = px, ty = py, err = 0.0f;
@@ -142,11 +152,16 @@ void autonProbeMcl() {
                         static_cast<double>(chassis.mcl().randomInjectFraction()),
                         chassis.ekf().mclRejectStreak(),
                         chassis.ekf().relocateCount());
+            std::printf(",%.0f,%d",
+                        static_cast<double>(
+                            chassis.mcl().latestTurnRateRadS() * RAD_TO_DEG),
+                        chassis.mcl().sensorsHeld() ? 1 : 0);
             for (int i = 0; i < 4; ++i) {
                 if (ok[i]) std::printf(",%.2f", static_cast<double>(rd[i]));
                 else std::printf(",");
             }
             std::printf("\n");
+            std::fflush(stdout);
         }
         pros::delay(20);
     }
