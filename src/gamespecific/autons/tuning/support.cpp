@@ -60,13 +60,15 @@ void Report::result(const char* fmt, ...) {
 }
 
 void setFilters(bool on) {
+    // Starting the filters by hand skipped what Chassis::startTracking does
+    // to keep them out of each other's way: with EKF running, MCL's autoSync
+    // has to be off, or both of them write corrections into the same odom
+    // pose and it jitters between them. Anything that then drives to a field
+    // coordinate -- moveDistance included -- chases that.
     if (on) {
-        chassis.mcl().startTracking();
-        chassis.ekf().startTracking();
+        chassis.startTracking();
     } else {
-        chassis.ekf().stopTracking();
-        chassis.mcl().stopTracking();
-        chassis.rcl().stopTracking();
+        chassis.stopTracking();
     }
     pros::delay(200);
 }
