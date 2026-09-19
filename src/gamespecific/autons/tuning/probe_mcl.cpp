@@ -2,6 +2,7 @@
 #include "gamespecific/autons/tuning/support.hpp"
 
 #include <cmath>
+#include <cstdio>
 
 #include "pros/screen.hpp"
 #include "chad/api.hpp"
@@ -49,6 +50,12 @@ void autonProbeMcl() {
     chassis.startTracking();
 
     pros::screen::erase();
+    // The screen rows go nowhere a log can reach. These do: printf is what
+    // `pros terminal` streams, so the run can be read back off the wire
+    // instead of off the brain.
+    std::printf("mclhdr,ms,px,py,ph,mx,my,sx,sy,neff,inj,gate,reloc,"
+                "r0,r1,r2,r3\n");
+    const uint32_t tStart = pros::millis();
     float worst = 0.0f;
     float tx = px, ty = py, err = 0.0f;
     bool haveTruth = true;
@@ -71,6 +78,13 @@ void autonProbeMcl() {
                                 (p.y - ty) * (p.y - ty));
                 if (err > worst) worst = err;
                 checks++;
+                std::printf("mclchk,%lu,%.2f,%.2f,%d,%.2f\n",
+                            static_cast<unsigned long>(pros::millis() - tStart),
+                            static_cast<double>(tx), static_cast<double>(ty),
+                            inliers, static_cast<double>(err));
+            } else {
+                std::printf("mclchk,%lu,nofix\n",
+                            static_cast<unsigned long>(pros::millis() - tStart));
             }
         }
 
@@ -112,6 +126,27 @@ void autonProbeMcl() {
             row++;
             pros::screen::print(pros::E_TEXT_SMALL, row++,
                                 "A = check vs beams, B = end");
+
+            const auto& rd = chassis.mcl().sensorReadings();
+            const auto& ok = chassis.mcl().validSensors();
+            std::printf("mcl,%lu,%.2f,%.2f,%.1f,%.2f,%.2f,%.2f,%.2f,"
+                        "%.0f,%.3f,%d,%d",
+                        static_cast<unsigned long>(pros::millis() - tStart),
+                        static_cast<double>(p.x), static_cast<double>(p.y),
+                        static_cast<double>(stdRadToVexDeg(p.theta)),
+                        static_cast<double>(est.pose.x),
+                        static_cast<double>(est.pose.y),
+                        static_cast<double>(std::sqrt(est.covXX)),
+                        static_cast<double>(std::sqrt(est.covYY)),
+                        static_cast<double>(est.nEff),
+                        static_cast<double>(chassis.mcl().randomInjectFraction()),
+                        chassis.ekf().mclRejectStreak(),
+                        chassis.ekf().relocateCount());
+            for (int i = 0; i < 4; ++i) {
+                if (ok[i]) std::printf(",%.2f", static_cast<double>(rd[i]));
+                else std::printf(",");
+            }
+            std::printf("\n");
         }
         pros::delay(20);
     }
