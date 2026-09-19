@@ -32,7 +32,8 @@ void autonomous() {
 
 void opcontrol() {
     chassis.setBrakeMode(pros::E_MOTOR_BRAKE_BRAKE);
-    autonCalibrateOdomBias();     // odometry along/cross bias
+    autonTuneRamsete();           // path follow b and zeta
+    // autonCalibrateOdomBias();     // odometry along/cross bias
     // autonCalibrateLocalization();  // MCL/EKF trust, hand placed
     // autonCharacterize4Filters();  // sensor + pose noise
     // autonCalibrateMounts();   // distance sensor mount offsets

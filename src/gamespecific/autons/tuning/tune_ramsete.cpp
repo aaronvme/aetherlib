@@ -11,12 +11,16 @@ namespace chad {
 using namespace autons;
 
 namespace {
+// The weave used to sit at x=-40. Its curve cleared the posts fine, but
+// start and end share an x, so toStart drove the straight line between
+// them -- down x=-52, three inches off the post at (-47,-23.5), seven
+// times a session. Centred at x=+31 the whole thing has 16 in to spare.
 std::vector<Pose> weavePath(int n) {
     std::vector<Pose> out;
     for (int i = 0; i <= n; ++i) {
         const float u = static_cast<float>(i) / static_cast<float>(n);
-        out.push_back({-40.0f - 12.0f * std::cos(TWO_PI * u),
-                       -48.0f + 48.0f * u, 0.0f});
+        out.push_back({31.0f - 12.0f * std::cos(TWO_PI * u),
+                       -24.0f + 48.0f * u, 0.0f});
     }
     for (size_t i = 0; i < out.size(); ++i) {
         const Pose& a = out[i == 0 ? 0 : i - 1];
@@ -72,7 +76,7 @@ void autonTuneRamsete() {
     Report out;
     out("ramsete: b then zeta");
     if (!headingOk(out)) return;
-    out("place near -52,-48 facing 0");
+    out("place near 19,-22 facing 180");
 
     setFilters(false);
     auto ch = makeCharacterizer(out);
