@@ -58,6 +58,8 @@ void autonCalibrateOdomBias() {
         return;
     }
 
+    waitForStart(out, "x=-60 lane, 72in clear ahead");
+
     std::vector<tuning::BiasLeg> legs;
     int rejected = 0, noFix = 0, unverified = 0;
     float dir = 1.0f;
