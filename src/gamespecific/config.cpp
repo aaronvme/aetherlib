@@ -153,6 +153,7 @@ ChassisConfig chassisConfig = {
         .rangeSigmaCloseIn = 0.0872f,
         .rangeSigmaProp = 0.05f,
         .maxRandomFrac = 0.25f,
+        .injectResampleFloor = 0.10f,
         .autoSync = true
     },
 
@@ -163,6 +164,7 @@ ChassisConfig chassisConfig = {
         .slipBiasProp = 0.0159f,
         .rangeSigmaBase = 0.0872f,
         .rangeSigmaProp = 0.030f,
+        .maxRangeIn = 78.0f,
         .imuSigmaRad = 0.00017f
     },
 };

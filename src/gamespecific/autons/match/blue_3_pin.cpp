@@ -11,7 +11,7 @@ void autonBlue3Pin() {
 //toggle========================================
     // chassis.startTracking();
     chassis.setBrakeMode(pros::E_MOTOR_BRAKE_BRAKE);
-    chassis.setPose({64.0f, 0.0f, 90.0f});
+    chassis.setPose({64.0f, 0.0f, vexToStdRad(90.0f)});
     chassis.moveToPoint(64, -1, 200, {.forwards=false, .minSpeed=127.0f});
     // chassis.turnToHeading(90.0f, 1000);
     chassis.moveToPoint(64, 9, 400,{ .minSpeed=120.0f});
