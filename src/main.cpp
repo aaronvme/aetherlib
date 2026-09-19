@@ -32,7 +32,8 @@ void autonomous() {
 
 void opcontrol() {
     chassis.setBrakeMode(pros::E_MOTOR_BRAKE_BRAKE);
-    autonCharacterize4Filters();  // sensor + pose noise
+    autonCalibrateLocalization();  // MCL/EKF trust, hand placed
+    // autonCharacterize4Filters();  // sensor + pose noise
     // autonCalibrateMounts();   // distance sensor mount offsets
     // autonCalibrateLift();     // kG, friction, travel
     // autonTuneLiftPresets();   // the 7 macro heights
