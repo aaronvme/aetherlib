@@ -42,8 +42,8 @@ void startPoseTelemetry() {
 }
 
 void driverControl() {
-    chassis.stopTracking();
-
+    // Tracking is left however the caller set it. Stopping it here meant a
+    // startTracking() in opcontrol was undone on the next line.
     liftMotor.set_brake_mode(pros::E_MOTOR_BRAKE_HOLD);
 
     while (true) {

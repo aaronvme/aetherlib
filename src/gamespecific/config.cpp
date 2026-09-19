@@ -152,7 +152,7 @@ ChassisConfig chassisConfig = {
         .minSensorRange = 1.0f,
         .rangeSigmaCloseIn = 0.0872f,
         .rangeSigmaProp = 0.05f,
-        .maxRandomFrac = 0.10f,
+        .maxRandomFrac = 0.25f,
         .autoSync = true
     },
 
