@@ -5,6 +5,7 @@
 #include <cmath>
 #include <vector>
 
+#include "pros/screen.hpp"
 #include "chad/api.hpp"
 #include "chad/util/localization_fit.hpp"
 
@@ -31,17 +32,85 @@ constexpr float kHoldMs = 200.0f;
 constexpr float kRecoveryTimeoutMs = 5000.0f;
 constexpr float kBracketSigmas = 3.0f;
 
+// MCL deadzones any reading a registered post explains -- it never reaches
+// the range model whose tail this routine is fitting. Feeding those readings
+// in anyway manufactures a tail that is really just the post map. Same test
+// and same tolerances as MclTracking::sensorUpdate.
+bool postOwns(float cx, float cy, const BeamRead& b, float coneFrac,
+              float rangeTol) {
+    const float sx = cx + b.alongX;
+    const float sy = cy + b.alongY;
+    for (const auto& c : fieldCircleObstacles()) {
+        const float ox = c.x - sx;
+        const float oy = c.y - sy;
+        const float along = ox * b.bx + oy * b.by;
+        if (along < 0.0f) continue;
+        const float perp = std::fabs(-ox * b.by + oy * b.bx);
+        if (perp > c.radius + along * coneFrac) continue;
+        const float postRange = std::sqrt(ox * ox + oy * oy) - c.radius;
+        if (std::fabs(b.inches - postRange) <= rangeTol) return true;
+    }
+    return false;
+}
+
+constexpr int kPanelRow = 6;
+const char* const kBeamName[4] = {"front", "left ", "back ", "right"};
+float gLongestIn = 0.0f;
+
+// What the beams say right now, and whether each axis has what the solve
+// wants. Placing blind and learning it was a dud afterwards burns the
+// placement, and there are only fifteen of them.
+void drawPanel() {
+    BeamRead beams[MAX_DISTANCE_SENSORS];
+    readBeams(beams, chassis.getPose().theta);
+    BeamPair pairs[2];
+    const int nPairs = findBeamPairs(beams, pairs);
+
+    int row = kPanelRow;
+    int xSeen = 0, ySeen = 0;
+    for (int i = 0; i < MAX_DISTANCE_SENSORS; ++i) {
+        if (!beams[i].present) continue;
+        const char* name = i < 4 ? kBeamName[i] : "     ";
+        if (beams[i].valid) {
+            pros::screen::print(pros::E_TEXT_SMALL, row++, "s%d %s %6.1f in   ",
+                                i, name, static_cast<double>(beams[i].inches));
+            if (beams[i].inches > gLongestIn) gLongestIn = beams[i].inches;
+            if (std::fabs(beams[i].bx) > 0.7f) xSeen++;
+            else if (std::fabs(beams[i].by) > 0.7f) ySeen++;
+        } else {
+            pros::screen::print(pros::E_TEXT_SMALL, row++, "s%d %s    --      ",
+                                i, name);
+        }
+    }
+
+    bool xPair = false, yPair = false;
+    for (int q = 0; q < nPairs; ++q) {
+        if (pairs[q].xAxis) xPair = true;
+        else yPair = true;
+    }
+    const char* xs = xPair ? "pair" : (xSeen > 0 ? "one " : "NONE");
+    const char* ys = yPair ? "pair" : (ySeen > 0 ? "one " : "NONE");
+    pros::screen::print(pros::E_TEXT_SMALL, row++, "x %s    y %s    ", xs, ys);
+    pros::screen::print(pros::E_TEXT_SMALL, row++, "longest beam yet %5.1f in",
+                        static_cast<double>(gLongestIn));
+}
+
 int waitForChoice(Report& out, const char* why, const char* bMeans) {
-    out.result("%s", why);
-    out.result("A = record, B = %s", bMeans);
+    out("%s", why);
+    out("A = record, B = %s", bMeans);
     master.set_text(0, 0, "place it, press A ");
     pros::delay(60);
     master.rumble("-");
     int picked = 0;
     const uint32_t t0 = pros::millis();
+    uint32_t nextDraw = 0;
     while (pros::millis() - t0 < 180000u) {
         if (master.get_digital(pros::E_CONTROLLER_DIGITAL_A)) { picked = 1; break; }
         if (master.get_digital(pros::E_CONTROLLER_DIGITAL_B)) { picked = 2; break; }
+        if (pros::millis() >= nextDraw) {
+            nextDraw = pros::millis() + 250;
+            drawPanel();
+        }
         pros::delay(20);
     }
     while (master.get_digital(pros::E_CONTROLLER_DIGITAL_A) ||
@@ -71,14 +140,16 @@ void autonCalibrateLocalization() {
     std::vector<float> repSigma, absErr;
     std::vector<tuning::RecoveryTrial> trials[kSettings];
     int placements = 0, pairsSeen = 0, noPair = 0, blocked = 0, unverified = 0;
+    int postReads = 0;
 
     const int total = kSettings * kTrialsPerSetting;
     for (int idx = 0; idx < total; ++idx) {
         const int setting = idx / kTrialsPerSetting;
+        out.clear();
         out("place %d/%d  set %d", idx + 1, total, setting + 1);
+        setFilters(false);
         if (waitForChoice(out, "put it somewhere new", "stop") != 1) break;
 
-        setFilters(false);
         const float theta = chassis.getPose().theta;
         BeamRead beams[MAX_DISTANCE_SENSORS];
         readBeams(beams, theta);
@@ -88,12 +159,35 @@ void autonCalibrateLocalization() {
         if (nPairs == 0) noPair++;
         pairsSeen += nPairs;
 
+        // The truth has to come first now: without it there is no way to ask
+        // which readings a post owns, and a blocked placement should not cost
+        // the sampling time either.
+        float tx = 0.0f, ty = 0.0f, bracket = 0.0f;
+        int inliers = 0;
+        if (!solveTruth(beams, pairs, nPairs, kBracketSigmas, tx, ty,
+                        bracket, &inliers)) {
+            out("blocked or 1 axis (%.1f in)", bracket);
+            blocked++;
+            placements++;
+            continue;
+        }
+        placements++;
+        if (!fixVerified(inliers)) unverified++;
+
+        const auto mclCfg = chassis.mcl().config();
         for (int k = 0; k < kSamplesPerPlacement; ++k) {
             BeamRead now[MAX_DISTANCE_SENSORS];
             readBeams(now, theta);
             for (int q = 0; q < nPairs; ++q) {
                 const BeamPair& p = pairs[q];
                 if (!now[p.plus].valid || !now[p.minus].valid) continue;
+                if (postOwns(tx, ty, now[p.plus], mclCfg.obstacleConeFrac,
+                             mclCfg.obstacleRangeTol) ||
+                    postOwns(tx, ty, now[p.minus], mclCfg.obstacleConeFrac,
+                             mclCfg.obstacleRangeTol)) {
+                    postReads++;
+                    continue;
+                }
                 const float oPlus =
                     p.xAxis ? now[p.plus].alongX : now[p.plus].alongY;
                 const float oMinus =
@@ -115,18 +209,6 @@ void autonCalibrateLocalization() {
             }
             pros::delay(static_cast<uint32_t>(kSampleMs));
         }
-
-        float tx = 0.0f, ty = 0.0f, bracket = 0.0f;
-        int inliers = 0;
-        if (!solveTruth(beams, pairs, nPairs, kBracketSigmas, tx, ty,
-                        bracket, &inliers)) {
-            out("blocked or 1 axis (%.1f in)", bracket);
-            blocked++;
-            placements++;
-            continue;
-        }
-        placements++;
-        if (!fixVerified(inliers)) unverified++;
 
         auto cfg = chassis.mcl().config();
         cfg.distResampleVariance = kCandidates[setting].distVar;
@@ -238,6 +320,9 @@ void autonCalibrateLocalization() {
     }
     out.result("n=%d plc=%d tail=%.0f%%", fit.samples, placements,
                100.0f * fit.shortFraction);
+    // A lower bound on what the sensors actually reach, which is what
+    // mcl.maxSensorRange is supposed to be.
+    out.result("longest beam %.0f in", gLongestIn);
 
     if (kFieldIsClear && fit.valid && fit.shortFraction > 0.05f) {
         out.result("TAIL on a clear field --");
@@ -254,6 +339,10 @@ void autonCalibrateLocalization() {
     if (unverified > 0) {
         out.result("%d fixes ran on 2 beams:", unverified);
         out.result("truth there was unchecked");
+    }
+    if (postReads > 0) {
+        out.result("%d pair reads were post", postReads);
+        out.result("hits; MCL drops those too");
     }
 }
 }
