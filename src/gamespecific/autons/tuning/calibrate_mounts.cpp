@@ -13,9 +13,6 @@ namespace chad {
 using namespace autons;
 
 namespace {
-// Face to face along the robot's own axes, by ruler. Neither needs you to
-// find the turning centre -- that is what the spin measures. Front-to-back
-// is enough; left-to-right is a cross-check, and either one alone will do.
 constexpr float kSensorSpanXIn = 2.0f;   // front sensor face -> back face
 constexpr float kSensorSpanYIn = 9.5f;   // left sensor face -> right face
 

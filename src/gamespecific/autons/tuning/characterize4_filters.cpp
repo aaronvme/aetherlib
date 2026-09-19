@@ -45,9 +45,10 @@ void autonCharacterize4Filters() {
     Report out;
     out("phase 4: sensor + pose noise");
     if (!headingOk(out)) return;
-    out("stays parked. do not touch it");
     out("posts ignored: bare wall only");
+    out("parks, then 8in back x2");
     PostMapOff postsOff;
+    waitForStart(out, "square to bare wall, 20in+ behind");
 
     setFilters(false);
     auto ch = makeCharacterizer(out);
@@ -135,9 +136,25 @@ void autonCharacterize4Filters() {
             ys.push_back(beams.sigmaIn[i]);
         }
     }
-    for (int stop = 1; stop < kStops; ++stop) {
+    // Odometry says how far it really went. If a leg does not land near
+    // where it was sent, driving more of them is how a routine walks into
+    // something, so give the ground back and stop.
+    constexpr float kLegSlopIn = 3.0f;
+    float travelled = 0.0f;
+    bool legsOk = true;
+    for (int stop = 1; stop < kStops && legsOk; ++stop) {
         out("range sweep %d/%d", stop, kStops - 1);
+        const Pose before = chassis.getPose();
         chassis.moveDistance(-kStopIn, 4000);
+        const Pose after = chassis.getPose();
+        const float moved = (after.x - before.x) * std::cos(before.theta) +
+                            (after.y - before.y) * std::sin(before.theta);
+        out("  moved %+.1f, wanted %.1f", moved, -kStopIn);
+        travelled += moved;
+        if (std::fabs(moved + kStopIn) > kLegSlopIn) {
+            legsOk = false;
+            break;
+        }
         const auto b = ch.measureRangeNoise(distSensors);
         for (int i = 0; i < MAX_DISTANCE_SENSORS; ++i) {
             if (b.samples[i] > 8) {
@@ -146,7 +163,13 @@ void autonCharacterize4Filters() {
             }
         }
     }
-    chassis.moveDistance((kStops - 1) * kStopIn, 6000);
+    chassis.moveDistance(-travelled, 6000);
+    if (!legsOk) {
+        out.result("leg missed by >%.0f in.", kLegSlopIn);
+        out.result("odometry scale or a stall.");
+        out.result("keep the values above");
+        return;
+    }
 
     float a = 0.0f, slope = 0.0f, originSlope = 0.0f;
     if (!fitSigma(xs, ys, a, slope, originSlope)) {
