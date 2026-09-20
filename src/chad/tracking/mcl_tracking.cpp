@@ -324,6 +324,15 @@ void MclTracking::updateWeights() {
             mValidSensors[i] = false; continue;
         }
 
+        // A reading sitting at the sensor ceiling means nothing was found
+        // within range, not that a wall is standing at the ceiling. The
+        // raycast is capped at the same distance, so a longer reading cannot
+        // be matched to the map at all -- taken at face value it argues for
+        // whatever pose does put a wall there.
+        if (mSensorReadingsInch[i] > mConfig.maxSensorRange) {
+            mValidSensors[i] = false; continue;
+        }
+
         {
             bool disabled = false;
             for (const auto& line : kDisablingLines) {

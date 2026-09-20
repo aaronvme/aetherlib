@@ -308,8 +308,12 @@ void EkfTracking::updateRanges() {
 
         const float mm = static_cast<float>(mDistanceSensors[i]->get());
         const int conf = mDistanceSensors[i]->get_confidence();
+        // Past maxRangeIn the sensor is reporting its own ceiling rather than
+        // a wall, and castWalls is capped there too, so it can only ever be
+        // matched against a pose that is wrong.
         if (!std::isfinite(mm) || mm >= mConfig.sentinelMm || mm < mConfig.minRangeMm ||
-            (mm > 200.0f && conf < mConfig.minConfidence)) {
+            (mm > 200.0f && conf < mConfig.minConfidence) ||
+            mm * MM_TO_INCH > mConfig.maxRangeIn) {
             mBeamStates[i] = BeamState::NoReturn;
             continue;
         }
