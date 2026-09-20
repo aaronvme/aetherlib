@@ -8,9 +8,13 @@
 #include "liblvgl/lvgl.h"
 #include "pros/screen.hpp"
 #include "chad/api.hpp"
+#include "gamespecific/controls.hpp"
 
 namespace chad::autons {
 Report::Report() {
+    // The telemetry task rewrites lines 0 and 1 every 60 ms, so a routine
+    // that does not claim the controller is talking over itself.
+    setPoseTelemetryEnabled(false);
     lv_obj_t* blank = lv_obj_create(nullptr);
     lv_obj_set_style_bg_color(blank, lv_color_hex(0x000000), 0);
     lv_screen_load(blank);
@@ -23,6 +27,7 @@ Report::~Report() {
     master.set_text(0, 0, "done-ok to touch  ");
     pros::delay(60);
     master.rumble("..");
+    setPoseTelemetryEnabled(true);
 }
 
 void Report::operator()(const char* fmt, ...) {

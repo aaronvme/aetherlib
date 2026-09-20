@@ -99,13 +99,14 @@ void autonProbeGeometry() {
                 static_cast<double>(2.0f * Field::FIELD_HALF_WALL),
                 static_cast<double>(spanLR), static_cast<double>(predLR),
                 static_cast<double>(spanFB), static_cast<double>(predFB));
-    std::printf("geocols,ms,h,s0,s1,s2,s3,c0,c1,c2,c3,lr,dlr,fb,dfb,minlr,minfb\n");
+    std::printf("geocols,ms,h,s0,s1,s2,s3,c0,c1,c2,c3,lr,dlr,fb,dfb,minlr,minfb,px,py\n");
     std::printf("geomarkcols,ms,mark,m0,sd0,n0,m1,sd1,n1,m2,sd2,n2,m3,sd3,n3,"
                 "lr,dlr,fb,dfb\n");
 
     const uint32_t tStart = pros::millis();
     uint32_t nextDraw = 0;
     int marks = 0;
+    int ctlPage = 0;
 
     while (!master.get_digital(pros::E_CONTROLLER_DIGITAL_B)) {
         if (chassis.isSettled()) {
@@ -159,7 +160,8 @@ void autonProbeGeometry() {
 
         if (pros::millis() >= nextDraw) {
             nextDraw = pros::millis() + kDrawMs;
-            const float h = stdRadToVexDeg(chassis.getPose().theta);
+            const Pose p = chassis.getPose();
+            const float h = stdRadToVexDeg(p.theta);
             int row = 1;
             for (int i = 0; i < kBeams; ++i) {
                 if (distSensors[i] == nullptr) continue;
@@ -207,6 +209,21 @@ void autonProbeGeometry() {
             pros::screen::print(pros::E_TEXT_SMALL, row++,
                                 "A = log+reset, B = end");
 
+            // The brain is on the robot and the robot is against a wall.
+            // One line per pass: master.print drops anything inside 50 ms.
+            switch (ctlPage) {
+                case 0: master.print(0, 0, "F%-5.1f L%-5.1f ",
+                                     static_cast<double>(b[0].last),
+                                     static_cast<double>(b[1].last)); break;
+                case 1: master.print(1, 0, "B%-5.1f R%-5.1f ",
+                                     static_cast<double>(b[2].last),
+                                     static_cast<double>(b[3].last)); break;
+                default: master.print(2, 0, "LR%-6.2f %+5.2f ",
+                                      static_cast<double>(lr),
+                                      static_cast<double>(lr - predLR)); break;
+            }
+            ctlPage = (ctlPage + 1) % 3;
+
             std::printf("geo,%lu,%.1f",
                         static_cast<unsigned long>(pros::millis() - tStart),
                         static_cast<double>(h));
@@ -224,8 +241,10 @@ void autonProbeGeometry() {
                         static_cast<double>(fb - predFB));
             if (haveMinLR) std::printf(",%.2f", static_cast<double>(minLR));
             else std::printf(",");
-            if (haveMinFB) std::printf(",%.2f\n", static_cast<double>(minFB));
-            else std::printf(",\n");
+            if (haveMinFB) std::printf(",%.2f", static_cast<double>(minFB));
+            else std::printf(",");
+            std::printf(",%.2f,%.2f\n", static_cast<double>(p.x),
+                        static_cast<double>(p.y));
             std::fflush(stdout);
         }
         pros::delay(20);

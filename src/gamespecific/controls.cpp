@@ -2,6 +2,7 @@
 #include "gamespecific/config.hpp"
 #include "gamespecific/lift.hpp"
 
+#include <atomic>
 #include <cmath>
 
 #include "pros/misc.hpp"
@@ -16,11 +17,20 @@ constexpr double kLiftMacroTimeoutMs = 2500.0;
 }
 
 static pros::Task* poseTelemetryTask = nullptr;
+static std::atomic<bool> poseTelemetryEnabled{true};
+
+void setPoseTelemetryEnabled(bool enabled) {
+    poseTelemetryEnabled.store(enabled);
+}
 
 void startPoseTelemetry() {
     if (poseTelemetryTask != nullptr) return;
     poseTelemetryTask = new pros::Task([] {
         while (true) {
+            if (!poseTelemetryEnabled.load()) {
+                pros::delay(100);
+                continue;
+            }
             Pose p = chassis.getPose();
             master.print(0, 0, "X%.1f Y%.1f H%.1f ",
                          p.x, p.y, stdRadToVexDeg(p.theta));
