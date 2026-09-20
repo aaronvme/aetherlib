@@ -13,7 +13,7 @@ namespace chad {
 using namespace autons;
 
 namespace {
-constexpr float kSensorSpanXIn = 2.25f;  // front sensor face -> back face
+constexpr float kSensorSpanXIn = 2.0f;   // front sensor face -> back face
 constexpr float kSensorSpanYIn = 9.5f;   // left sensor face -> right face
 
 constexpr int kFront = 0, kLeft = 1, kBack = 2, kRight = 3;
