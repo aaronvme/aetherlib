@@ -34,7 +34,9 @@ private:
 // The controller screen is never cleared, so a write shorter than what was
 // there leaves the old tail showing. Everything goes through here, which pads
 // and truncates to the full line.
-constexpr int kCtlWidth = 18;
+// pros documents the controller columns as [0-14], and the API is flagged
+// beta. Fifteen is the whole line; past it is past what it promises.
+constexpr int kCtlWidth = 15;
 void ctlLine(int line, const char* fmt, ...);
 
 void setFilters(bool on);

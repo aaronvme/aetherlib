@@ -49,7 +49,7 @@ bool capture(Report& out, int index, double& degOut) {
         const uint32_t now = pros::millis();
         if (now - lastPrint >= kPrintMs) {
             lastPrint = now;
-            master.print(0, 0, "p%d %.0f  A=set ", index, ::liftPosition());
+            ctlLine(0, "p%d %.0f A=set", index, ::liftPosition());
         }
         pros::delay(20);
     }

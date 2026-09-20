@@ -45,7 +45,7 @@ void startPoseTelemetry() {
                 continue;
             }
             Pose p = chassis.getPose();
-            master.print(0, 0, "%-18.18s", lineBuf(
+            master.print(0, 0, "%-15.15s", lineBuf(
                 "X%.0f Y%.0f H%.0f", p.x, p.y, stdRadToVexDeg(p.theta)));
             pros::delay(60);
 
@@ -53,12 +53,12 @@ void startPoseTelemetry() {
             const double height = liftHeight();
             const char* tag = liftBusy() ? "down" : "";
             if (!std::isfinite(arm)) {
-                master.print(1, 0, "%-18.18s", "lift --");
+                master.print(1, 0, "%-15.15s", "lift --");
             } else if (std::isfinite(height)) {
-                master.print(1, 0, "%-18.18s",
+                master.print(1, 0, "%-15.15s",
                              lineBuf("lift %.1f\" %s", height, tag));
             } else {
-                master.print(1, 0, "%-18.18s",
+                master.print(1, 0, "%-15.15s",
                              lineBuf("lift %.0f %s", arm, tag));
             }
             pros::delay(250);

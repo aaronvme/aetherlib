@@ -26,23 +26,21 @@ void autonCalibrateImu() {
     out.result("5+ full turns, either way,");
     out.result("then press A. count on the");
     out.result("controller.");
-    master.set_text(0, 0, "spin it, press A  ");
+    ctlLine(0, "spin, press A");
     pros::delay(60);
     master.rumble("-");
 
     double raw = 0.0;
-    char buf[24];
     const uint32_t t0 = pros::millis();
     while (pros::millis() - t0 < 300000u) {
         if (master.get_digital(pros::E_CONTROLLER_DIGITAL_A)) break;
         const double scaled = imu.get_rotation();
         if (std::isfinite(scaled)) raw = scaled / factorWas;
-        std::snprintf(buf, sizeof(buf), "turns %+.2f     ", raw / 360.0);
-        master.set_text(1, 0, buf);
+        ctlLine(1, "turns %+.2f", raw / 360.0);
         pros::delay(250);
     }
     while (master.get_digital(pros::E_CONTROLLER_DIGITAL_A)) pros::delay(20);
-    master.set_text(0, 0, "running-hands off ");
+    ctlLine(0, "run: hands off");
 
     const double turns = std::round(raw / 360.0);
     if (std::fabs(turns) < 1.0) {

@@ -212,13 +212,13 @@ void autonProbeGeometry() {
             // The brain is on the robot and the robot is against a wall.
             // One line per pass: master.print drops anything inside 50 ms.
             switch (ctlPage) {
-                case 0: ctlLine(0, "F%-6.1f L%-6.1f",
+                case 0: ctlLine(0, "F%-5.1f L%-5.1f",
                                 static_cast<double>(b[0].last),
                                 static_cast<double>(b[1].last)); break;
-                case 1: ctlLine(1, "B%-6.1f R%-6.1f",
+                case 1: ctlLine(1, "B%-5.1f R%-5.1f",
                                 static_cast<double>(b[2].last),
                                 static_cast<double>(b[3].last)); break;
-                default: ctlLine(2, "LR%-7.2f %+.2f",
+                default: ctlLine(2, "LR%-6.2f%+6.2f",
                                  static_cast<double>(lr),
                                  static_cast<double>(lr - predLR)); break;
             }

@@ -20,11 +20,11 @@ Report::Report() {
     lv_screen_load(blank);
     pros::delay(60);
     pros::screen::erase();
-    master.set_text(0, 0, "running-hands off ");
+    ctlLine(0, "run: hands off");
 }
 
 Report::~Report() {
-    master.set_text(0, 0, "done-ok to touch  ");
+    ctlLine(0, "done: touch ok");
     pros::delay(60);
     master.rumble("..");
     setPoseTelemetryEnabled(true);
@@ -77,7 +77,7 @@ void ctlLine(int line, const char* fmt, ...) {
     va_start(a, fmt);
     std::vsnprintf(buf, sizeof(buf), fmt, a);
     va_end(a);
-    master.print(line, 0, "%-*.*s", kCtlWidth, kCtlWidth, buf);
+    master.print(line, 0, "%-15.15s", buf);
 }
 
 void setFilters(bool on) {
@@ -129,7 +129,7 @@ std::function<float()> tiltProbe() {
 void waitForA(Report& out, const char* why) {
     out.result("%s", why);
     out.result("press A to continue");
-    master.set_text(0, 0, "measure, press A  ");
+    ctlLine(0, "measure-press A");
     pros::delay(60);
     master.rumble("-");
     const uint32_t t0 = pros::millis();
@@ -138,13 +138,13 @@ void waitForA(Report& out, const char* why) {
         pros::delay(20);
     }
     while (master.get_digital(pros::E_CONTROLLER_DIGITAL_A)) pros::delay(20);
-    master.set_text(0, 0, "running-hands off ");
+    ctlLine(0, "run: hands off");
 }
 
 void waitForStart(Report& out, const char* what) {
     out("%s", what);
     out("A starts. live beams below:");
-    master.set_text(0, 0, "place it, press A ");
+    ctlLine(0, "place, press A");
     pros::delay(60);
     master.rumble("-");
 
@@ -181,7 +181,7 @@ void waitForStart(Report& out, const char* what) {
         pros::delay(20);
     }
     while (master.get_digital(pros::E_CONTROLLER_DIGITAL_A)) pros::delay(20);
-    master.set_text(0, 0, "running-hands off ");
+    ctlLine(0, "run: hands off");
 }
 
 bool solvePark(const tuning::RangeNoiseFit& beams, float theta,

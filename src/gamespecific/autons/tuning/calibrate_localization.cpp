@@ -98,7 +98,7 @@ void drawPanel() {
 int waitForChoice(Report& out, const char* why, const char* bMeans) {
     out("%s", why);
     out("A = record, B = %s", bMeans);
-    master.set_text(0, 0, "place it, press A ");
+    ctlLine(0, "place, press A");
     pros::delay(60);
     master.rumble("-");
     int picked = 0;
@@ -117,7 +117,7 @@ int waitForChoice(Report& out, const char* why, const char* bMeans) {
            master.get_digital(pros::E_CONTROLLER_DIGITAL_B)) {
         pros::delay(20);
     }
-    master.set_text(0, 0, "running-hands off ");
+    ctlLine(0, "run: hands off");
     return picked;
 }
 }
