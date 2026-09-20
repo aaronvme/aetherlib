@@ -71,6 +71,7 @@ void autonProbeMcl() {
     bool haveTruth = true;
     int inliers = 0, checks = 0;
     uint32_t nextDraw = 0;
+    int ctlPage = 0;
 
     while (!master.get_digital(pros::E_CONTROLLER_DIGITAL_B)) {
         if (chassis.isSettled()) {
@@ -136,6 +137,26 @@ void autonProbeMcl() {
             row++;
             pros::screen::print(pros::E_TEXT_SMALL, row++,
                                 "A = check vs beams, B = end");
+
+            // Report holds the controller now, so this routine has to put
+            // its own numbers there. One line per pass: master.print drops
+            // anything sent inside 50 ms.
+            if (ctlPage == 0) {
+                master.print(0, 0, "X%-5.1f Y%-5.1f ",
+                             static_cast<double>(p.x),
+                             static_cast<double>(p.y));
+            } else if (ctlPage == 1) {
+                master.print(1, 0, "H%-4.0f nEff%-4.0f ",
+                             static_cast<double>(stdRadToVexDeg(p.theta)),
+                             static_cast<double>(est.nEff));
+            } else if (haveTruth) {
+                master.print(2, 0, "err%-5.1f wst%-5.1f ",
+                             static_cast<double>(err),
+                             static_cast<double>(worst));
+            } else {
+                master.print(2, 0, "A=check B=end   ");
+            }
+            ctlPage = (ctlPage + 1) % 3;
 
             const auto& rd = chassis.mcl().sensorReadings();
             const auto& ok = chassis.mcl().validSensors();
