@@ -136,6 +136,12 @@ MclTracking::~MclTracking() {
 
 void MclTracking::startTracking() {
     if (mTask == nullptr) {
+        // Odometry has been accumulating since the constructor, which is
+        // whole minutes of calibration and handling. Taking it now would
+        // move every particle by all of it at once and read as a lurch the
+        // filter then has to recover from. The EKF already drops it here.
+        mOdom.consumeDelta();
+
         mRunning = true;
         mTask = new pros::Task([this]() { run(); });
     }
