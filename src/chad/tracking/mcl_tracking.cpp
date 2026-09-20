@@ -483,6 +483,21 @@ void MclTracking::updateWeights() {
 
     const float inv = 1.0f / static_cast<float>(mConfig.particleCount);
     for (int i = 0; i < SENSOR_COUNT; i++) mDeadzoneFrac[i] = mDeadzoneHits[i] * inv;
+
+    // A reading the map cannot explain constrains nothing, so a deadzoned beam
+    // counts for as little as a missing one.
+    mObsX = 0.0f;
+    mObsY = 0.0f;
+    const float eCos = FastTrig::cos(mRawEstimate.theta);
+    const float eSin = FastTrig::sin(mRawEstimate.theta);
+    for (int i = 0; i < SENSOR_COUNT; i++) {
+        if (!mValidSensors[i]) continue;
+        const float w = 1.0f - clamp(mDeadzoneFrac[i], 0.0f, 1.0f);
+        const float bCos = eCos * mMountTrigs[i].cosVal - eSin * mMountTrigs[i].sinVal;
+        const float bSin = eSin * mMountTrigs[i].cosVal + eCos * mMountTrigs[i].sinVal;
+        mObsX += w * std::fabs(bCos);
+        mObsY += w * std::fabs(bSin);
+    }
 }
 
 void MclTracking::resample() {
@@ -499,7 +514,13 @@ void MclTracking::resample() {
         return;
     }
 
-    const float frac = (mInjectFrac >= mConfig.injectResampleFloor) ? mInjectFrac : 0.0f;
+    // Scattering particles down an axis nothing is watching does not find the
+    // robot, it just outvotes the cluster that had it right.
+    const bool canPlace = mConfig.minAxisObservability <= 0.0f ||
+                          (mObsX >= mConfig.minAxisObservability &&
+                           mObsY >= mConfig.minAxisObservability);
+    const float frac = (canPlace && mInjectFrac >= mConfig.injectResampleFloor)
+                       ? mInjectFrac : 0.0f;
     const int injected =
         std::min(mConfig.particleCount - 1,
                  static_cast<int>(frac * mConfig.particleCount));

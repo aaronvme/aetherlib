@@ -64,7 +64,7 @@ void autonProbeMcl() {
     // `pros terminal` streams, so the run can be read back off the wire
     // instead of off the brain.
     std::printf("mclhdr,ms,px,py,ph,mx,my,sx,sy,neff,inj,gate,reloc,"
-                "rate,held,r0,r1,r2,r3\n");
+                "rate,held,r0,r1,r2,r3,obsx,obsy\n");
     const uint32_t tStart = pros::millis();
     float worst = 0.0f;
     float tx = px, ty = py, err = 0.0f;
@@ -179,7 +179,9 @@ void autonProbeMcl() {
                 if (ok[i]) std::printf(",%.2f", static_cast<double>(rd[i]));
                 else std::printf(",");
             }
-            std::printf("\n");
+            std::printf(",%.2f,%.2f\n",
+                        static_cast<double>(chassis.mcl().axisObservabilityX()),
+                        static_cast<double>(chassis.mcl().axisObservabilityY()));
             std::fflush(stdout);
         }
         pros::delay(20);

@@ -58,6 +58,13 @@ public:
         float maxRandomFrac = 0.0f;
         float injectResampleFloor = 0.03f;
 
+        // How much beam has to be pointing along an axis before particles may
+        // be scattered along it. A beam only pins down the axis it points
+        // along; with nothing on one, a particle injected anywhere along that
+        // axis scores the same as the truth, so injection walks the estimate
+        // off instead of finding it. Zero disables the gate.
+        float minAxisObservability = 0.0f;
+
         // Above this the beams sweep further per cycle than the particle
         // spread can bracket, so the weights say only that every particle is
         // wrong. Coast on odometry instead. Zero disables the gate.
@@ -146,6 +153,11 @@ public:
     void setAutoSync(bool enabled) { mConfig.autoSync = enabled; }
 
     float randomInjectFraction() const { return mInjectFrac; }
+
+    // Beam pointing along each field axis, summed over the sensors the map
+    // can currently explain. Roughly "how many beams are holding this axis".
+    float axisObservabilityX() const { return mObsX; }
+    float axisObservabilityY() const { return mObsY; }
 
     float latestTurnRateRadS() const { return mLatestTurnRate; }
 
@@ -263,6 +275,8 @@ private:
     float mLogWFast{0.0f};
     bool  mHaveLogAvg{false};
     float mInjectFrac{0.0f};
+    float mObsX{0.0f};
+    float mObsY{0.0f};
 
     pros::Task* mTask{nullptr};
     std::atomic<bool> mRunning{false};
