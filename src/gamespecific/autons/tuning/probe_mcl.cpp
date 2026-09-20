@@ -142,19 +142,17 @@ void autonProbeMcl() {
             // its own numbers there. One line per pass: master.print drops
             // anything sent inside 50 ms.
             if (ctlPage == 0) {
-                master.print(0, 0, "X%-5.1f Y%-5.1f ",
-                             static_cast<double>(p.x),
-                             static_cast<double>(p.y));
+                ctlLine(0, "X%-6.1f Y%-6.1f", static_cast<double>(p.x),
+                        static_cast<double>(p.y));
             } else if (ctlPage == 1) {
-                master.print(1, 0, "H%-4.0f nEff%-4.0f ",
-                             static_cast<double>(stdRadToVexDeg(p.theta)),
-                             static_cast<double>(est.nEff));
+                ctlLine(1, "H%-4.0f nEff%-5.0f",
+                        static_cast<double>(stdRadToVexDeg(p.theta)),
+                        static_cast<double>(est.nEff));
             } else if (haveTruth) {
-                master.print(2, 0, "err%-5.1f wst%-5.1f ",
-                             static_cast<double>(err),
-                             static_cast<double>(worst));
+                ctlLine(2, "err%-5.1f wst%-5.1f", static_cast<double>(err),
+                        static_cast<double>(worst));
             } else {
-                master.print(2, 0, "A=check B=end   ");
+                ctlLine(2, "A=check  B=end");
             }
             ctlPage = (ctlPage + 1) % 3;
 

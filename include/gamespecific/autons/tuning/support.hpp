@@ -31,6 +31,12 @@ private:
     int mLine{1};
 };
 
+// The controller screen is never cleared, so a write shorter than what was
+// there leaves the old tail showing. Everything goes through here, which pads
+// and truncates to the full line.
+constexpr int kCtlWidth = 18;
+void ctlLine(int line, const char* fmt, ...);
+
 void setFilters(bool on);
 
 bool headingOk(Report& out);

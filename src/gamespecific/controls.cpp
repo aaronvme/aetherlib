@@ -4,6 +4,8 @@
 
 #include <atomic>
 #include <cmath>
+#include <cstdarg>
+#include <cstdio>
 
 #include "pros/misc.hpp"
 #include "pros/rtos.hpp"
@@ -14,6 +16,17 @@ constexpr double kLiftManualUp   = 100.0;
 constexpr double kLiftManualDown = 80.0;    // gravity is already helping
 constexpr double kLiftMacroSpeed = 100.0;
 constexpr double kLiftMacroTimeoutMs = 2500.0;
+}
+
+// The controller screen is never cleared, so every line is padded to full
+// width by its caller and this just formats.
+static const char* lineBuf(const char* fmt, ...) {
+    static char buf[64];
+    va_list a;
+    va_start(a, fmt);
+    std::vsnprintf(buf, sizeof(buf), fmt, a);
+    va_end(a);
+    return buf;
 }
 
 static pros::Task* poseTelemetryTask = nullptr;
@@ -32,19 +45,21 @@ void startPoseTelemetry() {
                 continue;
             }
             Pose p = chassis.getPose();
-            master.print(0, 0, "X%.1f Y%.1f H%.1f ",
-                         p.x, p.y, stdRadToVexDeg(p.theta));
+            master.print(0, 0, "%-18.18s", lineBuf(
+                "X%.0f Y%.0f H%.0f", p.x, p.y, stdRadToVexDeg(p.theta)));
             pros::delay(60);
 
             const double arm = liftPosition();
             const double height = liftHeight();
             const char* tag = liftBusy() ? "down" : "";
             if (!std::isfinite(arm)) {
-                master.print(1, 0, "lift --         ");
+                master.print(1, 0, "%-18.18s", "lift --");
             } else if (std::isfinite(height)) {
-                master.print(1, 0, "lift %.1f\" %-4s ", height, tag);
+                master.print(1, 0, "%-18.18s",
+                             lineBuf("lift %.1f\" %s", height, tag));
             } else {
-                master.print(1, 0, "lift %.0f %-4s  ", arm, tag);
+                master.print(1, 0, "%-18.18s",
+                             lineBuf("lift %.0f %s", arm, tag));
             }
             pros::delay(250);
         }

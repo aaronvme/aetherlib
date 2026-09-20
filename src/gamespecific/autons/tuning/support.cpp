@@ -71,6 +71,15 @@ void Report::clear() {
     mLine = 1;
 }
 
+void ctlLine(int line, const char* fmt, ...) {
+    char buf[64];
+    va_list a;
+    va_start(a, fmt);
+    std::vsnprintf(buf, sizeof(buf), fmt, a);
+    va_end(a);
+    master.print(line, 0, "%-*.*s", kCtlWidth, kCtlWidth, buf);
+}
+
 void setFilters(bool on) {
     // Starting the filters by hand skipped what Chassis::startTracking does
     // to keep them out of each other's way: with EKF running, MCL's autoSync
@@ -161,11 +170,11 @@ void waitForStart(Report& out, const char* what) {
             // The brain is on the robot and the robot is against a wall, so
             // put it on the controller too.
             if (page == 0) {
-                master.set_text(1, 0, "F" + std::to_string(static_cast<int>(in[0])) +
-                                      " L" + std::to_string(static_cast<int>(in[1])) + "    ");
+                ctlLine(1, "F%-5.1f L%-5.1f", static_cast<double>(in[0]),
+                        static_cast<double>(in[1]));
             } else {
-                master.set_text(2, 0, "B" + std::to_string(static_cast<int>(in[2])) +
-                                      " R" + std::to_string(static_cast<int>(in[3])) + "    ");
+                ctlLine(2, "B%-5.1f R%-5.1f", static_cast<double>(in[2]),
+                        static_cast<double>(in[3]));
             }
             page ^= 1;
         }
