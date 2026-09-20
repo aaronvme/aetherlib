@@ -149,8 +149,8 @@ namespace Field {
     constexpr float FIELD_LENGTH = 144.0f;
     constexpr float FIELD_WIDTH  = 144.0f;
     constexpr float FIELD_HALF   = 72.0f;
-    constexpr float FIELD_WALL_TO_WALL = 140.4f;
-    constexpr float FIELD_HALF_WALL   = 70.2f;
+    constexpr float FIELD_WALL_TO_WALL = 141.0f;
+    constexpr float FIELD_HALF_WALL   = 70.5f;
 
     constexpr float TILE_SIZE = 24.0f;
 

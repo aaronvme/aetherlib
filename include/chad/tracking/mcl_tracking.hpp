@@ -178,11 +178,13 @@ private:
         float cosVal, sinVal;
     };
 
+    static constexpr float kW = Field::FIELD_HALF_WALL;
+
     static constexpr LineObstacle kFieldWalls[4] = {
-        {{-70.2f, -70.2f}, { 70.2f, -70.2f}},
-        {{ 70.2f, -70.2f}, { 70.2f,  70.2f}},
-        {{ 70.2f,  70.2f}, {-70.2f,  70.2f}},
-        {{-70.2f,  70.2f}, {-70.2f, -70.2f}}
+        {{-kW, -kW}, { kW, -kW}},
+        {{ kW, -kW}, { kW,  kW}},
+        {{ kW,  kW}, {-kW,  kW}},
+        {{-kW,  kW}, {-kW, -kW}}
     };
 
     static constexpr LineObstacle kFieldTargets[] = {

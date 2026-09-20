@@ -108,10 +108,10 @@ std::array<pros::Distance*, MAX_DISTANCE_SENSORS> distSensors = {
 
 
 std::array<Pose, MAX_DISTANCE_SENSORS> sensorMounts = {{
-    {  -1.00f,  -3.75f,  0.0f        },
-    {  -0.50f,  4.50f,  HALF_PI    },
-    { -3.00f,  5.50f,  PI         },
-    {  -0.50f, -4.75f,  3.0f * HALF_PI }
+    {  -0.875f, -3.75f,  0.0f        },
+    {  -0.50f,   4.625f, HALF_PI    },
+    {  -3.125f,  5.50f,  PI         },
+    {  -0.50f,  -4.875f, 3.0f * HALF_PI }
 }};
 
 ChassisConfig chassisConfig = {
