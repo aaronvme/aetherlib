@@ -18,6 +18,7 @@
 #include "chad/movement_control/boomerang.hpp"
 #include "chad/movement_control/feedforward.hpp"
 #include "chad/movement_control/ramsete.hpp"
+#include "chad/util/field_mirror.hpp"
 #include "chad/movement_control/velocity_profiles.hpp"
 #include "chad/tracking/ekf_tracking.hpp"
 #include "chad/tracking/mcl_tracking.hpp"
@@ -82,6 +83,16 @@ public:
     void calibrate();
 
     void setPose(const Pose& pose);
+
+    // setPose without the mirror. Sensor fixes already read the real field,
+    // so a mirrored routine must not transform them a second time.
+    void setPoseFieldFrame(const Pose& pose);
+
+    // Replays a routine written for one alliance on the other. Applied to
+    // every motion target as it is queued, so the routine itself keeps its
+    // original coordinates.
+    void setMirror(FieldMirror mirror);
+    FieldMirror mirror() const;
 
     void setPosition(float x, float y);
 
@@ -188,6 +199,11 @@ private:
     };
 
     void enqueueMotion(MotionRequest& req, bool async);
+
+    TurnDirection mirrorTurn(TurnDirection dir) const;
+    void applyMirror(MotionRequest& req) const;
+
+    FieldMirror mMirror{FieldMirror::None};
 
     Drivetrain& mDrivetrain;
     ChassisConfig mConfig;

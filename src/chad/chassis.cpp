@@ -59,7 +59,66 @@ void Chassis::calibrate() {
     mOdom.calibrate();
 }
 
-void Chassis::setPose(const Pose& pose) {
+void Chassis::setMirror(FieldMirror mirror) { mMirror = mirror; }
+
+FieldMirror Chassis::mirror() const { return mMirror; }
+
+TurnDirection Chassis::mirrorTurn(TurnDirection dir) const {
+    if (!mirrorFlipsHandedness(mMirror)) return dir;
+    if (dir == TurnDirection::CW)  return TurnDirection::CCW;
+    if (dir == TurnDirection::CCW) return TurnDirection::CW;
+    return dir;
+}
+
+// Every motion funnels through enqueueMotion, so this is the one place that
+// has to know the shape of each request.
+void Chassis::applyMirror(MotionRequest& req) const {
+    if (mMirror == FieldMirror::None) return;
+
+    switch (req.type) {
+        case MotionType::Point:
+            mirrorPointInPlace(mMirror, req.targetX, req.targetY);
+            break;
+        case MotionType::TurnPoint:
+            mirrorPointInPlace(mMirror, req.targetX, req.targetY);
+            req.turnPointParams.direction = mirrorTurn(req.turnPointParams.direction);
+            if (mirrorFlipsHandedness(mMirror)) req.turnPointParams.offset = -req.turnPointParams.offset;
+            break;
+        case MotionType::Heading:
+            req.targetHeadingRad = mirrorHeadingRad(mMirror, req.targetHeadingRad);
+            req.turnHeadingParams.direction = mirrorTurn(req.turnHeadingParams.direction);
+            break;
+        case MotionType::Arc:
+            mirrorPointInPlace(mMirror, req.targetX, req.targetY);
+            if (mirrorFlipsHandedness(mMirror)) req.targetRadius = -req.targetRadius;
+            break;
+        case MotionType::Boomerang:
+            mirrorPointInPlace(mMirror, req.targetX, req.targetY);
+            req.targetHeadingRad = mirrorHeadingRad(mMirror, req.targetHeadingRad);
+            break;
+        case MotionType::RAMSETE:
+            for (Pose& p : req.ramsetePath) p = mirrorPose(mMirror, p);
+            break;
+        case MotionType::Swing:
+            req.targetHeadingRad = mirrorHeadingRad(mMirror, req.targetHeadingRad);
+            req.swingParams.direction = mirrorTurn(req.swingParams.direction);
+            if (mirrorFlipsHandedness(mMirror)) {
+                req.swingSide = (req.swingSide == SwingSide::Left) ? SwingSide::Right
+                                                                   : SwingSide::Left;
+            }
+            break;
+        // A distance is relative to wherever the robot already points.
+        case MotionType::Distance:
+        case MotionType::None:
+            break;
+    }
+}
+
+void Chassis::setPose(const Pose& raw) {
+    setPoseFieldFrame(mirrorPose(mMirror, raw));
+}
+
+void Chassis::setPoseFieldFrame(const Pose& pose) {
     if (mDryRun) {
         mDryRunStartPose = pose;
         mDryRunPose = pose;
@@ -75,6 +134,7 @@ void Chassis::setPose(const Pose& pose) {
 }
 
 void Chassis::setPosition(float x, float y) {
+    mirrorPointInPlace(mMirror, x, y);
     if (mDryRun) {
         mDryRunPose.x = x;
         mDryRunPose.y = y;
@@ -91,13 +151,14 @@ void Chassis::setPosition(float x, float y) {
 }
 
 void Chassis::setHeading(float thetaDeg) {
+    const float theta = mirrorHeadingRad(mMirror, vexToStdRad(thetaDeg));
     if (mDryRun) {
-        mDryRunPose.theta = vexToStdRad(thetaDeg);
+        mDryRunPose.theta = theta;
         mDryRunPath.push_back(mDryRunPose);
         return;
     }
     Pose current = mOdom.getPose();
-    Pose newPose{current.x, current.y, vexToStdRad(thetaDeg)};
+    Pose newPose{current.x, current.y, theta};
     mOdom.setPose(newPose);
 
     mMcl.setPose(newPose);
@@ -106,7 +167,7 @@ void Chassis::setHeading(float thetaDeg) {
 }
 
 Pose Chassis::getPose() const {
-    return mOdom.getPose();
+    return mirrorPose(mMirror, mOdom.getPose());
 }
 
 void Chassis::tank(float left, float right) {
@@ -850,6 +911,7 @@ void Chassis::swingToHeading(float thetaDeg, SwingSide side, float timeout, cons
 }
 
 void Chassis::enqueueMotion(MotionRequest& req, bool async) {
+    applyMirror(req);
     ensureMotionTask();
 
     mQueueMutex.lock();
