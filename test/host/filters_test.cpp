@@ -107,12 +107,36 @@ CHAD_TEST(lowPass, firstSampleDoesNotRampFromZero) {
 }
 
 CHAD_TEST(lowPass, degenerateInputsPassThrough) {
+    // No time constant is no filtering, so this one really does pass through.
     LowPassFilter lp{0.0f};
     CHECK_EQ(lp.calculate(5.0f, 0.01f), 5.0f);
+
+    // A zero dt is not new information and must not wipe the state -- two
+    // samples inside one millisecond tick would otherwise hand back the raw
+    // input and undo everything the filter had accumulated.
     LowPassFilter jitter{0.2f};
     jitter.calculate(0.0f, 0.01f);
-    CHECK_EQ(jitter.calculate(9.0f, 0.0f), 9.0f);
-    CHECK_EQ(jitter.calculate(kNan, 0.01f), 9.0f);
+    CHECK_EQ(jitter.calculate(9.0f, 0.0f), 0.0f);
+    CHECK_EQ(jitter.value(), 0.0f);
+    CHECK_EQ(jitter.calculate(kNan, 0.01f), 0.0f);
+}
+
+CHAD_TEST(lowPass, seededResetSurvivesTheNextSample) {
+    LowPassFilter lp{1.0f};
+    lp.reset(10.0f);
+    // Filtered against the seed, not replaced by the sample.
+    const float out = lp.calculate(20.0f, 0.01f);
+    CHECK(out > 10.0f);
+    CHECK(out < 11.0f);
+}
+
+CHAD_TEST(slew, reversalDeceleratesAtTheFallRate) {
+    // Rise is slow, fall is fast. Coming down from +10 to -10 must use the
+    // fall rate on the way to zero, not the rise rate.
+    SlewRateLimiter limiter{1.0f, 100.0f, 10.0f};
+    CHECK_NEAR(limiter.calculate(-10.0f, 0.1f), 0.0f, 1e-5);
+    // Below zero it is building magnitude again, so the rise rate applies.
+    CHECK_NEAR(limiter.calculate(-10.0f, 0.1f), -0.1f, 1e-5);
 }
 
 CHAD_TEST(lowPass, dtIsHonouredNotAssumed) {

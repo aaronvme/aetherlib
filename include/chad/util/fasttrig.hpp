@@ -188,18 +188,25 @@ public:
     static inline float sin(float rad) {
         float scaled = rad * MAPPING_FACTOR;
 
-        int32_t rawIdx = static_cast<int32_t>(std::floor(scaled));
+        // Nearest bin, not the one below: truncating read every angle up to
+        // a whole bin short.
+        int32_t rawIdx = static_cast<int32_t>(std::floor(scaled + 0.5f));
 
         uint32_t wrapped = static_cast<uint32_t>(rawIdx) & 4095;
 
         uint32_t quad = wrapped >> 10;
         uint32_t idx  = wrapped & 1023;
 
+        // The table is sin(0) .. sin(1023*pi/2048), so the mirror of bin k
+        // is 1024-k. At 1023-k the falling quadrants leaned the opposite way
+        // from the rising ones and cos^2 + sin^2 came out 8e-4 off 1.
+        float val;
         if (quad == 1 || quad == 3) {
-            idx = 1023 - idx;
+            idx = 1024 - idx;
+            val = (idx >= 1024) ? 1.0f : SIN_LUT[idx];
+        } else {
+            val = SIN_LUT[idx];
         }
-
-        float val = SIN_LUT[idx];
 
         return (quad >= 2) ? -val : val;
     }

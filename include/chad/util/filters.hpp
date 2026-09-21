@@ -18,7 +18,10 @@ public:
     float calculate(float input, float dt) {
         if (!std::isfinite(input) || !(dt > 0.0f)) return mValue;
         const float delta = input - mValue;
-        const bool growing = std::fabs(input) >= std::fabs(mValue);
+        // Which way this step drives the magnitude, not where the target
+        // ends up: comparing |input| to |mValue| put the whole of a sign
+        // reversal on the rise rate.
+        const bool growing = (mValue == 0.0f) || (delta * mValue > 0.0f);
         const float limit = (growing ? mRise : mFall) * dt;
         if (limit <= 0.0f) return mValue = input;
         mValue += std::clamp(delta, -limit, limit);
@@ -121,7 +124,12 @@ public:
 
     float calculate(float input, float dt) {
         if (!std::isfinite(input)) return mValue;
-        if (!(dt > 0.0f) || mTau <= 0.0f) return mValue = input;
+        // No time constant is no filtering, which really is a pass-through.
+        if (mTau <= 0.0f) return mValue = input;
+        // No elapsed time is no new information -- alpha would be zero, so
+        // hold. Handing back the raw input wiped the state every time two
+        // samples landed inside one millisecond tick.
+        if (!(dt > 0.0f)) return mValue;
         if (!mPrimed) {
             mPrimed = true;
             return mValue = input;
@@ -135,9 +143,18 @@ public:
     float timeConstant() const { return mTau; }
     float value() const { return mValue; }
 
-    void reset(float value = 0.0f) {
-        mValue = value;
+    /// Drop the state; the next sample is taken as the new output.
+    void reset() {
+        mValue = 0.0f;
         mPrimed = false;
+    }
+
+    /// Seed the output. Unlike reset(), the next sample is filtered against
+    /// this value instead of replacing it -- otherwise the seed could never
+    /// reach an output.
+    void reset(float value) {
+        mValue = value;
+        mPrimed = true;
     }
 
 private:
@@ -156,7 +173,8 @@ public:
     }
 
     void setTimeConstant(float seconds) { mLow.setTimeConstant(seconds); }
-    void reset(float value = 0.0f) { mLow.reset(value); }
+    void reset() { mLow.reset(); }
+    void reset(float value) { mLow.reset(value); }
 
 private:
     LowPassFilter mLow;
