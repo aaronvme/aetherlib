@@ -3,6 +3,15 @@
 #include "config.hpp"
 
 namespace chad {
+// Runs a routine written for one alliance on the other. The mirror is cleared
+// again on the way out, including when the routine bails early.
+void runMirrored(void (*routine)(), FieldMirror mirror);
+
+// Red and blue are a half turn apart on this field.
+inline void reflect(void (*routine)()) {
+    runMirrored(routine, FieldMirror::Rot180);
+}
+
 void autonExample();
 
 //calibrating
@@ -26,7 +35,11 @@ void autonProbeGeometry();
 
 //tuffness
 void autonSkills();
+
 void autonRed3Pin();
+void autonRed3PinFar();
+
+
 void autonBlue3Pin();
-void autonBlue3PinPid();
+void autonBlue3PinFar();
 }

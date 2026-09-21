@@ -10,36 +10,49 @@ using namespace chad;
 
 void initialize() {
     chassis.calibrate();
+    liftMotor.set_brake_mode(pros::E_MOTOR_BRAKE_HOLD);
     registerFieldObstacles();
     startPoseTelemetry();
+    startClawWatch();
     liftMotor.tare_position();
     claw.set_value(true);
     startTempWarning(master, {&leftMotors, &rightMotors});
+
+    // Touch the brain screen to pick. Index 0 is what runs if nobody does,
+    // so the one being tested sits first and None sits last on purpose.
+    selector.registerAuton("Red 3 Pin", autonRed3Pin);
+    selector.registerAuton("Blue 3 Pin", autonBlue3Pin);
+    selector.registerAuton("Skills", autonSkills);
+    selector.registerAuton("None", [] {});
+    selector.init();
 }
 
 void disabled() {}
 
 void competition_initialize() {}
 
-void jiggle() {
-    chassis.moveDistance(0.5, 1000);
-    chassis.moveDistance(-0.5, 1000);
-}
-
 void autonomous() {
-    autonBlue3Pin();
+    
+    clawSetAutoGrab(false);
+    chassis.setMirror(FieldMirror::None);
+    // autonSkills();
+    selector.runSelected();
 }
 
 void opcontrol() {
+    chassis.startTracking();
+    // chassis.setPose({-55, 0, vexToStdRad(270)});
+    // clawSetAutoGrab(true);
     chassis.setBrakeMode(pros::E_MOTOR_BRAKE_BRAKE);
-    autonProbeMcl();              // drive with MCL on, check against beams
+    // autonProbeGeometry();      // opposing-pair sums vs map
+    // autonProbeMcl();              // drive with MCL on, check against beams
     // autonTuneRamsete();           // path follow b and zeta
     // autonCalibrateOdomBias();     // odometry along/cross bias
-    // autonCalibrateLocalization();  // MCL/EKF trust, hand placed
-    // autonCharacterize4Filters();  // sensor + pose noise
+    // autonCalibrateLocalization();  // mcl/ekf trust
+    // autonCharacterize4Filters();  // sensor/pose noise
     // autonCalibrateMounts();   // distance sensor mount offsets
-    // autonCalibrateLift();     // kG, friction, travel
-    // autonTuneLiftPresets();   // the 7 macro heights
+    // autonCalibrateLift();     // kG, friction, rom
+    // autonTuneLiftPresets();   // 7 macro heights
 
     driverControl();
 }
