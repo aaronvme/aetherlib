@@ -407,10 +407,19 @@ void Chassis::executeCurrentMotion() {
         bool useCustomOutput = false;
         float latLimit = 127.0f;
         float angLimit = 127.0f;
+        // Speed floors and the early-exit band, filled in per motion type.
+        // remainingErr is negative for motions that have no distance to the
+        // target to measure (turns).
+        float latFloor = 0.0f;
+        float angFloor = 0.0f;
+        float remainingErr = -1.0f;
+        float earlyExit = 0.0f;
 
         switch (req.type) {
         case MotionType::Distance: {
             latLimit = req.moveDistParams.maxSpeed;
+            latFloor = req.moveDistParams.minSpeed;
+            earlyExit = req.moveDistParams.earlyExitRange;
 
             float targetX = distTargetX;
             float targetY = distTargetY;
@@ -420,11 +429,14 @@ void Chassis::executeCurrentMotion() {
             lateralOut = mLateralPID.update(along);
 
             angularOut = mAngularPID.update(angleDiffRad(pose.theta, distAxisRad));
-            settled = std::fabs(along) < req.moveDistParams.targetTolerance;
+            remainingErr = std::fabs(along);
+            settled = remainingErr < req.moveDistParams.targetTolerance;
             break;
         }
         case MotionType::Point: {
             latLimit = req.movePointParams.maxSpeed;
+            latFloor = req.movePointParams.minSpeed;
+            earlyExit = req.movePointParams.earlyExitRange;
             const float distErr = distanceToPoint(pose, req.targetX, req.targetY);
             const float liveBearing = bearingToPoint(pose, req.targetX, req.targetY);
 
@@ -445,11 +457,13 @@ void Chassis::executeCurrentMotion() {
                 steerBearing = wrapRad(steerBearing + PI);
             }
             angularOut = mAngularPID.update(angleDiffRad(pose.theta, steerBearing));
+            remainingErr = distErr;
             settled = distErr < req.movePointParams.targetTolerance;
             break;
         }
         case MotionType::Heading: {
             angLimit = req.turnHeadingParams.maxSpeed;
+            angFloor = req.turnHeadingParams.minSpeed;
             float rawErrRad = angleDiffRad(pose.theta, req.targetHeadingRad);
 
             float headingErrRad = resolveTurnError(rawErrRad, req.turnHeadingParams.direction);
@@ -463,6 +477,7 @@ void Chassis::executeCurrentMotion() {
         }
         case MotionType::TurnPoint: {
             angLimit = req.turnPointParams.maxSpeed;
+            angFloor = req.turnPointParams.minSpeed;
             const float faceOffset = req.turnPointParams.offset +
                 (req.turnPointParams.forwards ? 0.0f : 180.0f);
             float rawErrRad = headingToPointOffset(pose, req.targetX, req.targetY,
@@ -477,6 +492,7 @@ void Chassis::executeCurrentMotion() {
         }
         case MotionType::Arc: {
             latLimit = req.arcParams.maxSpeed;
+            latFloor = req.arcParams.minSpeed;
 
             float dx = req.targetX - pose.x;
             float dy = req.targetY - pose.y;
@@ -497,6 +513,7 @@ void Chassis::executeCurrentMotion() {
 
             lateralOut = mLateralPID.update(chordSign * chordDist);
             angularOut = mAngularPID.update(angleDiffRad(pose.theta, targetHeadingRad));
+            remainingErr = chordDist;
             settled = chordDist < req.arcParams.targetTolerance;
             break;
         }
@@ -673,8 +690,13 @@ void Chassis::executeCurrentMotion() {
 
             float tolRad = degToRad(req.swingParams.targetTolerance);
             if (std::fabs(rawErrRad) < tolRad) headingErrRad = rawErrRad;
+            settled = std::fabs(rawErrRad) < tolRad;
 
             angularOut = clamp(mAngularPID.update(headingErrRad), -angLimit, angLimit);
+            const float swingFloor = std::min(req.swingParams.minSpeed, angLimit);
+            if (!settled && swingFloor > 0.0f && std::fabs(angularOut) < swingFloor) {
+                angularOut = (angularOut < 0.0f) ? -swingFloor : swingFloor;
+            }
             lateralOut = 0;
 
             if (req.swingSide == SwingSide::Left) {
@@ -686,7 +708,6 @@ void Chassis::executeCurrentMotion() {
             }
             useCustomOutput = true;
 
-            settled = std::fabs(rawErrRad) < tolRad;
             break;
         }
         default:
@@ -695,6 +716,19 @@ void Chassis::executeCurrentMotion() {
 
         lateralOut = clamp(lateralOut, -latLimit, latLimit);
         angularOut = clamp(angularOut, -angLimit, angLimit);
+
+        // A floor on the magnitude, never the direction, and only while
+        // there is error left -- held through the tolerance band it would
+        // stop the motion settling. Before the slew, so the ramp still
+        // shapes the way up to it.
+        latFloor = std::min(latFloor, latLimit);
+        angFloor = std::min(angFloor, angLimit);
+        if (!settled && latFloor > 0.0f && std::fabs(lateralOut) < latFloor) {
+            lateralOut = (lateralOut < 0.0f) ? -latFloor : latFloor;
+        }
+        if (!settled && angFloor > 0.0f && std::fabs(angularOut) < angFloor) {
+            angularOut = (angularOut < 0.0f) ? -angFloor : angFloor;
+        }
 
         if (mConfig.lateralSlewPerSec > 0.0f) {
             const float step = mConfig.lateralSlewPerSec * tickDt;
@@ -759,6 +793,12 @@ void Chassis::executeCurrentMotion() {
         uint32_t elapsed = mDryRun ? (dryRunSteps * 10u)
                                    : (pros::millis() - req.startTime);
         if (req.timeout > 0 && elapsed > req.timeout) {
+            exitNow = true;
+        }
+
+        // Hand off to whatever is queued behind this while still carrying
+        // speed, rather than converging on what was only ever a waypoint.
+        if (earlyExit > 0.0f && remainingErr >= 0.0f && remainingErr < earlyExit) {
             exitNow = true;
         }
 
