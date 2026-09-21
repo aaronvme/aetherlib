@@ -207,7 +207,7 @@ struct MoveToPointParams {           // + lead
     bool  forwards{true};
     float maxSpeed{127}, minSpeed{0};
     float targetTolerance{-1.0}, earlyExitRange{0.0};
-    float lead{0.0};                 // carrot-point lead for curved approaches
+    float lead{0.0};                 // declared, not read by the controller
 };
 
 struct TurntoHeadingParams {
@@ -233,7 +233,7 @@ struct ArcParams {
     bool  forwards{true};          // not read by the controller
     float maxSpeed{127}, minSpeed{0};
     float targetTolerance{-1.0};     // inches, negative = ChassisConfig
-    float lead{0.0};
+    float lead{0.0};               // not read by the controller
 };
 
 struct BoomerangParams {
@@ -243,6 +243,15 @@ struct BoomerangParams {
     float headingTolerance{2.0};     // VEX degrees
     float lead{0.5}, leadDecay{0.5};
 };
+
+On every motion but boomerang and RAMSETE, `minSpeed` is a floor on the
+magnitude of the output, applied after `maxSpeed` and before the lateral slew,
+and only while the motion is outside its tolerance -- held through the
+tolerance band it would stop the motion settling at all. `earlyExitRange` ends
+the motion as soon as the remaining error is inside it, so the next queued
+motion takes over while the robot is still carrying speed. Both were declared
+but unread until they were wired up; an auton tuned against the old behaviour
+will move faster and hand off sooner.
 
 `minSpeed` on a boomerang is not a speed floor. The controller scales its
 along-track output by `min(distToTarget / 6, 1)`, so inside 6 in the approach
@@ -649,14 +658,14 @@ void setDistSyncProp(float);
 |---|---|---|
 | `particleCount` | `1024` | |
 | `resampleThreshold` | `512` | Resample when N_eff drops below |
-| `maxSensorRange` | `100.0` | inches `config.cpp` ships `140`. |
-| `distResampleVariance` | `1.5` | inches of jitter per resample |
+| `maxSensorRange` | `100.0` | inches `config.cpp` ships `78`. |
+| `distResampleVariance` | `1.5` | inches of jitter per resample `config.cpp` ships `1.0`. |
 | `thetaResampleVariance` | `0.01` | radians |
 | `maxThetaDeviation` | `0.08` | radians, clamp vs IMU |
 | `trackingWheelVariance` | `0.08` | dead wheels |
 | `imeVariance` | `0.12` | motor encoders — more slip `config.cpp` ships `0.004`. |
 | `imuVariance` | `0.005` | |
-| `rangeSigmaCloseIn` | `0.787` | beam sigma at or below 200 mm `config.cpp` ships `0.068`. |
+| `rangeSigmaCloseIn` | `0.787` | beam sigma at or below 200 mm `config.cpp` ships `0.0872`. |
 | `rangeSigmaProp` | `0.05` | fraction of the reading beyond that |
 | `horizDependentVarianceProp` | `0.03` | × \|dVert\|, lateral slip `config.cpp` ships `0.004`. |
 | `horizConstantNoise` | `0.03` | inches/update baseline |
@@ -664,7 +673,19 @@ void setDistSyncProp(float);
 | `updatePeriodMs` | `25.0` | |
 | `confidenceThreshold` | `10` | |
 | `minSensorRange` | `1.0` | mm; raise for recessed sensors |
+| `maxRandomFrac` | `0.0` | Cap on the injected fraction when the weights collapse. `config.cpp` ships `0.25`. |
+| `injectResampleFloor` | `0.03` | Injection below this is ignored. `config.cpp` ships `0.20`. |
+| `injectRadiusIn` | `0.0` | inches around the current estimate to place injected candidates; `0` searches the whole field. `config.cpp` ships `25`. |
 | `autoSync` | `true` | |
+
+Injection is the augmented-MCL recovery for a filter whose weights have
+collapsed. `injectRadiusIn` is what keeps it a recovery rather than a
+relocation. Searching the whole field means every wall and post that looks
+like the one in front is a live candidate: a robot squaring on a wall
+integrates travel it never made, the weights collapse, and the filter
+re-converges on a mirror of itself 70 in away. Bounding the search to a
+radius the robot could plausibly have been displaced by keeps the prior.
+`sim/test/disturbance.mjs` gates all of this.
 
 Season-specific field targets are `static constexpr` arrays inside
 `mcl_tracking.hpp` (`kFieldTargets`, `kFieldCircles`, `kDisablingLines`) and are
@@ -707,19 +728,19 @@ const std::array<BeamState, SENSOR_COUNT>& beamStates() const;
 | `horizNoiseProp` | `0.045` | per inch of cross-track |
 | `slipNoiseProp` | `0.035` | lateral sigma per inch driven `config.cpp` ships `0.004`. |
 | `slipNoiseFloor` | `0.010` | lateral sigma per update |
-| `vertBiasProp` | `0.06` | systematic along-track scale error |
-| `slipBiasProp` | `0.05` | systematic cross-track error |
+| `vertBiasProp` | `0.06` | systematic along-track scale error `config.cpp` ships `0.0459`. |
+| `slipBiasProp` | `0.05` | systematic cross-track error `config.cpp` ships `0.0159`. |
 | `biasDecorrIn` | `40.0` | inches over which that bias renews |
 | `thetaNoiseProp` | `0.020` | sigma per radian turned |
 | `thetaNoisePerInch` | `0.0015` | heading sigma per inch driven |
 | `posNoiseFloor` | `0.015` | inches per update |
 | `thetaNoiseFloor` | `0.0004` | radians per update |
 | `useRangeUpdates` | `true` | |
-| `rangeSigmaBase` | `0.60` | inches, fixed part `config.cpp` ships `0.068`. |
+| `rangeSigmaBase` | `0.60` | inches, fixed part `config.cpp` ships `0.0872`. |
 | `rangeSigmaProp` | `0.030` | fraction of the reading |
 | `rangeGateChi2` | `9.0` | 1 dof, 3 sigma |
 | `maxIncidenceRad` | `1.15` | past 66 deg off normal a ToF return is junk |
-| `maxRangeIn` | `100.0` | |
+| `maxRangeIn` | `100.0` | inches; past this a beam is reporting its own ceiling, not a wall `config.cpp` ships `78`. |
 | `obstacleConeFrac` | `0.22` | tan(12.5 deg), the V5 half-cone |
 | `obstacleRangeTol` | `6.0` | inches |
 | `obstacleSigmaPad` | `2.0` | extra tolerance, in position sigmas |
