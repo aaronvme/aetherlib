@@ -234,6 +234,60 @@ tuning::Characterizer makeCharacterizer(Report& out) {
     return tuning::Characterizer(chassis, drivetrain, cfg);
 }
 
+// The fused estimate, not the odom pose: autoSync walks odom only syncProp of
+// the way to the filter each cycle, and thetaSyncProp is 0.001, so odom's
+// heading is effectively raw IMU.
+static Pose priorPose(float* posSigma) {
+    if (posSigma != nullptr) *posSigma = 0.0f;
+    if (!chassis.ekf().isTracking()) return chassis.odom().getPose();
+    if (posSigma != nullptr) {
+        const auto u = chassis.ekf().uncertainty();
+        *posSigma = std::sqrt(u.sigmaX * u.sigmaX + u.sigmaY * u.sigmaY);
+    }
+    return chassis.ekf().getEstimate();
+}
+
+bool resetFromBeams() {
+    // The prior is the true field frame; chassis.getPose() is whatever frame
+    // the running routine was written in.
+    const float th = priorPose(nullptr).theta;
+    BeamRead beams[MAX_DISTANCE_SENSORS];
+    readBeams(beams, th);
+    BeamPair pairs[2];
+    const int n = findBeamPairs(beams, pairs);
+
+    float tx = 0.0f, ty = 0.0f, bracket = 0.0f;
+    int inliers = 0;
+    if (!solveTruth(beams, pairs, n, 3.0f, tx, ty, bracket, &inliers)) return false;
+    if (!fixVerified(inliers)) return false;
+    chassis.setPoseFieldFrame({tx, ty, th});
+    return true;
+}
+
+bool resetFromBeamsNear(float maxJumpIn) {
+    float sigma = 0.0f;
+    const Pose prior = priorPose(&sigma);
+
+    BeamRead beams[MAX_DISTANCE_SENSORS];
+    readBeams(beams, prior.theta);
+    BeamPair pairs[2];
+    const int n = findBeamPairs(beams, pairs);
+
+    float tx = 0.0f, ty = 0.0f, bracket = 0.0f;
+    int inliers = 0;
+    if (!solveTruth(beams, pairs, n, 3.0f, tx, ty, bracket, &inliers)) return false;
+    if (!fixVerified(inliers)) {
+        // Widen by what the filter admits it does not know, so the gate only
+        // stays tight while the filter is actually confident.
+        const float limit = maxJumpIn + 2.0f * sigma;
+        const float dx = tx - prior.x;
+        const float dy = ty - prior.y;
+        if (dx * dx + dy * dy > limit * limit) return false;
+    }
+    chassis.setPoseFieldFrame({tx, ty, prior.theta});
+    return true;
+}
+
 int readBeams(BeamRead* out, float robotThetaRad) {
     if (out == nullptr) return 0;
     const auto cfg = chassis.mcl().config();
