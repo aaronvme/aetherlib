@@ -38,9 +38,9 @@ public:
 
 private:
     struct Entry {
-        uint32_t t;
-        uint8_t n;
-        std::array<float, kMaxColumns> v;
+        uint32_t t{0};
+        uint8_t n{0};
+        std::array<float, kMaxColumns> v{};
     };
 
     void flushLoop();
@@ -60,6 +60,6 @@ private:
     pros::Task* mTask{nullptr};
     std::atomic<bool> mRunning{false};
     std::atomic<uint32_t> mDropped{0};
-    uint32_t mStartMs{0};
+    std::atomic<uint32_t> mStartMs{0};
 };
 }

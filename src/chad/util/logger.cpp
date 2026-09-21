@@ -30,6 +30,9 @@ bool Logger::start() {
     if (mRunning) return true;
     if (!sdInserted()) return false;
 
+    // Left over from a previous run, this gets reopened with "w" and
+    // truncates the very file the free-slot search exists to protect.
+    mPath.clear();
     for (int i = 0; i < 100; ++i) {
         char candidate[64];
         std::snprintf(candidate, sizeof(candidate), "/usd/%s%02d.csv", mName.c_str(), i);
@@ -62,8 +65,9 @@ bool Logger::start() {
 }
 
 void Logger::stop() {
-    if (!mRunning) return;
-    mRunning = false;
+    // One step: the destructor racing an explicit stop() would otherwise
+    // both pass, and the loser deletes a task the winner already freed.
+    if (!mRunning.exchange(false)) return;
 
     if (mTask != nullptr) {
         mTask->join();
@@ -72,7 +76,7 @@ void Logger::stop() {
     }
 
     std::vector<Entry> batch;
-    while (drain(batch) > 0) {
+    while (mFile != nullptr && drain(batch) > 0) {
         for (const Entry& e : batch) {
             std::fprintf(mFile, "%lu", static_cast<unsigned long>(e.t));
             for (uint8_t i = 0; i < e.n; ++i) std::fprintf(mFile, ",%.4f", e.v[i]);
