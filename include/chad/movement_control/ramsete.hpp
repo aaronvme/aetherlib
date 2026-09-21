@@ -16,8 +16,8 @@ struct RAMSETEParams {
     // commanded velocity goes negative.
     bool forwards{true};
 
-    float b{48.0f};
-    float zeta{0.85f};
+    float b{24.0f}; // 48.0
+    float zeta{2.10f}; //0.85
 
     float smoothSpacingIn{2.0f};
     float maxSpeed{127.0f};

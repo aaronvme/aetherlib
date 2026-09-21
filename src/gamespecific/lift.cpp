@@ -16,7 +16,7 @@ static const double kD = 0.02;//old 0.02
 
 static const LiftKind LIFT_KIND            = LiftKind::Cascade;
 
-static const double kG                     = 15.5;
+static const double kG                     = 0.0; // 15.5
 static const double LIFT_KG_PER_MOTOR_DEG  = 0.0;
 
 static const double MOTOR_DEG_PER_ARM_DEG  = 28.0;

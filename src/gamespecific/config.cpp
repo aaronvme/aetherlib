@@ -129,7 +129,7 @@ ChassisConfig chassisConfig = {
     .distanceSensors = distSensors,
     .sensorMounts = sensorMounts,
     .settleTimeMs = 110,
-    .useMclTracking = true,
+    .useMclTracking = false,
     .useRclTracking = false,
     .useEkfTracking = true,
 
@@ -137,7 +137,7 @@ ChassisConfig chassisConfig = {
         .particleCount = 1024,
         .resampleThreshold = 512,
         .maxSensorRange = 78.0f,
-        .distResampleVariance = 1.0f,
+        .distResampleVariance = 0.7f,
         .thetaResampleVariance = 0.01f,
         .maxThetaDeviation = 0.08f,
         .trackingWheelVariance = 0.08f,
