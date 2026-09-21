@@ -64,7 +64,7 @@ void autonProbeMcl() {
     // `pros terminal` streams, so the run can be read back off the wire
     // instead of off the brain.
     std::printf("mclhdr,ms,px,py,ph,mx,my,sx,sy,neff,inj,gate,reloc,"
-                "rate,held,r0,r1,r2,r3,obsx,obsy\n");
+                "rate,held,r0,r1,r2,r3,obsx,obsy,mclms,ekfms,loopms\n");
     const uint32_t tStart = pros::millis();
     float worst = 0.0f;
     float tx = px, ty = py, err = 0.0f;
@@ -73,7 +73,25 @@ void autonProbeMcl() {
     uint32_t nextDraw = 0;
     int ctlPage = 0;
 
+    // Is the brain keeping up? Three numbers answer it: how long each filter
+    // cycle takes against its own period, and how long this loop's 20 ms
+    // actually takes. A loop that asks for 20 ms and gets 40 is a starved
+    // control loop, and no amount of gain tuning fixes that.
+    uint32_t prevLoop = pros::millis();
+    uint32_t worstLoopMs = 0;
+    uint32_t worstMclMs = 0;
+    uint32_t worstEkfMs = 0;
+
     while (!master.get_digital(pros::E_CONTROLLER_DIGITAL_B)) {
+        const uint32_t nowLoop = pros::millis();
+        const uint32_t loopMs = nowLoop - prevLoop;
+        prevLoop = nowLoop;
+        if (loopMs > worstLoopMs) worstLoopMs = loopMs;
+        const uint32_t mclMs = chassis.mcl().lastCycleMs();
+        const uint32_t ekfMs = chassis.ekf().lastCycleMs();
+        if (mclMs > worstMclMs) worstMclMs = mclMs;
+        if (ekfMs > worstEkfMs) worstEkfMs = ekfMs;
+
         if (chassis.isSettled()) {
             chassis.arcade(master.get_analog(pros::E_CONTROLLER_ANALOG_LEFT_Y),
                            master.get_analog(pros::E_CONTROLLER_ANALOG_RIGHT_X));
@@ -134,7 +152,15 @@ void autonProbeMcl() {
                                     "truth: no fix there      ");
                 row++;
             }
-            row++;
+            pros::screen::print(pros::E_TEXT_SMALL, row++,
+                                "cpu mcl%2lu/%2.0f ekf%2lu/%2.0f loop%2lu ",
+                                static_cast<unsigned long>(worstMclMs),
+                                static_cast<double>(
+                                    chassis.mcl().config().updatePeriodMs),
+                                static_cast<unsigned long>(worstEkfMs),
+                                static_cast<double>(
+                                    chassis.ekf().config().updatePeriodMs),
+                                static_cast<unsigned long>(worstLoopMs));
             pros::screen::print(pros::E_TEXT_SMALL, row++,
                                 "A = check vs beams, B = end");
 
@@ -142,14 +168,14 @@ void autonProbeMcl() {
             // its own numbers there. One line per pass: master.print drops
             // anything sent inside 50 ms.
             if (ctlPage == 0) {
-                ctlLine(0, "X%-6.1f Y%-6.1f", static_cast<double>(p.x),
+                ctlLine(0, "X%-5.1f Y%-5.1f", static_cast<double>(p.x),
                         static_cast<double>(p.y));
             } else if (ctlPage == 1) {
-                ctlLine(1, "H%-4.0f nEff%-5.0f",
+                ctlLine(1, "H%-4.0f nE%-5.0f",
                         static_cast<double>(stdRadToVexDeg(p.theta)),
                         static_cast<double>(est.nEff));
             } else if (haveTruth) {
-                ctlLine(2, "err%-5.1f wst%-5.1f", static_cast<double>(err),
+                ctlLine(2, "e%-5.1f w%-5.1f", static_cast<double>(err),
                         static_cast<double>(worst));
             } else {
                 ctlLine(2, "A=check  B=end");
@@ -179,9 +205,12 @@ void autonProbeMcl() {
                 if (ok[i]) std::printf(",%.2f", static_cast<double>(rd[i]));
                 else std::printf(",");
             }
-            std::printf(",%.2f,%.2f\n",
+            std::printf(",%.2f,%.2f,%lu,%lu,%lu\n",
                         static_cast<double>(chassis.mcl().axisObservabilityX()),
-                        static_cast<double>(chassis.mcl().axisObservabilityY()));
+                        static_cast<double>(chassis.mcl().axisObservabilityY()),
+                        static_cast<unsigned long>(mclMs),
+                        static_cast<unsigned long>(ekfMs),
+                        static_cast<unsigned long>(loopMs));
             std::fflush(stdout);
         }
         pros::delay(20);
@@ -194,5 +223,12 @@ void autonProbeMcl() {
     out.result("gate streak %d  reloc %d",
                chassis.ekf().mclRejectStreak(),
                chassis.ekf().relocateCount());
+    out.result("worst cycle mcl %lu/%.0f  ekf %lu/%.0f ms",
+               static_cast<unsigned long>(worstMclMs),
+               static_cast<double>(chassis.mcl().config().updatePeriodMs),
+               static_cast<unsigned long>(worstEkfMs),
+               static_cast<double>(chassis.ekf().config().updatePeriodMs));
+    out.result("worst loop %lu ms, asked for 20",
+               static_cast<unsigned long>(worstLoopMs));
 }
 }
