@@ -44,14 +44,19 @@ PID::PID(float kP,
         float i = mGains.kI * mIntegral;
 
         float d = 0.0f;
-        if (dt > 1e-6f) {
+        if (dt > 1e-6f && mHavePreviousError) {
             float derivative = (error - mPreviousError) / dt;
 
             mFilteredDerivative = mDerivativeFilter * derivative + (1.0f - mDerivativeFilter) * mFilteredDerivative;
             d = mGains.kD * mFilteredDerivative;
         }
 
-        mPreviousError = error;
+        // mPreviousTime only advances on a real tick, so the baseline has
+        // to as well or the next derivative divides by the wrong interval.
+        if (dt > 1e-6f) {
+            mPreviousError = error;
+            mHavePreviousError = true;
+        }
 
         return p + i + d;
     }
@@ -64,6 +69,10 @@ PID::PID(float kP,
         }
 
         mPreviousError = 0.0f;
+        // The first error after a reset is the whole distance to the target.
+        // Differentiated against a zero nothing measured, it spikes kD into
+        // the clamp on tick one of every motion.
+        mHavePreviousError = false;
         mFilteredDerivative = 0.0f;
         mPreviousTime = pros::millis();
     }

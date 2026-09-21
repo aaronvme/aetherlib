@@ -37,6 +37,7 @@ private:
     float mFixedDt = 0.0f;
     float mIntegral = 0.0f;
     float mPreviousError = 0.0f;
+    bool mHavePreviousError = false;
     float mFilteredDerivative = 0.0f;
     float mDerivativeFilter = 0.1f;
     uint32_t mPreviousTime = 0;
