@@ -4,6 +4,8 @@
 #include <cmath>
 #include <mutex>
 
+#include "chad/drivetrain.hpp"
+
 namespace chad {
 namespace {
 constexpr float kWall = Field::FIELD_HALF_WALL;
@@ -90,9 +92,17 @@ void EkfTracking::run() {
     while (mRunning) {
         const uint32_t startTime = pros::millis();
         update();
-        const int32_t elapsed = pros::millis() - startTime;
-        const int32_t remaining = static_cast<int32_t>(mConfig.updatePeriodMs) - elapsed;
-        pros::delay(remaining > 2 ? remaining : 2);
+        const int32_t elapsed = static_cast<int32_t>(pros::millis() - startTime);
+        mLastCycleMs.store(static_cast<std::uint32_t>(elapsed < 0 ? 0 : elapsed));
+
+        const int32_t period = static_cast<int32_t>(mConfig.updatePeriodMs);
+        int32_t remaining = period - elapsed;
+        if (remaining < 2) {
+            // See MclTracking::run(): an overrunning filter that only ever
+            // yields 2 ms holds the CPU against the motion loop.
+            remaining = (elapsed > period) ? std::min<int32_t>(elapsed, 100) : 2;
+        }
+        pros::delay(static_cast<uint32_t>(remaining));
     }
 }
 
@@ -149,8 +159,13 @@ void EkfTracking::predict(const OdomDelta& delta) {
     const float dx = delta.dVert * c - delta.dHoriz * s;
     const float dy = delta.dVert * s + delta.dHoriz * c;
 
-    mState[0] += dx;
-    mState[1] += dy;
+    // Same bound the particle filter uses: odometry that runs the state
+    // through a wall leaves every range update outside its own gate, and
+    // the filter wedges there with no way back.
+    const auto* dtr = mOdom.sensors().drivetrain;
+    const float reach = kWall - ((dtr != nullptr) ? dtr->trackWidth * 0.5f : 0.0f);
+    mState[0] = clamp(mState[0] + dx, -reach, reach);
+    mState[1] = clamp(mState[1] + dy, -reach, reach);
     mState[2] = wrapRad(theta + delta.dTheta);
 
     const float F[9] = {

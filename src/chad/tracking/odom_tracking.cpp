@@ -282,8 +282,9 @@ void OdomTracking::syncPose(const Pose& pose) {
     mPose.x = pose.x;
     mPose.y = pose.y;
 
-    mPrevVertDist  = currentVertDistance();
-    mPrevHorizDist = currentHorizDistance();
+    // No encoder rebase here, unlike setPose: this corrects the integrated
+    // pose, it does not redefine where the wheels were last read. Rebasing
+    // drops whatever was travelled since the last update() tick.
 }
 
 Pose OdomTracking::getPose() const {

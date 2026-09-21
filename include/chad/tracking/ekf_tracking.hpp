@@ -113,6 +113,10 @@ public:
 
     int relocateCount() const { return mRelocateCount; }
 
+    /// How long the last filter cycle took, against updatePeriodMs. At or
+    /// over the period means the brain is not keeping up.
+    std::uint32_t lastCycleMs() const { return mLastCycleMs.load(); }
+
     const Config& config() const { return mConfig; }
     void setConfig(const Config& config) { mConfig = config; }
 
@@ -159,6 +163,8 @@ private:
     bool mSnapNextSync{false};
 
     mutable pros::Mutex mMutex;
+
+    std::atomic<std::uint32_t> mLastCycleMs{0};
 
     pros::Task* mTask{nullptr};
     std::atomic<bool> mRunning{false};

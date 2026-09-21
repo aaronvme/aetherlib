@@ -154,6 +154,7 @@ ChassisConfig chassisConfig = {
         .rangeSigmaProp = 0.020f,
         .maxRandomFrac = 0.25f,
         .injectResampleFloor = 0.20f,
+        .injectRadiusIn = 25.0f,
         .minAxisObservability = 0.5f,
         .maxTurnRateRadS = 2.0f,
         .autoSync = true

@@ -58,6 +58,13 @@ public:
         float maxRandomFrac = 0.0f;
         float injectResampleFloor = 0.03f;
 
+        // How far from the current estimate an injected candidate may be
+        // placed. Searching the whole field makes every wall and post that
+        // looks like the one in front a live candidate, so a wheel that
+        // slips for half a second can relocate the robot onto a mirror of
+        // itself. Zero keeps the field-wide search.
+        float injectRadiusIn = 0.0f;
+
         // How much beam has to be pointing along an axis before particles may
         // be scattered along it. A beam only pins down the axis it points
         // along; with nothing on one, a particle injected anywhere along that
@@ -113,6 +120,10 @@ public:
 
     void resample();
 
+    /// Last published estimate. Both read the snapshot update() leaves
+    /// behind rather than the live cloud: the cloud belongs to the tracking
+    /// task and walking it from another one is both a race and, at the
+    /// rates the EKF asks, a real slice of the CPU.
     std::pair<Pose, float> getEstimate() const;
 
     Estimate estimate() const;
@@ -160,6 +171,10 @@ public:
     float axisObservabilityY() const { return mObsY; }
 
     float latestTurnRateRadS() const { return mLatestTurnRate; }
+
+    /// How long the last filter cycle took, against updatePeriodMs. If this
+    /// is at or over the period the brain is not keeping up.
+    std::uint32_t lastCycleMs() const { return mLastCycleMs.load(); }
 
     // True while the turn-rate gate is holding the beams out of the filter.
     bool sensorsHeld() const { return mSensorsHeld; }
@@ -215,6 +230,11 @@ private:
                           float maxRange, float dx, float dy) const;
 
     float castRay(const Particle& particle, int sensorIndex) const;
+
+    float reachLimit() const;
+
+    Estimate computeEstimate() const;
+    void publishEstimate(const Estimate& est);
 
     void buildGaussianLUT();
 
@@ -277,6 +297,11 @@ private:
     float mInjectFrac{0.0f};
     float mObsX{0.0f};
     float mObsY{0.0f};
+
+    mutable pros::Mutex mEstimateMutex;
+    Estimate mPublished{};
+
+    std::atomic<std::uint32_t> mLastCycleMs{0};
 
     pros::Task* mTask{nullptr};
     std::atomic<bool> mRunning{false};

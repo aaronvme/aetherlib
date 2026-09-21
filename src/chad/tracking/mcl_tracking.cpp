@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <mutex>
 
+#include "chad/drivetrain.hpp"
 #include "chad/util/fasttrig.hpp"
 #include "pros/llemu.hpp"
 
@@ -173,17 +175,22 @@ bool MclTracking::isTracking() const {
 
 void MclTracking::run() {
     while (mRunning) {
-        uint32_t startTime = pros::millis();
+        const uint32_t startTime = pros::millis();
 
         update();
 
-        int32_t elapsed = pros::millis() - startTime;
-        int32_t remaining = static_cast<int32_t>(mConfig.updatePeriodMs) - elapsed;
-        if (remaining > 2) {
-            pros::delay(remaining);
-        } else {
-            pros::delay(2);
+        const int32_t elapsed = static_cast<int32_t>(pros::millis() - startTime);
+        mLastCycleMs.store(static_cast<std::uint32_t>(elapsed < 0 ? 0 : elapsed));
+
+        const int32_t period = static_cast<int32_t>(mConfig.updatePeriodMs);
+        int32_t remaining = period - elapsed;
+        if (remaining < 2) {
+            // Over budget. A flat 2 ms here holds the filter at a ~95% duty
+            // cycle and starves the control loop it exists to serve. Give
+            // back as long as the cycle took: half rate, not the whole brain.
+            remaining = (elapsed > period) ? std::min<int32_t>(elapsed, 100) : 2;
         }
+        pros::delay(static_cast<uint32_t>(remaining));
     }
 }
 
@@ -207,6 +214,8 @@ void MclTracking::setPose(const Pose& pose) {
     mLatestSpeed = 0.0f;
     mHaveLogAvg = false;
     mInjectFrac = 0.0f;
+
+    publishEstimate(computeEstimate());
 }
 
 void MclTracking::uniformReset() {
@@ -227,6 +236,15 @@ void MclTracking::uniformReset() {
     mLatestSpeed = 0.0f;
     mHaveLogAvg = false;
     mInjectFrac = 0.0f;
+
+    publishEstimate(computeEstimate());
+}
+
+// The robot is at least as wide as its track, so its centre can never come
+// within half a track width of a wall.
+float MclTracking::reachLimit() const {
+    const auto* dt = mOdom.sensors().drivetrain;
+    return kW - ((dt != nullptr) ? dt->trackWidth * 0.5f : 0.0f);
 }
 
 void MclTracking::predict() {
@@ -259,6 +277,7 @@ void MclTracking::predict() {
 
     float vertVariance = hasVertWheel ? mConfig.trackingWheelVariance : mConfig.imeVariance;
 
+    const float reach = reachLimit();
     auto& particles = *mParticles;
     for (int i = 0; i < mConfig.particleCount; i++) {
         auto& p = particles[i];
@@ -287,6 +306,12 @@ void MclTracking::predict() {
 
         p.pose.x += localVert * pCos - localHoriz * pSin;
         p.pose.y += localVert * pSin + localHoriz * pCos;
+
+        // Wheels that turn while a wall holds the robot still integrate
+        // travel that never happened. Letting it push the cloud somewhere
+        // the robot does not fit is what turns a scrape into a lost filter.
+        p.pose.x = clamp(p.pose.x, -reach, reach);
+        p.pose.y = clamp(p.pose.y, -reach, reach);
 
         {
             float rawTheta = p.pose.theta + halfDThetaRad;
@@ -569,11 +594,16 @@ void MclTracking::resample() {
 
     if (injected > 0) {
         const float heading = mOdom.imuHeadingRad();
-        std::uniform_real_distribution<float> spread(-Field::FIELD_HALF_WALL,
-                                                      Field::FIELD_HALF_WALL);
+        const float reach = reachLimit();
+        const bool local = mConfig.injectRadiusIn > 0.0f;
+        const float half = local ? mConfig.injectRadiusIn : Field::FIELD_HALF_WALL;
+        const float cx = local ? mRawEstimate.x : 0.0f;
+        const float cy = local ? mRawEstimate.y : 0.0f;
+        std::uniform_real_distribution<float> spread(-half, half);
         for (int m = drawn; m < mConfig.particleCount; m++) {
             newParticles[m].pose = {
-                spread(mGen), spread(mGen),
+                clamp(cx + spread(mGen), -reach, reach),
+                clamp(cy + spread(mGen), -reach, reach),
                 wrapRad(heading + nextNoise() * mConfig.thetaResampleVariance)};
             newParticles[m].weight = 1.0f;
             newParticles[m].logWeight = 0.0f;
@@ -584,6 +614,24 @@ void MclTracking::resample() {
 }
 
 std::pair<Pose, float> MclTracking::getEstimate() const {
+    std::lock_guard<pros::Mutex> lock(mEstimateMutex);
+    return {mPublished.pose, mPublished.nEff};
+}
+
+MclTracking::Estimate MclTracking::estimate() const {
+    std::lock_guard<pros::Mutex> lock(mEstimateMutex);
+    return mPublished;
+}
+
+void MclTracking::publishEstimate(const Estimate& est) {
+    std::lock_guard<pros::Mutex> lock(mEstimateMutex);
+    mPublished = est;
+}
+
+MclTracking::Estimate MclTracking::computeEstimate() const {
+    Estimate out;
+    out.pose = mRawEstimate;
+
     float xSum = 0.0f, ySum = 0.0f;
     float sinSum = 0.0f, cosSum = 0.0f;
     float totalWeight = 0.0f;
@@ -600,31 +648,18 @@ std::pair<Pose, float> MclTracking::getEstimate() const {
         weightSqrSum += p.weight * p.weight;
     }
 
-    if (totalWeight < 1e-20f) {
-        return {mRawEstimate, 0.0f};
-    }
+    if (totalWeight < 1e-20f) return out;
 
-    Pose estimate = {
+    out.pose = {
         xSum / totalWeight,
         ySum / totalWeight,
         std::atan2(sinSum, cosSum)
     };
-
-    float nEff = totalWeight * totalWeight / weightSqrSum;
-
-    return {estimate, nEff};
-}
-
-MclTracking::Estimate MclTracking::estimate() const {
-    Estimate out;
-    const auto pair = getEstimate();
-    out.pose = pair.first;
-    out.nEff = pair.second;
+    out.nEff = totalWeight * totalWeight / weightSqrSum;
     if (!(out.nEff > 0.0f)) return out;
 
-    float totalWeight = 0.0f;
+    totalWeight = 0.0f;
     float sxx = 0.0f, sxy = 0.0f, syy = 0.0f, stt = 0.0f;
-    const auto& particles = *mParticles;
     for (int i = 0; i < mConfig.particleCount; i++) {
         const auto& p = particles[i];
         const float dx = p.pose.x - out.pose.x;
@@ -668,17 +703,17 @@ Pose MclTracking::update() {
         updateWeights();
     }
 
-    auto estimate = getEstimate();
+    const Estimate estimate = computeEstimate();
 
-    float distSinceResample = distanceToPoint(mLastResamplePose, estimate.first.x, estimate.first.y);
+    float distSinceResample = distanceToPoint(mLastResamplePose, estimate.pose.x, estimate.pose.y);
 
     bool shouldResample = false;
     if (mSensorsHeld) {
         // Resampling on weights nothing refreshed only throws away spread.
         shouldResample = false;
-    } else if (estimate.second < mConfig.resampleThreshold * 0.5f) {
+    } else if (estimate.nEff < mConfig.resampleThreshold * 0.5f) {
         shouldResample = true;
-    } else if (estimate.second < mConfig.resampleThreshold &&
+    } else if (estimate.nEff < mConfig.resampleThreshold &&
                distSinceResample > 5.0f &&
                mLatestSpeed < 100.0f) {
         shouldResample = true;
@@ -688,10 +723,14 @@ Pose MclTracking::update() {
 
     if (shouldResample) {
         resample();
-        mLastResamplePose = estimate.first;
+        mLastResamplePose = estimate.pose;
     }
 
-    mRawEstimate = estimate.first;
+    mRawEstimate = estimate.pose;
+
+    // Pre-resample on purpose: this is what the filter acted on, and its
+    // nEff and covariance describe the posterior rather than the roughening.
+    publishEstimate(estimate);
 
     if (mConfig.autoSync) {
         syncToOdometry();
@@ -702,7 +741,7 @@ Pose MclTracking::update() {
         regenerateNoise();
     }
 
-    return estimate.first;
+    return estimate.pose;
 }
 
 void MclTracking::syncToOdometry() {
