@@ -47,6 +47,10 @@ node sim/test/smoke.mjs || fail=1
 # asked for. This is the gate the sim tuning in sim/bridge/bridge.cpp exists to
 # pass: without it, a plausible change to a gain or a tolerance quietly moves
 # where a route lands and nothing else notices.
+# Odometry lying is the failure mode that loses a match: the filter relocates
+# onto a mirror of itself and every motion after it aims at the wrong place.
+echo "--- localization under disturbance ---"
+node sim/test/disturbance.mjs || fail=1
 echo "--- routing accuracy ---"
 node sim/test/accuracy.mjs --gate || fail=1
 

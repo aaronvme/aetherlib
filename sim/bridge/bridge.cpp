@@ -1049,6 +1049,8 @@ void sim_set_param(const char* name, float value) {
         else if (k == "mclShortDecay")    c.shortDecaySigmas = value;
         else if (k == "mclRandWeight")    c.randWeight = value;
         else if (k == "mclMaxRandomFrac") c.maxRandomFrac = value;
+        else if (k == "mclInjectFloor")   c.injectResampleFloor = value;
+        else if (k == "mclInjectRadius")  c.injectRadiusIn = value;
         else if (k == "mclDeadzoneLikelihood") c.deadzoneLikelihood = value;
         else if (k == "mclResampleVar")   c.distResampleVariance = value;
         else if (k == "mclThetaResampleVar") c.thetaResampleVariance = value;

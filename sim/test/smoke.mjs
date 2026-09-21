@@ -196,12 +196,20 @@ const narrow = st().beams[0];
 api.setParam('distFovDeg', 40);
 run(120);
 const wide = st().beams[0];
+// The post is at the origin with a 2 in radius, so the nearest a cone hit on
+// it can land is hypot(origin) - 2. Bound against that, computed from the
+// sensor's own reported origin: the hardcoded 25 in this used to carry was
+// measured with the front mount at x +1.0, and went stale the moment
+// config.cpp shipped -1.0 and pushed every range 2 in out.
+const postSurfaceIn = Math.hypot(wide.ox, wide.oy) - 2;
 check('cone sees a post the centre ray misses',
       Math.abs(narrow.oy - kPostOffsetIn) < 0.05 &&
-      !narrow.hit && wide.hit && wide.obs && wide.r < 25,
+      !narrow.hit && wide.hit && wide.obs &&
+      wide.r > postSurfaceIn - 0.1 && wide.r < postSurfaceIn + 1.0,
       `sensor y ${narrow.oy.toFixed(2)}  ` +
       `narrow ${narrow.hit ? narrow.r.toFixed(1) + ' in' : 'no return'}` +
       ` -> wide ${wide.hit ? wide.r.toFixed(1) + ' in' : 'no return'}` +
+      ` (post surface at ${postSurfaceIn.toFixed(1)} in)` +
       `${wide.hit && !wide.obs ? ' (a wall, not the post)' : ''}`);
 api.setParam('distFovDeg', 25);
 
