@@ -110,6 +110,10 @@ void driverControl() {
             chassis.cancelMotion();
             liftCancel();
         }
+       
+        if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_B)) {
+            liftToPin(2, kLiftMacroTimeoutMs, kLiftMacroSpeed, true);
+        }
 
         // Hold R1 to grip. Releasing opens on the edge rather than every
         // pass, so auto-grab can close the claw without the next loop undoing
