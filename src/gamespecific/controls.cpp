@@ -1,6 +1,7 @@
 #include "gamespecific/controls.hpp"
 #include "gamespecific/config.hpp"
 #include "gamespecific/lift.hpp"
+#include "gamespecific/claw.hpp"
 
 #include <atomic>
 #include <cmath>
@@ -62,6 +63,16 @@ void startPoseTelemetry() {
                              lineBuf("lift %.0f %s", arm, tag));
             }
             pros::delay(250);
+
+            const double grabIn = clawDistance();
+            const char* mode = clawAutoGrab() ? "ON " : "off";
+            if (std::isfinite(grabIn)) {
+                master.print(2, 0, "%-15.15s",
+                             lineBuf("grab %s d%.1f", mode, grabIn));
+            } else {
+                master.print(2, 0, "%-15.15s", lineBuf("grab %s d--", mode));
+            }
+            pros::delay(250);
         }
     }, "PoseTelemetry");
 }
@@ -70,6 +81,8 @@ void driverControl() {
     // Tracking is left however the caller set it. Stopping it here meant a
     // startTracking() in opcontrol was undone on the next line.
     liftMotor.set_brake_mode(pros::E_MOTOR_BRAKE_HOLD);
+
+    bool gripHeld = false;
 
     while (true) {
         if (chassis.isSettled()) {
@@ -98,10 +111,17 @@ void driverControl() {
             liftCancel();
         }
 
-        if (master.get_digital(pros::E_CONTROLLER_DIGITAL_R1)) {
-            claw.extend();
-        } else {
-            claw.retract();
+        // Hold R1 to grip. Releasing opens on the edge rather than every
+        // pass, so auto-grab can close the claw without the next loop undoing
+        // it -- and a tap still drops whatever it grabbed on its own.
+        const bool gripNow = master.get_digital(pros::E_CONTROLLER_DIGITAL_R1);
+        if (gripNow) clawClose();
+        else if (gripHeld) clawOpen();
+        gripHeld = gripNow;
+
+        if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_R2)) {
+            clawSetAutoGrab(!clawAutoGrab());
+            master.rumble(clawAutoGrab() ? ".." : ".");
         }
 
         pros::delay(20);

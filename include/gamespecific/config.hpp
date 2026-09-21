@@ -35,6 +35,7 @@ extern pros::Distance front_dist;
 extern pros::Distance left_dist;
 extern pros::Distance back_dist;
 extern pros::Distance right_dist;
+extern pros::Distance claw_dist;
 extern std::array<pros::Distance*, MAX_DISTANCE_SENSORS> distSensors;
 extern std::array<Pose, MAX_DISTANCE_SENSORS> sensorMounts;
 
