@@ -11,6 +11,10 @@ void liftCancel();
 
 bool liftBusy();
 
+// Block until an async lift motion finishes. Returns false if it ran out
+// of time first, in which case the lift is still moving.
+bool liftWaitUntilSettled(double timeoutMs = 3000.0);
+
 double liftPosition();
 
 // inches above the floor, NaN until the geometry in lift.cpp is measured

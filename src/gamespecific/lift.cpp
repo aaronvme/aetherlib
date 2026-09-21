@@ -93,6 +93,16 @@ bool liftBusy() {
     return gLiftBusy.load();
 }
 
+bool liftWaitUntilSettled(double timeoutMs) {
+    const uint32_t start = pros::millis();
+    const uint32_t limit = static_cast<uint32_t>(timeoutMs);
+    while (gLiftBusy.load()) {
+        if (pros::millis() - start >= limit) return false;
+        pros::delay(10);
+    }
+    return true;
+}
+
 void liftCancel() {
     ++gLiftGen;
     gLiftBusy = false;
