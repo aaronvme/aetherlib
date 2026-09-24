@@ -11,7 +11,7 @@ void autonSkills() {
     std::vector<Pose> go = {
         {-34.2f, -37.6f},
         {-44.8f, -51.6f},
-        {-58.0f, -54.4f}
+        {-58.5f, -54.4f}
     };
     std::vector<Pose> go2 = {
         {-34.2f, -37.6f},
@@ -46,7 +46,7 @@ void autonSkills() {
     
 // //preload=========================================
     chassis.moveToPoint(-52.0, -16.5, 1100, {.forwards=false, .maxSpeed=55.0f}, true);
-    liftToPinAbove(0, 50,1000);
+    liftToPinAbove(0, 100,1000);
     chassis.waitUntilSettled();
     chassis.tank(-20, -20);
     pros::delay(500);
@@ -113,9 +113,9 @@ void autonSkills() {
     autons::resetFromBeamsNear();
     pros::c::controller_rumble(pros::E_CONTROLLER_MASTER, ".");
 
-// //matchloads (repeat2)====================================
+//matchloads (repeat2)====================================
     clawSetAutoGrab(true);
-    chassis.moveToPoint(-32.5f, -35.7f, 800, {.minSpeed=60}, true);
+    chassis.moveToPoint(-40.5f, -40.7f, 800, {.minSpeed=60}, true);
     liftToPin(0, 1000);
     chassis.moveRAMSETE(go, 2400,
                         {.forwards=false, .maxSpeed = 65.0f, .minSpeed = 50.0f},
@@ -153,7 +153,7 @@ void autonSkills() {
     autons::resetFromBeamsNear();
     chassis.moveRAMSETE(come, 1000, {.minSpeed=50.0f}, true);
     pros::delay(500);
-    liftToPinAbove(4, 145, 1750);
+    liftToPinAbove(4, 155, 1750);
     pros::delay(500);
     chassis.moveToPoint(-52.0f, -16.9f, 1000, {.forwards=false, .maxSpeed = 60.0f},false);
     // // pros::delay(750);
@@ -179,7 +179,14 @@ void autonSkills() {
                     {.forwards=false, .minSpeed = 50.0f},
                     false);
 
-//     chassis.moveToPoint(-17.8f, -46.1f, 2500, {.forwards=false, .maxSpeed = 70.0f}, true);
+
+
+
+
+
+
+
+                    //     chassis.moveToPoint(-17.8f, -46.1f, 2500, {.forwards=false, .maxSpeed = 70.0f}, true);
 //     liftToPinAbove(0, 50, 1000);
 //     chassis.waitUntilSettled();
 //     claw.toggle();

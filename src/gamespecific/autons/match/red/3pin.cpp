@@ -30,7 +30,7 @@ void autonRed3Pin() {
     
 // //preload=========================================
     chassis.moveToPoint(-52.0, -16.5, 1100, {.forwards=false, .maxSpeed=55.0f}, true);
-    liftToPinAbove(0, 50,1000);
+    liftToPinAbove(0, 100,1000);
     chassis.waitUntilSettled();
     chassis.tank(-20, -20);
     pros::delay(500);

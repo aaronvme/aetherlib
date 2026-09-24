@@ -35,7 +35,7 @@ void autonomous() {
     
     clawSetAutoGrab(false);
     chassis.setMirror(FieldMirror::None);
-    // autonSkills();
+    autonSkills(); //turn into comment to disable skills auton
     selector.runSelected();
 }
 
