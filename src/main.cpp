@@ -18,16 +18,22 @@ void initialize() {
     claw.set_value(true);
     startTempWarning(master, {&leftMotors, &rightMotors});
 
-    // Touch the brain screen to pick. Index 0 is what runs if nobody does,
-    // so the one being tested sits first and None sits last on purpose.
+    
     selector.registerAuton("Red 3 Pin", autonRed3Pin);
+    selector.registerAuton("None", [] {});
     selector.registerAuton("Blue 3 Pin", autonBlue3Pin);
     selector.registerAuton("Skills", autonSkills);
-    selector.registerAuton("None", [] {});
+    selector.registerAuton("UNc", autonTemp);
     selector.init();
+
+    pros::delay(250);
+
+    liftToPinAbove(0, 50, 500);
 }
 
-void disabled() {}
+void disabled() {
+
+}
 
 void competition_initialize() {}
 
@@ -36,13 +42,15 @@ void autonomous() {
     clawSetAutoGrab(false);
     chassis.setMirror(FieldMirror::None);
     // autonSkills();
+    // autonRed3Pin();
+    // autonTemp();
     selector.runSelected();
 }
 
 void opcontrol() {
     chassis.startTracking();
     // chassis.setPose({-55, 0, vexToStdRad(270)});
-    // clawSetAutoGrab(true);
+    clawSetAutoGrab(false);
     chassis.setBrakeMode(pros::E_MOTOR_BRAKE_BRAKE);
     // autonProbeGeometry();      // opposing-pair sums vs map
     // autonProbeMcl();              // drive with MCL on, check against beams

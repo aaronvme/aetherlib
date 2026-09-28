@@ -6,17 +6,21 @@ pros::Controller master(pros::E_CONTROLLER_MASTER);
 namespace {
 struct FieldCircle { float x, y, r; };
 
+// The nine Override Goals. 2.85 is half the 5.7 in across-flats of the
+// octagon, measured off Figure FO-2 in the manual. Order matters: the sim
+// colours them from the index, red first, then blue, the tall centre Goal,
+// then the four short neutrals.
 constexpr FieldCircle kFieldPosts[] = {
-    {-47.0f, -23.5f, 2.0f},
-    {-23.5f, -47.0f, 2.0f},
-    {23.5f,  47.0f, 2.0f},
-    {47.0f,  23.5f, 2.0f},
+    {-47.0f, -23.5f, 2.85f},
+    {-23.5f, -47.0f, 2.85f},
+    {23.5f,  47.0f, 2.85f},
+    {47.0f,  23.5f, 2.85f},
 
-    {0.0f,   0.0f, 2.0f},
-    {-47.0f,  23.5f, 2.0f},
-    {23.5f, -47.0f, 2.0f},
-    {-23.5f,  47.0f, 2.0f},
-    {47.0f, -23.5f, 2.0f},
+    {0.0f,   0.0f, 2.85f},
+    {-47.0f,  23.5f, 2.85f},
+    {23.5f, -47.0f, 2.85f},
+    {-23.5f,  47.0f, 2.85f},
+    {47.0f, -23.5f, 2.85f},
 };
 
 std::vector<MclTracking::LineObstacle> gMclLineObstacles;
@@ -25,6 +29,10 @@ std::vector<MclTracking::CircleObstacle> gMclCircleObstacles;
 
 void registerFieldObstacles() {
     gMclCircleObstacles.clear();
+    // RCL keeps its own copy, so clear that too. Without this a second call --
+    // which the sim makes on every field reload -- left it carrying two
+    // overlapping sets of posts and paying the cone test twice for each.
+    chassis.rcl().clearObstacles();
     for (const auto& c : kFieldPosts) {
         chassis.rcl().addCircleObstacle(c.x, c.y, c.r);
         gMclCircleObstacles.push_back({c.x, c.y, c.r});
@@ -45,10 +53,17 @@ void clearFieldObstacles() {
     chassis.ekf().setObstacles(&gMclCircleObstacles);
 }
 
+// Call this AFTER setPose. The half it keeps is the half the robot is standing
+// in when it runs, which is what makes it work for either alliance without
+// being told which -- but it can only read that off a pose that has been set.
 void registerAutonDisableLine(float lifetimeMs) {
-    chassis.rcl().addLineObstacle(Field::FIELD_HALF, -Field::FIELD_HALF,
-                                  -Field::FIELD_HALF,  Field::FIELD_HALF,
-                                  lifetimeMs);
+    chassis.rcl().setFarSideGateFromLine(Field::FIELD_HALF, -Field::FIELD_HALF,
+                                         -Field::FIELD_HALF,  Field::FIELD_HALF,
+                                         lifetimeMs);
+}
+
+void clearAutonDisableLine() {
+    chassis.rcl().clearFarSideGate();
 }
 
 namespace {
@@ -130,8 +145,8 @@ ChassisConfig chassisConfig = {
     .sensorMounts = sensorMounts,
     .settleTimeMs = 110,
     .useMclTracking = false,
-    .useRclTracking = false,
-    .useEkfTracking = true,
+    .useRclTracking = true,
+    .useEkfTracking = false,
 
     .mclConfig = {
         .particleCount = 1024,
@@ -158,6 +173,36 @@ ChassisConfig chassisConfig = {
         .minAxisObservability = 0.5f,
         .maxTurnRateRadS = 2.0f,
         .autoSync = true
+    },
+
+    // RCL owns the pose. Every number below that is not a stock default is
+    // there because the sampling is now gated: a V5 distance sensor refreshes
+    // about every 30 ms, so roughly one cycle in three carries a new reading
+    // and the correction authority per second fell by the same factor.
+    .rclConfig = {
+        .maxSyncDist = 5.0f,
+        .syncProp = 0.25f,
+        .maxSyncRate = 12.0f,
+        .updatePeriodMs = 10.0f,
+        .angleTolerance = 10.0f,
+        .maxWallInnovation = 8.0f,
+        .recoverySyncProp = 0.9f,
+        .displaceCycles = 3,
+        .noReturnWallLimit = 35.0f,
+        // The EKF and MCL both ran at 10. Thirty threw away every reading past
+        // about 60 in on this sensor model, which is most of the field.
+        .confidenceThreshold = 20,
+        .obstacleConeFrac = 0.22f,
+        .obstacleRangeTol = 6.0f,
+        .autoSync = true,
+        .useAccumulation = false,
+        .staleHoldMs = 45.0f,
+        .maxTurnRateRadS = 1.5f,
+        .sensorLatencyMs = 30.0f,
+        .axisAgreeIn = 2.0f,
+        .pairSpanTolIn = 1.5f,
+        .recoverCycles = 8,
+        .recoveryMinVotes = 1,
     },
 
     .ekfConfig = {

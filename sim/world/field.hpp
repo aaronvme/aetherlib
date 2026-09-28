@@ -47,6 +47,21 @@ public:
     void addSegment(float x1, float y1, float x2, float y2, int kind = 2);
     void addCircle(float x, float y, float r, int kind = 2);
 
+    /// Geometry that is replaced wholesale every tick -- the fake robots. Kept
+    /// apart from the loaded field so clear(), loadDefault() and the geometry
+    /// editor cannot see or destroy it, and so a robot that moves does not have
+    /// to be found and erased from the middle of the static list. Rays stop on
+    /// it and, when obstacles are enabled, so does the body.
+    void setDynamic(std::vector<Segment> segs);
+    void clearDynamic();
+    const std::vector<Segment>& dynamic() const { return mDynamic; }
+
+    /// The same, for round things that move -- the game pieces. A separate
+    /// list from the segments because two publishers share this layer and a
+    /// single setter would have each one erasing the other's work every tick.
+    void setDynamicCircles(std::vector<Circle> circles);
+    const std::vector<Circle>& dynamicCircles() const { return mDynamicCircles; }
+
     /// Axis-aligned box as four segments -- convenience for goals and loaders.
     void addBox(float cx, float cy, float w, float h, int kind = 1);
 
@@ -55,11 +70,32 @@ public:
     /// exact and what is approximate.
     void loadDefault();
 
+    /// Which layers a ray is allowed to stop on.
+    ///
+    /// The localization beams do NOT see loose pins and cups. A pin is 1.6 in
+    /// across and a cup is half transparent, and neither fills enough of a V5
+    /// distance sensor's cone at range to return anything -- so a sim where
+    /// they do is a sim where the filter is fighting returns the robot never
+    /// gets. What the beams DO see is the walls, the goals, anything the
+    /// geometry editor drew, and the other robots.
+    ///
+    /// The claw's own sensor is the exception: it is inches from what it is
+    /// looking at, and seeing a pin is its entire job.
+    enum CastLayer : unsigned {
+        CAST_STATIC = 1u,   // perimeter, goals, edited geometry
+        CAST_ROBOTS = 2u,   // the other three robots
+        CAST_PIECES = 4u,   // pins and cups
+        CAST_BEAMS  = CAST_STATIC | CAST_ROBOTS,
+        CAST_ALL    = CAST_STATIC | CAST_ROBOTS | CAST_PIECES,
+    };
+
     /// Nearest obstacle along the unit direction (dc, ds) from (ox, oy).
-    RayHit cast(float ox, float oy, float dc, float ds, float maxRange) const;
+    RayHit cast(float ox, float oy, float dc, float ds, float maxRange,
+                unsigned layers = CAST_ALL) const;
 
     /// Distance only -- kept for callers that do not care about the normal.
-    float raycast(float ox, float oy, float dc, float ds, float maxRange) const;
+    float raycast(float ox, float oy, float dc, float ds, float maxRange,
+                  unsigned layers = CAST_ALL) const;
 
     /// True when the robot's BODY -- an oriented rectangle, half-extents
     /// (halfLen along its x, halfWid along its y) centred at (x, y) and rotated
@@ -114,6 +150,8 @@ private:
 
     std::vector<Segment> mSegments;
     std::vector<Circle>  mCircles;
+    std::vector<Segment> mDynamic;
+    std::vector<Circle>  mDynamicCircles;
 };
 
 Field& field();

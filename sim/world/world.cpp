@@ -1,11 +1,13 @@
 #include "world.hpp"
 #include "field.hpp"
+#include "pieces.hpp"
 
 #include <algorithm>
 #include <cmath>
 
 #include "../platform/sim_runtime.hpp"
 #include "gamespecific/config.hpp"
+#include "gamespecific/lift.hpp"
 
 namespace sim {
 namespace {
@@ -64,6 +66,7 @@ void World::teleport(const chad::Pose& pose) {
     // Encoders and IMU intentionally continue from where they were: a kidnap
     // must be invisible to dead reckoning, which is what MCL has to notice.
     updateDistanceSensors();
+    updateClawSensor();
 }
 
 void World::resetTo(const chad::Pose& pose) {
@@ -73,6 +76,7 @@ void World::resetTo(const chad::Pose& pose) {
     mTruth.theta = pose.theta;
 
     mLeftCmdIn = mRightCmdIn = 0.0f;
+    mLiftDeg = mLiftVel = mPubLiftDeg = 0.0;
     mMotorDegLeft = mMotorDegRight = 0.0;
     mDistAccum = mImuAccum = mEncAccum = 0.0;
     mPodVertIn = mPodHorizIn = 0.0;
@@ -104,6 +108,7 @@ void World::resetTo(const chad::Pose& pose) {
     // run's travel and then see it jump to zero as a real delta.
     publishEncoders();
     updateDistanceSensors();
+    updateClawSensor();
 }
 
 // ============================================================================
@@ -115,6 +120,7 @@ void World::step(double dtMs) {
     if (dt <= 0.0) return;
 
     updateDrive(dt);
+    updateLift(dt);
 
     // Devices refresh on their own clocks. Between refreshes the bus keeps the
     // previous sample, so library code that polls faster than the hardware sees
@@ -136,7 +142,103 @@ void World::step(double dtMs) {
     if (mDistAccum >= mParams.distPeriodMs) {
         mDistAccum = std::fmod(mDistAccum, static_cast<double>(mParams.distPeriodMs));
         updateDistanceSensors();
+        updateClawSensor();
     }
+}
+
+// ============================================================================
+// Lift
+// ============================================================================
+
+void World::updateLift(double dtSec) {
+    const auto* group = &chad::liftMotor;
+    if (group->ports().empty()) return;
+
+    // The group carries one command; the first port is enough to read it.
+    const auto& lead = bus().motors[group->ports()[0]];
+    const double cmd = lead.commandedMv / 12000.0;   // -1 .. 1
+    const double target = cmd * mParams.liftDegPerSec;
+
+    if (mParams.liftResponseTauMs > 1e-3f) {
+        const double alpha =
+            1.0 - std::exp(-dtSec * 1000.0 / mParams.liftResponseTauMs);
+        mLiftVel += (target - mLiftVel) * alpha;
+    } else {
+        mLiftVel = target;
+    }
+
+    mLiftDeg += mLiftVel * dtSec;
+
+    // Hard stops, so a routine that drives into the bottom does not integrate
+    // its way to a negative height and then report the wrong pin.
+    const double top = liftPinDegrees(kLiftPinCount) + 120.0;
+    if (mLiftDeg < 0.0) { mLiftDeg = 0.0; if (mLiftVel < 0.0) mLiftVel = 0.0; }
+    if (mLiftDeg > top) { mLiftDeg = top; if (mLiftVel > 0.0) mLiftVel = 0.0; }
+
+    const double dq = mLiftDeg - mPubLiftDeg;
+    for (std::uint8_t port : group->ports()) {
+        auto& m = bus().motors[port];
+        m.positionDeg += m.reversed ? -dq : dq;
+        m.velocityRpm = (m.reversed ? -mLiftVel : mLiftVel) / 6.0;
+    }
+    mPubLiftDeg = mLiftDeg;
+}
+
+// ============================================================================
+// Claw
+// ============================================================================
+
+void World::updateClawSensor() {
+    auto& slot = bus().distances[chad::claw_dist.get_port()];
+
+    const chad::Pose mount{mParams.clawMountX, mParams.clawMountY,
+                           mParams.clawMountDeg * chad::DEG_TO_RAD};
+    pieces().setClawMount(mount);
+
+    float cx = 0.0f, cy = 0.0f, cdir = 0.0f;
+    pieces().clawPoint({mTruth.x, mTruth.y, mTruth.theta}, cx, cy, cdir);
+
+    const float maxRangeIn = mParams.clawMaxRangeMm / static_cast<float>(kMmPerInch);
+    const float ca = std::cos(cdir), sa = std::sin(cdir);
+    // Everything, pins and cups included: this sensor is inches from what it
+    // is looking at, and seeing a pin is the whole job.
+    const RayHit hit = field().cast(cx, cy, ca, sa, maxRangeIn, Field::CAST_ALL);
+
+    mClawBeam.active = true;
+    mClawBeam.originX = cx;
+    mClawBeam.originY = cy;
+    mClawBeam.dirDeg = cdir * chad::RAD_TO_DEG;
+    mClawBeam.fovDeg = 0.0f;
+
+    if (!hit.hit || hit.dist >= maxRangeIn - 1e-3f) {
+        slot.distanceMm = 9999;
+        slot.confidence = 0;
+        mClawBeam.inRange = false;
+        mClawBeam.confidence = 0;
+        mClawBeam.rangeIn = maxRangeIn;
+        mClawBeam.endX = cx + ca * maxRangeIn;
+        mClawBeam.endY = cy + sa * maxRangeIn;
+        mClawBeam.hitX = mClawBeam.endX;
+        mClawBeam.hitY = mClawBeam.endY;
+        mClawBeam.axisRangeIn = maxRangeIn;
+        return;
+    }
+
+    double mm = hit.dist * kMmPerInch;
+    if (mParams.distNoiseMm > 0.0f) mm += randNormalAux() * mParams.distNoiseMm;
+    if (mm < 0.0) mm = 0.0;
+
+    slot.distanceMm = static_cast<std::int32_t>(mm);
+    slot.confidence = 63;
+    mClawBeam.inRange = true;
+    mClawBeam.confidence = 63;
+    mClawBeam.rangeIn = hit.dist;
+    mClawBeam.axisRangeIn = hit.dist;
+    mClawBeam.endX = cx + ca * hit.dist;
+    mClawBeam.endY = cy + sa * hit.dist;
+    mClawBeam.hitX = mClawBeam.endX;
+    mClawBeam.hitY = mClawBeam.endY;
+    mClawBeam.hitIsObstacle = hit.isCircle;
 }
 
 void World::updateDrive(double dtSec) {
@@ -251,6 +353,69 @@ void World::updateDrive(double dtSec) {
     // tracking centre, so rotation contributes nothing.
     if (moved) mPodVertIn += dDist;
 
+    applyRearAligner(dtSec);
+}
+
+// ============================================================================
+// Rear goal aligner
+// ============================================================================
+
+void World::applyRearAligner(double dtSec) {
+    if (mParams.alignerWidthIn <= 0.0f || mParams.alignerDepthIn <= 0.0f) return;
+    // Passive arms: they only do anything while the robot is being driven
+    // backwards onto something.
+    if (mTruth.vLinIn > -1.0f) return;
+
+    const float ct = std::cos(mTruth.theta), st = std::sin(mTruth.theta);
+    const float halfLen = 0.5f * mParams.robotLengthIn;
+    const float halfWid = 0.5f * mParams.robotWidthIn;
+
+    // The goal nearest the centreline that the mouth has actually caught.
+    float bestLy = 0.0f;
+    bool found = false;
+    for (const auto& c : field().circles()) {
+        const float dx = c.x - static_cast<float>(mTruth.x);
+        const float dy = c.y - static_cast<float>(mTruth.y);
+        const float lx =  dx * ct + dy * st;
+        const float ly = -dx * st + dy * ct;
+
+        // Behind the back face, within the arms' reach.
+        const float back = -lx - halfLen;
+        if (back < -1.0f || back > mParams.alignerDepthIn) continue;
+
+        // The mouth narrows from the tips to the throat, so an arm only
+        // catches a goal it could physically reach at that depth.
+        const float t = back / mParams.alignerDepthIn;
+        const float halfOpen = 0.5f * (mParams.alignerWidthIn +
+            (mParams.alignerMouthIn - mParams.alignerWidthIn) * t);
+        if (std::fabs(ly) > halfOpen) continue;
+
+        if (!found || std::fabs(ly) < std::fabs(bestLy)) { bestLy = ly; found = true; }
+    }
+    if (!found || std::fabs(bestLy) < 1e-3f) return;
+
+    // Slide toward centring it. Capped per tick so it reads as being funnelled
+    // rather than snapping, and refused outright if the slide would put the
+    // body into something.
+    const float cap = mParams.alignerRateInS * static_cast<float>(dtSec);
+    float slide = bestLy;
+    if (slide >  cap) slide =  cap;
+    if (slide < -cap) slide = -cap;
+
+    const float nx = static_cast<float>(mTruth.x) + slide * -st;
+    const float ny = static_cast<float>(mTruth.y) + slide *  ct;
+    if (field().collidesBody(nx, ny, ct, st, halfLen, halfWid,
+                             mParams.collideObstacles)) {
+        return;
+    }
+    mTruth.x = nx;
+    mTruth.y = ny;
+
+    // The drive wheels did not turn to do this -- the robot was pushed across
+    // by the arms -- so the encoders see none of it. The horizontal tracking
+    // pod does: it is unpowered and rolls sideways, which is the whole reason
+    // to have one.
+    mPodHorizIn += slide;
 }
 
 // ============================================================================
@@ -364,6 +529,8 @@ void World::seedImu() {
 // ============================================================================
 
 void World::updateDistanceSensors() {
+    const unsigned kBeamLayers = mParams.distSeePieces
+                                     ? Field::CAST_ALL : Field::CAST_BEAMS;
     const float ct = std::cos(mTruth.theta);
     const float st = std::sin(mTruth.theta);
     const float maxRangeIn = mParams.distMaxRangeMm / static_cast<float>(kMmPerInch);
@@ -409,7 +576,9 @@ void World::updateDistanceSensors() {
                              : (static_cast<float>(r) / (rays - 1)) - 0.5f;
             const float a = axis + frac * fov;
             const float ca = std::cos(a), sa = std::sin(a);
-            const RayHit h = field().cast(sx, sy, ca, sa, maxRangeIn);
+            // Walls, goals, edited geometry and the other robots -- but not
+            // loose pins and cups. See Field::CastLayer.
+            const RayHit h = field().cast(sx, sy, ca, sa, maxRangeIn, kBeamLayers);
             if (std::fabs(frac) < 1e-6f && h.hit) axisRange = h.dist;
             if (!h.hit || h.dist < 1e-3f) continue;
 

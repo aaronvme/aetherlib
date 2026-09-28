@@ -49,6 +49,14 @@ node sim/test/smoke.mjs || fail=1
 # where a route lands and nothing else notices.
 # Odometry lying is the failure mode that loses a match: the filter relocates
 # onto a mirror of itself and every motion after it aims at the wrong place.
+# The claw, the lift and the things they move. The last case runs a compiled
+# routine unmodified and checks a pin ends up in a goal.
+echo "--- game pieces ---"
+node sim/test/pieces.mjs || fail=1
+# RCL owns the pose now. The two checks that matter are the rejections: a beam
+# ranging an alliance partner, and one ranging a post, must not move it.
+echo "--- RCL ---"
+node sim/test/rcl.mjs || fail=1
 echo "--- localization under disturbance ---"
 node sim/test/disturbance.mjs || fail=1
 echo "--- routing accuracy ---"

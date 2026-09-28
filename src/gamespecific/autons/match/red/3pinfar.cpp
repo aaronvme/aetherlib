@@ -13,6 +13,7 @@ void autonRed3PinFar(){
     chassis.setBrakeMode(pros::E_MOTOR_BRAKE_BRAKE);
     chassis.startTracking();
     chassis.setPose({0, -61.5, vexToStdRad(180)});
+    registerAutonDisableLine();
 
     //toggle===========================================
     chassis.tank(50, 50);

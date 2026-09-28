@@ -4,7 +4,7 @@
 // closed so the polarity lives in one place.
 
 // How close something has to get before auto-grab bites.
-constexpr double kClawGrabRangeIn = 4.0;
+constexpr double kClawGrabRangeIn = 4.5;
 
 // How much clear space it has to see afterwards before it is allowed to bite
 // again. Without this, releasing an object would just clamp back onto it.

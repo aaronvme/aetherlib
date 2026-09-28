@@ -80,13 +80,49 @@ struct RobotParams {
     /// reads several inches short whenever the robot is not square to it.
     float distConeSigmaFrac{0.25f};
 
+    // --- claw -------------------------------------------------------------
+    // Where the jaws are, in the robot frame, and what the sensor behind them
+    // can see. chad::claw_dist is not in chad::distSensors -- it is not a
+    // localization beam -- so nothing used to write it, and clawDistance()
+    // read a bus slot that was never filled. That is worse than useless: a
+    // zero reads as "against the jaws", so clawSees() was true on an empty
+    // field and auto-grab fired the instant it was enabled.
+    float clawMountX{-8.0f};
+    float clawMountY{0.0f};
+    float clawMountDeg{180.0f};     // robot-frame pointing angle
+    float clawMaxRangeMm{2000.0f};
+
+    // --- lift -------------------------------------------------------------
+    /// Free speed of the lift in motor degrees per second at full command, and
+    /// how quickly it gets there. Enough to make liftToPin() converge and the
+    /// pin levels mean something; there is no gravity or load here.
+    float liftDegPerSec{900.0f};
+    float liftResponseTauMs{90.0f};
+
     /// Whether the robot collides with posts, goal walls and anything drawn in
     /// the field editor. Perimeter segments always stop it.
     bool collideObstacles{true};
 
     // Robot footprint, used for collision and drawing.
+    /// Let the localization beams stop on pins and cups. Off, because a 1.6 in
+    /// pin and a half-transparent cup do not fill enough of a V5 distance
+    /// sensor's cone at range to return anything -- the beams see the walls,
+    /// the goals and the other robots. On if your sensors sit low enough that
+    /// they do, which is a thing to find out on hardware rather than assume.
+    bool  distSeePieces{false};
+
     float robotLengthIn{15.0f};
     float robotWidthIn{15.0f};
+
+    // --- rear goal aligner --------------------------------------------------
+    // Two passive arms reaching back past the claw. They matter because the
+    // drive is all omni: there is no lateral friction to fight, so a goal
+    // caught in the mouth slides the robot sideways until it sits in the
+    // throat. Width 0 turns the whole thing off.
+    float alignerWidthIn{7.0f};     // slot at the throat, a goal is 5.7
+    float alignerMouthIn{12.0f};    // opening at the arm tips
+    float alignerDepthIn{5.0f};     // how far back the arms reach
+    float alignerRateInS{14.0f};    // how fast it pulls the robot across
 };
 
 struct TrueState {
@@ -140,6 +176,9 @@ public:
     };
     const BeamInfo& beam(int i) const { return mBeams[i]; }
 
+    /// The claw's own beam, for drawing. Not one of the localization sensors.
+    const BeamInfo& clawBeam() const { return mClawBeam; }
+
 private:
     void updateDrive(double dtSec);
     void accumulateEncoders(double leftTravelIn, double rightTravelIn);
@@ -148,6 +187,9 @@ private:
     void publishImu();
     void seedImu();
     void updateDistanceSensors();
+    void updateClawSensor();
+    void updateLift(double dtSec);
+    void applyRearAligner(double dtSec);
 
     RobotParams mParams;
     TrueState   mTruth;
@@ -183,12 +225,17 @@ private:
     double mPodVertIn{0.0};
     double mPodHorizIn{0.0};
 
+    double mLiftDeg{0.0};
+    double mLiftVel{0.0};
+    double mPubLiftDeg{0.0};
+
     // Device refresh accumulators (ms).
     double mDistAccum{0.0};
     double mImuAccum{0.0};
     double mEncAccum{0.0};
 
     BeamInfo mBeams[chad::MAX_DISTANCE_SENSORS];
+    BeamInfo mClawBeam;
     bool mInitialised{false};
 };
 

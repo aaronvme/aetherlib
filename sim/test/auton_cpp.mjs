@@ -42,6 +42,18 @@ let g = one('chassis.moveToPoint(-24.0f, -60.0f, 2500);');
 check('moveToPoint', eq(g.cmd, [OP.MOVE_TO, -24, -60, 1, 2500]),
       JSON.stringify(g.cmd ?? g.error));
 
+// tank/delay pairs are how the match routines drive. They used to land in
+// notes, so an auton pasted into the editor ran a different route from the
+// compiled function it came from.
+g = one('chassis.tank(-50, -50);');
+check('tank', eq(g.cmd, [OP.TANK, -50, -50, 0, 0]),
+      JSON.stringify(g.cmd ?? g.error));
+g = one('chassis.tank(60, -60);');
+check('tank turns in place too', eq(g.cmd, [OP.TANK, 60, -60, 0, 0]),
+      JSON.stringify(g.cmd ?? g.error));
+check('and it is not a waypoint', !g.r || !g.r.plan || g.r.plan.length === 0,
+      `${g.r && g.r.plan ? g.r.plan.length : 0} plan entries`);
+
 g = one('chassis.moveDistance(-12.0f, 1500);');
 check('moveDistance keeps the sign, as Chassis::moveDistance does',
       eq(g.cmd, [OP.DRIVE, -12, 0, 0, 1500]), JSON.stringify(g.cmd ?? g.error));
@@ -162,7 +174,9 @@ check('a subsystem call is skipped, not fatal',
       !r.error && r.cmds.length === 1 && r.notes.length === 1,
       r.error ?? `${r.cmds.length} cmd, note: ${r.notes[0]}`);
 
-r = p('chassis.tank(80.0f, 80.0f);');
+// arcade is still unroutable -- there is no opcode for it, and unlike tank the
+// match routines do not use it.
+r = p('chassis.arcade(80.0f, 20.0f);');
 check('a real-but-unroutable chassis call is skipped with a note',
       !r.error && r.cmds.length === 0 && r.notes.length === 1,
       r.error ?? r.notes[0]);
@@ -333,7 +347,15 @@ walk(autonDir);
 // output, calls into Characterizer. Only the match and example autons are
 // expected to round-trip, and example.cpp is the interesting one: it exercises
 // every motion type with a full params block on each.
-const routable = files.filter(f => /example\.cpp$|[\\/]match[\\/]/.test(f));
+// A mirrored auton is one line -- `void autonBlue3Pin() { reflect(autonRed3Pin); }`
+// -- and has no motions of its own to round-trip. Demanding that it parse to
+// something asked it for a route it does not contain, and the red one it
+// mirrors is checked here anyway. sim/auton_sources.py skips them for the same
+// reason, so this keeps the two in step.
+const REFLECT_ONLY = /\breflect\s*\(\s*auton\w*\s*\)\s*;/;
+const routable = files
+  .filter(f => /example\.cpp$|[\\/]match[\\/]/.test(f))
+  .filter(f => !REFLECT_ONLY.test(readFileSync(f, 'utf8')));
 check('found the autons to check', routable.length >= 2,
       routable.map(f => f.split(/[\\/]/).pop()).join(', '));
 

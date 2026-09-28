@@ -234,17 +234,38 @@ tuning::Characterizer makeCharacterizer(Report& out) {
     return tuning::Characterizer(chassis, drivetrain, cfg);
 }
 
-// The fused estimate, not the odom pose: autoSync walks odom only syncProp of
-// the way to the filter each cycle, and thetaSyncProp is 0.001, so odom's
-// heading is effectively raw IMU.
+// The filter's estimate, not the odom pose: autoSync walks odom only syncProp
+// of the way to the filter each cycle, so odom lags whichever one owns the pose.
+// Heading comes from odom either way -- neither filter corrects it.
 static Pose priorPose(float* posSigma) {
     if (posSigma != nullptr) *posSigma = 0.0f;
-    if (!chassis.ekf().isTracking()) return chassis.odom().getPose();
-    if (posSigma != nullptr) {
-        const auto u = chassis.ekf().uncertainty();
-        *posSigma = std::sqrt(u.sigmaX * u.sigmaX + u.sigmaY * u.sigmaY);
+
+    if (chassis.ekf().isTracking()) {
+        if (posSigma != nullptr) {
+            const auto u = chassis.ekf().uncertainty();
+            *posSigma = std::sqrt(u.sigmaX * u.sigmaX + u.sigmaY * u.sigmaY);
+        }
+        return chassis.ekf().getEstimate();
     }
-    return chassis.ekf().getEstimate();
+
+    if (chassis.rcl().isTracking()) {
+        // RCL carries no covariance. Disagreement between the sensors that
+        // voted is the only thing it can say about how well it currently knows
+        // where it is, so that stands in for sigma -- and while it is in
+        // recovery it is announcing that it does not know at all, which has to
+        // widen the gate rather than narrow it.
+        if (posSigma != nullptr) {
+            const float spread = chassis.rcl().spreadIn();
+            *posSigma = chassis.rcl().isDisplaced()
+                            ? std::fmax(spread, 12.0f)
+                            : spread;
+        }
+        const Pose est = chassis.rcl().latestEstimate();
+        const Pose odom = chassis.odom().getPose();
+        return {est.x, est.y, odom.theta};
+    }
+
+    return chassis.odom().getPose();
 }
 
 bool resetFromBeams() {

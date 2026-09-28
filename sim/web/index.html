@@ -4,18 +4,34 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>chad-sim</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<!-- Offline this falls back to Segoe UI Variable / Cascadia Mono, which is
+     the point of the stacks in style.css: no Inter, no Roboto, no Arial. -->
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500;600&amp;display=swap">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
 <div id="app">
 
-  <!-- ================= left: parameters ================= -->
+  <!-- ================= left: instrumentation ================= -->
   <aside id="left" class="panel">
 
     <div class="card">
       <h3>Drivetrain</h3>
       <div id="dt-facts" class="facts"></div>
+    </div>
+
+    <div class="card">
+      <h3>Sensors <small>why each beam was kept or dropped</small></h3>
+      <div id="sensor-diag" class="diag"></div>
+      <div id="diag-legend" class="legend"></div>
+    </div>
+
+    <div class="card">
+      <h3>RCL <small>the filter that owns the pose</small></h3>
+      <div id="params-rcl"></div>
     </div>
 
     <div class="card">
@@ -34,13 +50,13 @@
     </div>
 
     <div class="card">
-      <h3>Device rates</h3>
-      <div id="params-rate"></div>
+      <h3>Claw &amp; lift <small>geometry the routines depend on</small></h3>
+      <div id="params-claw"></div>
     </div>
 
     <div class="card">
-      <h3>Sensor status</h3>
-      <div id="sensor-diag" class="diag"></div>
+      <h3>Device rates</h3>
+      <div id="params-rate"></div>
     </div>
 
   </aside>
@@ -56,31 +72,54 @@
     <div id="hud">
       <button id="hud-toggle" title="collapse/expand">&minus;</button>
       <div class="row"><span>t</span><b id="hud-t">0.00 s</b></div>
+      <div class="row"><span>period</span><b id="hud-period">—</b></div>
+      <div class="sep"></div>
       <div class="row"><span>true</span><b id="hud-true">—</b></div>
       <div class="row"><span>pose</span><b id="hud-odom">—</b></div>
-      <div class="row"><span>mcl est</span><b id="hud-mcl">—</b></div>
-      <div class="row"><span>ekf est</span><b id="hud-ekf">—</b></div>
-      <div class="row"><span>ekf 1&sigma;</span><b id="hud-ekfsig">—</b></div>
       <div class="row"><span>error</span><b id="hud-err">—</b></div>
+      <div class="sep"></div>
+      <div class="row"><span>rcl</span><b id="hud-rcl">—</b></div>
+      <div class="row"><span>state</span><b id="hud-rclstate">—</b></div>
+      <div class="row"><span>mcl</span><b id="hud-mcl">—</b></div>
+      <div class="row"><span>ekf</span><b id="hud-ekf">—</b></div>
+      <div class="row"><span>ekf 1&sigma;</span><b id="hud-ekfsig">—</b></div>
+      <div class="row"><span>n_eff</span><b id="hud-neff">—</b></div>
+      <div class="sep"></div>
       <div class="row"><span>speed</span><b id="hud-speed">—</b></div>
-      <div class="row"><span>sensors</span><b id="hud-sensors">—</b></div>
-      <div class="row"><span>N_eff</span><b id="hud-neff">—</b></div>
+      <div class="row"><span>beams</span><b id="hud-sensors">—</b></div>
+      <div class="row"><span>claw</span><b id="hud-claw">—</b></div>
+      <div class="row"><span>lift</span><b id="hud-lift">—</b></div>
       <div class="row"><span>tasks</span><b id="hud-tasks">—</b></div>
     </div>
 
     <div id="transport">
-      <button id="btn-play" class="primary">Pause</button>
-      <button id="btn-step">Step 10 ms</button>
-      <button id="btn-reset">Reset</button>
+      <div class="tgroup">
+        <button id="btn-play" class="primary">Pause</button>
+        <button id="btn-step">Step 10 ms</button>
+        <button id="btn-reset">Reset</button>
+      </div>
+
+      <div class="tsep"></div>
+
       <label class="slider">speed
         <input id="speed" type="range" min="0.1" max="6" step="0.1" value="1">
         <output id="speed-val">1.0×</output>
       </label>
+
+      <div class="tsep"></div>
+
+      <!-- Match clock. Off is the old behaviour: the routine runs until it
+           finishes. The other two cut the drive at expiry, which is the only
+           way a routine that does not fit the period ever says so. -->
+      <div class="seg" id="period-seg" title="stop the robot when the period expires">
+        <button data-period="0" class="on">no clock</button>
+        <button data-period="1">auton 15s</button>
+        <button data-period="2">skills 60s</button>
+      </div>
+
       <!-- Pose source, as independent switches rather than one entry per
            combination. With none of the correctors ticked this is dead
-           reckoning: the IMU and the drive motor encoders, because
-           chad::odomSensors carries no tracking wheels. Ticking "odom pods"
-           adds them, which is what makes it odometry proper. -->
+           reckoning: the IMU and the drive motor encoders. -->
       <div id="loc" class="locbar">
         <span id="loc-label" title="nothing ticked = IMU + motor encoders only">dead reckoning</span>
         <label title="particle filter; can find the robot anywhere on the field">
@@ -89,22 +128,24 @@
           <input id="loc-rcl" type="checkbox"> RCL</label>
         <label title="fuses MCL and the wall ranges into a smooth pose, and owns it">
           <input id="loc-ekf" type="checkbox"> EKF</label>
-        <label title="dead-wheel tracking pods instead of the drive motor encoders">
+        <label title="unpowered tracking wheels: they measure real travel, so they do not count the slip a stuck drive wheel does">
           <input id="loc-pods" type="checkbox"> odom pods</label>
       </div>
     </div>
 
-    <div id="stage-hint">drag the robot to kidnap it · WASD or arrows drive it</div>
+    <div id="stage-hint">drag the robot to kidnap it · <b>WASD</b> drives ·
+      <b>space</b> claw · <b>R/F</b> lift · shift-click adds a route point</div>
   </section>
 
   <div class="gutter" id="gutter-right" title="drag to resize, double-click to reset"></div>
 
-  <!-- ================= right: route / plots / layers ================= -->
+  <!-- ================= right: route / plots / field / view ================= -->
   <aside id="right" class="panel">
 
     <div class="tabs">
       <button class="tab active" data-tab="route">Route</button>
       <button class="tab" data-tab="plots">Plots</button>
+      <button class="tab" data-tab="field">Field</button>
       <button class="tab" data-tab="view">View</button>
     </div>
 
@@ -130,17 +171,15 @@
           <button id="btn-run-route" class="primary">Run route</button>
           <button id="btn-stop">Stop</button>
         </div>
-        <div class="btnrow" style="margin-top:8px">
+        <div class="btnrow">
           <button id="btn-copy" title="wrap it in a compilable file and copy">Copy as auton</button>
         </div>
-        <div class="row2" style="margin-top:8px">
+        <div class="row2">
           <select id="auton"></select>
           <button id="btn-run-auton" title="runs the compiled function, not the text above; starts at its own setPose">Run auton</button>
         </div>
       </div>
 
-      <!-- What the last run actually did. The drawn path cannot show that a
-           motion sat out its timeout, or passed an inch from a post. -->
       <div class="card" id="report-card">
         <h3>Last run <small>per motion</small>
           <button id="report-toggle" class="cardbtn" title="collapse">&minus;</button>
@@ -162,8 +201,138 @@
         <label class="inline"><input type="checkbox" id="replay-on"> replay scrub
           <span id="replay-t" class="dimtext">live</span></label>
         <input id="replay-pos" type="range" min="0" max="1000" step="1" value="1000" disabled>
-        <button id="btn-clear-rec" class="wide">Clear recording</button>
-        <button id="btn-export" class="wide">Export CSV</button>
+        <div class="btnrow">
+          <button id="btn-clear-rec">Clear recording</button>
+          <button id="btn-export">Export CSV</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ---- field ---- -->
+    <div class="tabpane" data-pane="field">
+
+      <!-- Pins and cups. The claw takes whatever is in front of it, which is
+           what makes a grab-and-place routine watchable rather than inferred. -->
+      <div class="card">
+        <h3>Game pieces <small>pins, cups, and what the claw has hold of</small></h3>
+        <div class="btnrow">
+          <button id="btn-piece-pin">+ Pin</button>
+          <button id="btn-piece-cup">+ Cup</button>
+          <button id="btn-piece-reset">Load layout</button>
+          <button id="btn-piece-clear">Clear</button>
+          <button id="btn-claw">Close claw</button>
+        </div>
+        <div class="layers">
+          <label title="SG5: one pin, touching the robot, in the jaws at the start">
+            <input id="chk-preload" type="checkbox"> start with a preload</label>
+        </div>
+        <div class="piecebar">
+          <div class="piecestat"><span class="k">claw</span><span class="v" id="ps-claw">open</span></div>
+          <div class="piecestat"><span class="k">holding</span><span class="v" id="ps-held">—</span></div>
+          <div class="piecestat"><span class="k">in goals</span><span class="v" id="ps-scored">0</span></div>
+          <div class="piecestat"><span class="k">physics</span><span class="v" id="ps-physics">—</span></div>
+        </div>
+        <div class="dimtext">the field starts bare — a pin is an obstacle no
+          filter has in its map, so pieces are a thing you ask for. <b>Load
+          layout</b> puts out Figure&nbsp;FO-2, the Override starting set:
+          <b>36 cups</b> and <b>37 pins</b>, the other 20 cups and 26 pins
+          being match loads and preloads. A reset restores it, so two runs face
+          the same field. Pins and cups are rigid bodies in <b>Rapier</b>: they
+          roll, spin, knock each other along, and gather in front of a plough.
+          Drag a piece to move it. The localization beams do not stop on them;
+          the claw's own sensor does. The claw takes whatever is within <b>4.5&#8239;in</b> of
+          the jaws when it closes, and nests it in a goal — or in a cup — if it
+          opens against one.</div>
+      </div>
+
+      <!-- The other three robots in the match. -->
+      <div class="card">
+        <h3>Other robots <small>partners and opponents</small></h3>
+        <div class="btnrow">
+          <button id="btn-actor-partner">+ Partner</button>
+          <button id="btn-actor-opponent">+ Opponent</button>
+          <button id="btn-actor-clear">Clear</button>
+        </div>
+        <div id="actor-list" class="actorlist"></div>
+        <div id="actor-detail" class="actordetail"></div>
+        <div id="actor-status" class="status"></div>
+        <div class="dimtext">press <b>path</b>, then click the field to lay
+          points — right-click takes one back, <b>Esc</b> finishes and starts it
+          driving. Waypoints are numbered and can be dragged afterwards. Drag
+          the robot itself to place it by hand, which stops it driving;
+          alt-drag turns it.</div>
+      </div>
+
+      <!-- The roller on the middle of each wall. -->
+      <div class="card">
+        <h3>Toggles <small>who owns the yellow pins</small></h3>
+        <div id="toggle-bar" class="togglebar"></div>
+        <div class="btnrow">
+          <button id="btn-toggle-reset">All neutral</button>
+        </div>
+        <div class="dimtext">ram the <b>front</b> of the robot into the middle
+          of a wall and the roller turns one face. A yellow pin placed in that
+          quadrant is worth <b>10</b> to whoever owns the toggle at the end, so
+          a face is a bigger swing than a pin. Click a chip to set one by hand.
+          Height is not modelled — the roller sits on the top rail, and this
+          cannot tell you whether your flipper reaches it.</div>
+      </div>
+
+      <!-- Not a barrier. During the 15 s period the far half holds two robots
+           that move, so a return from over there is ranging one of them. -->
+      <div class="card">
+        <h3>Auton read gate <small>the diagonal</small></h3>
+        <div class="layers">
+          <label><input id="chk-farside" type="checkbox"> ignore the far half</label>
+          <label><input id="chk-farside-auto" type="checkbox"> re-arm every run</label>
+        </div>
+        <div id="farside-state" class="dimtext">off</div>
+      </div>
+
+      <div class="card">
+        <h3>Beam-block stress test</h3>
+        <div class="row2">
+          <label>runs <input id="stress-runs" type="number" value="8" min="1" max="50" step="1"></label>
+          <label>robots <input id="stress-bots" type="number" value="3" min="1" max="6" step="1"></label>
+        </div>
+        <div class="btnrow">
+          <button id="btn-stress" class="primary">Run stress test</button>
+          <button id="btn-stress-stop">Stop</button>
+        </div>
+        <div id="stress-out" class="status"></div>
+      </div>
+
+      <div class="card">
+        <h3>Start pose</h3>
+        <div class="row3">
+          <label>x <input id="start-x" type="number" value="-48" step="1"></label>
+          <label>y <input id="start-y" type="number" value="-60" step="1"></label>
+          <label>θ° <input id="start-h" type="number" value="90" step="15"></label>
+        </div>
+        <button id="btn-place" class="wide">Reset to this pose</button>
+      </div>
+
+      <div class="card">
+        <h3>Physics</h3>
+        <div class="layers">
+          <label><input id="chk-collide" type="checkbox" checked> collide with posts and robots</label>
+          <label title="a 1.6 in pin and a half-transparent cup do not fill enough of the cone at range to return anything; the claw's own sensor always sees them">
+            <input id="chk-seepieces" type="checkbox"> beams stop on pins and cups</label>
+        </div>
+        <div class="dimtext">the localization beams see walls, goals, edited
+          geometry and the other robots. Loose pins and cups are invisible to
+          them and always visible to the claw sensor — tick the second box if
+          your sensors sit low enough to range them.</div>
+      </div>
+
+      <div class="card">
+        <h3>Field geometry</h3>
+        <div id="field-facts" class="facts"></div>
+        <textarea id="field-json" spellcheck="false" rows="8"></textarea>
+        <div class="btnrow">
+          <button id="btn-field-apply">Apply geometry</button>
+          <button id="btn-field-reset">Reload default</button>
+        </div>
       </div>
     </div>
 
@@ -183,28 +352,6 @@
           <input id="field-img-scale" type="range" min="0.85" max="1.25" step="0.005" value="1">
         </label>
         <div class="dimtext">save one as sim/web/field.png to load it on boot</div>
-      </div>
-      <div class="card">
-        <h3>Physics</h3>
-        <div class="layers">
-          <label><input id="chk-collide" type="checkbox" checked> collide with posts</label>
-        </div>
-      </div>
-      <div class="card">
-        <h3>Start pose</h3>
-        <div class="row3">
-          <label>x <input id="start-x" type="number" value="-48" step="1"></label>
-          <label>y <input id="start-y" type="number" value="-60" step="1"></label>
-          <label>θ° <input id="start-h" type="number" value="90" step="15"></label>
-        </div>
-        <button id="btn-place" class="wide">Reset to this pose</button>
-      </div>
-      <div class="card">
-        <h3>Field geometry</h3>
-        <div id="field-facts" class="facts"></div>
-        <textarea id="field-json" spellcheck="false" rows="8"></textarea>
-        <button id="btn-field-apply" class="wide">Apply geometry</button>
-        <button id="btn-field-reset" class="wide">Reload default</button>
       </div>
     </div>
 

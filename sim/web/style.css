@@ -1,30 +1,66 @@
+/* ===========================================================================
+   chad-sim
+   ---------------------------------------------------------------------------
+   An instrument, not a dashboard. Three rules it holds to:
+
+   1. Structure comes from hairlines and negative space. There is not one
+      box-shadow, gradient or blur in this file. If two things need separating,
+      a 1px rule separates them.
+   2. One accent. Signal orange marks what you can act on -- the primary
+      button, the live tab, the focused field, the selected option -- and
+      nothing else. Every other colour in the UI is a neutral.
+   3. The canvas owns the saturated colours. Green is ground truth, amber is
+      odometry, teal is RCL. The chrome never competes with them, which is why
+      the chrome is grey and the accent is a hue none of the data uses.
+
+   Type is a pair with real contrast: Space Grotesk for anything you read as
+   language, JetBrains Mono for anything you read as a number. Labels are small
+   and widely tracked; values are large and tabular. Nothing in between.
+   =========================================================================== */
+
 :root {
   /* One fluid knob drives the whole UI: every size below is in em or a vw
      clamp, so the layout scales with the window instead of snapping between
      breakpoints. rem stays fixed to the clamp so nesting cannot compound it. */
   font-size: clamp(10.5px, 0.55vw + 6.4px, 14px);
-
-  /* Native scrollbars, dropdown popups and range tracks all follow this. It is
-     what stops the browser drawing light-grey scrollbars over a dark UI. */
   color-scheme: dark;
 
-  --left-w:  clamp(184px, 16.5vw, 300px);
-  --right-w: clamp(240px, 21.5vw, 380px);
+  --left-w:  clamp(200px, 17.5vw, 320px);
+  --right-w: clamp(250px, 22vw, 390px);
   --gutter-w: 5px;
-  --scroll:       #39404e;
-  --scroll-hover: #4c5566;
 
-  --bg:      #14161a;
-  --panel:   #1b1e24;
-  --card:    #22262e;
-  --line:    #2f3540;
-  --text:    #d6dae2;
-  --dim:     #8b93a1;
-  --accent:  #5aa9ff;
-  --true:    #4ade80;
-  --odom:    #fbbf24;
-  --mcl:     #f472b6;
-  --beam:    #7dd3fc;
+  /* --- neutrals ---------------------------------------------------------
+     A cool near-black ground with warm bone text. Warm-on-cool is what keeps
+     a dark tool from reading as a blue screen. */
+  --bg:        #0B0C0E;
+  --panel:     #101215;
+  --card:      #15181C;
+  --sunken:    #0D0F11;
+  --line:      #22262C;
+  --line-2:    #30363E;
+  --text:      #E7E4DE;
+  --dim:       #8B9199;
+  --faint:     #5B616A;
+
+  /* --- the one accent --------------------------------------------------- */
+  --accent:    #FF4D00;
+  --accent-in: #14100D;   /* text on top of the accent */
+
+  /* --- data ---------------------------------------------------------------
+     Owned by the canvas. Listed here so the legends can borrow them. */
+  --true:  #4ADE80;
+  --odom:  #FBBF24;
+  --mcl:   #F472B6;
+  --rcl:   #34D399;
+  --beam:  #7DD3FC;
+  --bad:   #FF6B5E;
+  --warn:  #E2B341;
+
+  --scroll:       #2A2F36;
+  --scroll-hover: #3C434C;
+
+  --sans: 'Space Grotesk', 'Segoe UI Variable Display', 'Segoe UI', system-ui, sans-serif;
+  --mono: 'JetBrains Mono', 'Cascadia Mono', 'SFMono-Regular', Consolas, monospace;
 }
 
 * { box-sizing: border-box; }
@@ -35,30 +71,30 @@ html, body {
   overflow: hidden;
   background: var(--bg);
   color: var(--text);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--sans);
   font-size: 1rem;
-  line-height: 1.45;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
 }
 
-/* ---------------- scrollbars ----------------
-   Overlay-style: transparent track, thumb only, so a scrolling panel does not
-   grow a light gutter down its edge. */
+/* Numbers are read in columns; they have to line up. */
+.mono, .facts .v, .diag, #hud b, .param .pnum, table.report, .repsum,
+#field-json, #editor, .actorrow, output { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+/* ---------------- scrollbars ---------------- */
 
 * { scrollbar-width: thin; scrollbar-color: var(--scroll) transparent; }
-
 ::-webkit-scrollbar { width: 9px; height: 9px; }
-::-webkit-scrollbar-track,
-::-webkit-scrollbar-corner { background: transparent; }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
 ::-webkit-scrollbar-thumb {
   background: var(--scroll);
   border: 2px solid transparent;
   background-clip: padding-box;
   border-radius: 6px;
 }
-::-webkit-scrollbar-thumb:hover {
-  background: var(--scroll-hover);
-  background-clip: padding-box;
-}
+::-webkit-scrollbar-thumb:hover { background: var(--scroll-hover); background-clip: padding-box; }
+
+/* ---------------- shell ---------------- */
 
 #app {
   display: grid;
@@ -70,21 +106,17 @@ html, body {
 
 .panel {
   background: var(--panel);
-  padding: 0.86em;
+  padding: 0.9em 0.85em 2em;
   overflow-y: auto;
   overflow-x: hidden;
   display: flex;
   flex-direction: column;
-  gap: 0.72em;
+  gap: 0.8em;
   min-height: 0;
   min-width: 0;
 }
 #left  { border-right: 1px solid var(--line); }
 #right { border-left: 1px solid var(--line); }
-
-/* ---------------- resize gutters ----------------
-   Grid children rather than absolutely positioned overlays, so they
-   cannot end up on top of a panel control at some window size. */
 
 .gutter {
   cursor: col-resize;
@@ -93,7 +125,7 @@ html, body {
   border-right: 1px solid var(--line);
   touch-action: none;
 }
-.gutter:hover, .gutter.dragging { background: var(--scroll-hover); }
+.gutter:hover, .gutter.dragging { background: var(--line-2); }
 
 /* ---------------- stage ---------------- */
 
@@ -102,16 +134,14 @@ html, body {
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 0.55em;
+  gap: 0.6em;
   padding: 0.9em;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
+  background: var(--bg);
 }
 
-/* The field's own area. The transport is a sibling below it rather than an
-   overlay, so it cannot cover the field at any window size, and the field is
-   measured against what is actually left rather than a guessed padding lane. */
 #stage-field {
   flex: 1 1 auto;
   min-height: 0;
@@ -123,44 +153,130 @@ html, body {
 }
 
 #field {
-  /* Largest square that fits the stage on BOTH axes. The old
-     min(100%, 100vh - 90px) budgeted for the surrounding chrome in pixels, so it
-     left a gap on a wide window and overflowed a short one.
-     Constraining width alone is deliberate: give a box a definite width AND a
-     max-height and CSS drops aspect-ratio, so the field would stretch. */
-  width: min(100%, 82vh);              /* engines without container units */
+  width: min(100%, 82vh);
   width: min(100cqw, 100cqh);
   height: auto;
   aspect-ratio: 1;
-  border-radius: 0.5em;
-  background: #0f1115;
+  border: 1px solid var(--line-2);
+  border-radius: 2px;
+  background: #0A0B0D;
   cursor: grab;
 }
 #field.dragging { cursor: grabbing; }
 
+/* ---------------- HUD ----------------
+   A readout, not a card. Square corners, one hairline border, label column
+   dim and narrow against a mono value column that does the talking. */
+
 #hud {
   position: absolute;
-  top: 1em;
-  left: 1em;
-  padding: 0.36em 1.6em 0.36em 0.5em;
-  background: rgba(16, 18, 22, 0.88);
-  border: 1px solid var(--line);
-  border-radius: 6px;
+  top: 1.1em;
+  left: 1.1em;
+  padding: 0.5em 0.6em 0.45em;
+  background: rgba(11, 12, 14, 0.92);
+  border: 1px solid var(--line-2);
+  border-radius: 2px;
   pointer-events: none;
-  min-width: 12.6em;
+  min-width: 14.5em;
   max-width: calc(100% - 2em);
-  font-size: 0.87em;
-  line-height: 1.32;
+  font-size: 0.86em;
+  line-height: 1.45;
 }
-#hud .row { display: flex; justify-content: space-between; gap: 0.8em; }
-#hud span { color: var(--dim); }
-#hud b { font-weight: 500; }
+#hud .row { display: flex; justify-content: space-between; gap: 1em; align-items: baseline; }
+#hud span {
+  color: var(--faint);
+  font-size: 0.86em;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  font-weight: 500;
+}
+#hud b { font-weight: 500; font-size: 1.06em; letter-spacing: -0.01em; }
 
-/* Collapsed keeps the clock visible and gives the field back. */
-#hud.collapsed .row:not(:first-of-type) { display: none; }
+/* A hairline between instrument groups beats a gap. */
+#hud .sep { border-top: 1px solid var(--line); margin: 0.4em -0.6em 0.4em; }
+
+#hud.collapsed .row:not(:first-of-type), #hud.collapsed .sep { display: none; }
 #hud.collapsed { min-width: 0; }
 
-/* A card header button, sized to sit on the h3 baseline. */
+#hud-toggle {
+  position: absolute;
+  top: 0.1em;
+  right: 0.15em;
+  width: 1.4em;
+  height: 1.4em;
+  padding: 0;
+  line-height: 1.2;
+  text-align: center;
+  font-size: 1em;
+  background: transparent;
+  color: var(--faint);
+  border: 0;
+  cursor: pointer;
+  pointer-events: auto;
+}
+#hud-toggle:hover { color: var(--text); }
+
+/* ---------------- transport ---------------- */
+
+#transport {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 0.5em 0.7em;
+  padding: 0.55em 0.75em;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+}
+#transport .slider { margin: 0; }
+.tgroup { display: flex; gap: 0.35em; }
+
+/* A vertical hairline reads as a group break without adding a box. */
+.tsep { width: 1px; align-self: stretch; background: var(--line); margin: 0 0.15em; }
+
+#stage-hint {
+  position: absolute;
+  top: 1.3em;
+  right: 1.3em;
+  max-width: 42%;
+  color: var(--faint);
+  font-size: 0.85em;
+  text-align: right;
+  letter-spacing: 0.01em;
+}
+
+/* ---------------- cards ---------------- */
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 0.85em 0.8em;
+  min-width: 0;
+}
+.card.grow { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+
+.card h3 {
+  margin: 0 0 0.75em;
+  font-family: var(--sans);
+  font-size: 0.78em;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  color: var(--dim);
+}
+.card h3 small {
+  display: block;
+  text-transform: none;
+  letter-spacing: 0.01em;
+  font-size: 1.15em;
+  font-weight: 400;
+  color: var(--faint);
+  margin-top: 0.3em;
+}
+
 .cardbtn {
   float: right;
   width: 1.5em;
@@ -169,164 +285,163 @@ html, body {
   line-height: 1.1;
   text-align: center;
   background: transparent;
-  color: var(--dim);
+  color: var(--faint);
   border: 0;
   cursor: pointer;
 }
 .cardbtn:hover { color: var(--text); }
 #report-card.collapsed #route-report { display: none; }
 
-#hud-toggle {
-  position: absolute;
-  top: 0.15em;
-  right: 0.15em;
-  width: 1.35em;
-  height: 1.35em;
-  padding: 0;
-  line-height: 1.2;
-  text-align: center;
-  font-size: 1em;
-  background: transparent;
-  color: var(--dim);
-  border: 0;
-  border-radius: 0.2em;
-  cursor: pointer;
-  pointer-events: auto;
-}
-#hud-toggle:hover { color: #e5e7eb; background: rgba(255,255,255,0.08); }
-
-#transport {
-  flex: 0 0 auto;
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  align-items: center;
-  gap: 0.5em;
-  padding: 0.5em 0.7em;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 0.45em;
-}
-#transport .slider { margin: 0; }
-#transport select { width: auto; }
-
-#stage-hint {
-  position: absolute;
-  top: 1.1em;
-  right: 1.1em;
-  max-width: 40%;
-  color: var(--dim);
-  font-size: 0.9em;
-  text-align: right;
-}
-
-/* ---------------- cards ---------------- */
-
-.card {
-  background: var(--card);
-  border: 1px solid var(--line);
-  border-radius: 0.45em;
-  padding: 0.8em;
-  min-width: 0;
-}
-.card.grow { flex: 1; display: flex; flex-direction: column; min-height: 0; }
-
-.card h3 {
-  margin: 0 0 0.7em;
-  font-size: 0.83em;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--dim);
-}
-.card h3 small {
-  display: block;
-  text-transform: none;
-  letter-spacing: 0;
-  font-weight: 400;
-  color: #6b7280;
-  margin-top: 0.15em;
-}
-
-/* ---------------- controls ---------------- */
+/* ---------------- controls ----------------
+   Flat, square-ish, bordered. Hover brightens the border and lifts the fill;
+   nothing moves, scales or glows. */
 
 button {
-  background: #2c313b;
+  background: #1B1F24;
   color: var(--text);
-  border: 1px solid var(--line);
-  border-radius: 0.3em;
-  padding: 0.45em 0.8em;
-  font: inherit;
+  border: 1px solid var(--line-2);
+  border-radius: 3px;
+  padding: 0.45em 0.85em;
+  font: 500 0.95em/1.35 var(--sans);
+  letter-spacing: 0.01em;
   cursor: pointer;
+  transition: background 90ms linear, border-color 90ms linear, color 90ms linear;
 }
-button:hover { background: #353b47; }
-button.primary { background: var(--accent); border-color: var(--accent); color: #08131f; font-weight: 600; }
-button.primary:hover { filter: brightness(1.1); }
-button.wide { width: 100%; margin-top: 0.45em; }
+button:hover { background: #232830; border-color: #3E464F; }
+button:active { background: #171B20; }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
-.btnrow { display: flex; flex-wrap: wrap; gap: 0.45em; }
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-in);
+  font-weight: 700;
+}
+button.primary:hover { background: #FF6420; border-color: #FF6420; }
+button.primary:active { background: #E64500; }
+
+button.wide { width: 100%; margin-top: 0.5em; }
+
+.btnrow { display: flex; flex-wrap: wrap; gap: 0.4em; }
 .btnrow button { flex: 1 1 6em; }
+.btnrow + .btnrow, .btnrow + .row2, .row2 + .btnrow,
+.row3 + .btnrow, .layers + .dimtext { margin-top: 0.5em; }
 
-.row2 { display: flex; gap: 0.45em; }
+.row2 { display: flex; gap: 0.4em; }
 .row2 select, .row2 input { flex: 1; min-width: 0; }
 
-.row3 { display: flex; gap: 0.45em; }
-.row3 label { flex: 1; min-width: 0; display: flex; flex-direction: column;
-              gap: 0.2em; color: var(--dim); font-size: 0.85em; }
+.row3 { display: flex; gap: 0.4em; }
+.row3 label {
+  flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.25em;
+  color: var(--faint);
+  font-size: 0.8em;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-weight: 500;
+}
 
-select, input[type="number"], input[type="text"] {
-  background: #171a20;
+select, input[type="number"], input[type="text"], input[type="file"] {
+  background: var(--sunken);
   color: var(--text);
-  border: 1px solid var(--line);
-  border-radius: 0.3em;
-  padding: 0.35em 0.5em;
-  font: inherit;
+  border: 1px solid var(--line-2);
+  border-radius: 3px;
+  padding: 0.4em 0.5em;
+  font: 400 0.95em/1.3 var(--mono);
   width: 100%;
   min-width: 0;
 }
-input[type="text"] { margin-top: 0.45em; }
+select { font-family: var(--sans); }
+input[type="text"] { margin-top: 0.4em; }
+select:focus, input:focus, textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
 
 label.slider {
   display: flex;
   align-items: center;
   gap: 0.5em;
-  color: var(--dim);
-  font-size: 0.9em;
+  color: var(--faint);
+  font-size: 0.82em;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-weight: 500;
   min-width: 0;
 }
 label.slider input { flex: 1 1 5em; width: auto; min-width: 3.5em; }
-label.slider output { min-width: 3em; text-align: right; color: var(--text); }
+label.slider output {
+  min-width: 3.2em; text-align: right; color: var(--text);
+  text-transform: none; letter-spacing: 0; font-size: 1.1em;
+}
 
 input[type="range"] { accent-color: var(--accent); }
+input[type="checkbox"] { accent-color: var(--accent); }
 
-/* ---------------- tabs ---------------- */
+/* ---------------- segmented control ----------------
+   An inset track. The selected option is a raised block with an accent rule
+   under it -- readable at a glance without a pill or a colour wash. */
 
-.tabs { display: flex; gap: 0.3em; }
+.seg {
+  display: inline-flex;
+  padding: 2px;
+  gap: 2px;
+  background: var(--sunken);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+}
+.seg button {
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--faint);
+  padding: 0.3em 0.7em;
+  border-radius: 2px;
+  font-size: 0.88em;
+  white-space: nowrap;
+}
+.seg button:hover { background: #1A1E23; color: var(--text); }
+.seg button.on {
+  background: #20252B;
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
+/* ---------------- tabs ----------------
+   Text with a rule under the live one. No pill, no fill. */
+
+.tabs { display: flex; gap: 0; border-bottom: 1px solid var(--line); }
 .tab {
   flex: 1;
-  border-radius: 0.3em 0.3em 0 0;
-  border-bottom-color: transparent;
-  color: var(--dim);
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  margin-bottom: -1px;
+  color: var(--faint);
+  font-size: 0.85em;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 0.55em 0.3em;
 }
-.tab.active { background: var(--card); color: var(--text); border-color: var(--line); }
+.tab:hover { background: transparent; color: var(--dim); }
+.tab.active { color: var(--text); border-bottom-color: var(--accent); }
 
-.tabpane { display: none; flex-direction: column; gap: 0.72em; flex: 1; min-height: 0; min-width: 0; }
+.tabpane { display: none; flex-direction: column; gap: 0.8em; flex: 1; min-height: 0; min-width: 0; }
 .tabpane.active { display: flex; }
 
 /* ---------------- editor ---------------- */
 
 #editor {
   flex: 1;
-  /* Relative, so a short window shrinks the editor instead of overflowing the
-     panel and pushing the run buttons off screen. */
   min-height: 8em;
   resize: vertical;
-  background: #12151a;
-  color: #cfd6e4;
-  border: 1px solid var(--line);
-  border-radius: 0.3em;
-  padding: 0.65em;
-  font: 1em/1.6 ui-monospace, Consolas, monospace;
+  background: var(--sunken);
+  color: #D5D9E0;
+  border: 1px solid var(--line-2);
+  border-radius: 3px;
+  padding: 0.7em;
+  font: 400 0.95em/1.65 var(--mono);
   tab-size: 2;
   white-space: pre;
   overflow: auto;
@@ -334,103 +449,271 @@ input[type="range"] { accent-color: var(--accent); }
 #field-json {
   width: 100%;
   resize: vertical;
-  background: #12151a;
-  color: #cfd6e4;
-  border: 1px solid var(--line);
-  border-radius: 0.3em;
+  background: var(--sunken);
+  color: #D5D9E0;
+  border: 1px solid var(--line-2);
+  border-radius: 3px;
   padding: 0.6em;
-  font: 0.9em/1.5 ui-monospace, Consolas, monospace;
-  margin-top: 0.45em;
+  font: 400 0.88em/1.55 var(--mono);
+  margin-top: 0.5em;
 }
 
-.status { margin-top: 0.5em; font-size: 0.9em; min-height: 1.3em; color: var(--dim); }
-.status.err { color: #f87171; }
+.status {
+  margin-top: 0.55em;
+  font: 400 0.88em/1.5 var(--mono);
+  min-height: 1.3em;
+  color: var(--dim);
+}
+.status.err { color: var(--bad); }
 .status.ok  { color: var(--true); }
 
-/* ---------------- misc ---------------- */
+.notes {
+  margin-top: 0.4em;
+  font: 400 0.82em/1.5 var(--mono);
+  color: #C08B43;
+  word-break: break-word;
+}
 
-/* auto-fit rather than a fixed pair: the same list reflows to one column in a
-   narrow panel and to three in a wide one. */
-.layers { display: grid; grid-template-columns: repeat(auto-fit, minmax(7.6em, 1fr)); gap: 0.3em 0.7em; }
-.layers label { display: flex; align-items: center; gap: 0.35em; font-size: 0.9em; cursor: pointer; }
-.layers input { accent-color: var(--accent); margin: 0; }
+/* ---------------- lists and facts ---------------- */
 
-.facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0.15em 0.7em; font-size: 0.9em; }
-.facts .k { color: var(--dim); }
+.layers { display: grid; grid-template-columns: repeat(auto-fit, minmax(8em, 1fr)); gap: 0.3em 0.7em; }
+.layers label {
+  display: flex; align-items: center; gap: 0.4em;
+  font-size: 0.9em; cursor: pointer; color: var(--dim);
+}
+.layers label:hover { color: var(--text); }
+.layers input { margin: 0; }
+
+.facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0.2em 0.8em; font-size: 0.9em; }
+.facts .k {
+  color: var(--faint);
+  font-size: 0.9em;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 500;
+}
 .facts .v { text-align: right; }
 
 .param {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(2.6em, 0.8fr) 4.4em;
+  grid-template-columns: minmax(0, 1fr) minmax(2.6em, 0.8fr) 4.6em;
   align-items: center;
   gap: 0.5em;
-  margin-bottom: 0.45em;
-  font-size: 0.9em;
+  margin-bottom: 0.5em;
+  font-size: 0.88em;
 }
 .param span { color: var(--dim); }
 .param input[type="range"] { width: 100%; min-width: 0; }
-
-/* Typing an exact value beats nudging a slider to it, so the box is the real
-   control and the slider is for feel. */
 .param .pnum {
   width: 100%;
   min-width: 0;
-  padding: 0.15em 0.3em;
+  padding: 0.2em 0.35em;
   text-align: right;
-  font: inherit;
-  border-radius: 0.25em;
+  font-size: 0.95em;
+  border-radius: 2px;
 }
-/* The spinners eat most of a 4.4em box; the arrow keys still step the value. */
 .param .pnum::-webkit-inner-spin-button,
 .param .pnum::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
 .param .pnum { -moz-appearance: textfield; appearance: textfield; }
-.param .pnum:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
 
 #plot { width: 100%; height: auto; display: block; min-width: 0; aspect-ratio: 640 / 900; }
 
-/* ---------------- diagnostics ---------------- */
+.dimtext { color: var(--faint); margin-left: auto; font-size: 0.88em; }
+.card > .dimtext, .card > .layers + .dimtext {
+  margin-left: 0; display: block; margin-top: 0.55em; line-height: 1.5;
+}
+.card > .dimtext b { color: var(--dim); font-weight: 500; }
 
-.diag { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; gap: 0.22em 0.6em; font-size: 0.9em; }
-.diag .s  { color: var(--dim); }
-.diag .r  { text-align: right; }
-.diag .ok   { color: var(--true); }
-.diag .bad  { color: #f87171; }
-/* beam deadzoned for part of the cloud: ignored by some hypotheses */
-.diag .warn { color: #e2b341; }
-.diag .off  { color: #4b5563; }
-.diag .hdr  { color: #6b7280; font-size: 0.85em; text-transform: uppercase; letter-spacing: .06em; }
+#replay-pos { width: 100%; margin-top: 0.5em; }
+label.inline {
+  display: flex; align-items: center; gap: 0.4em;
+  font-size: 0.9em; color: var(--dim);
+}
+label.inline input[type="checkbox"] { margin: 0; }
 
-.dimtext { color: var(--dim); margin-left: auto; }
-#replay-pos { width: 100%; margin-top: 0.45em; }
+/* ---------------- sensor diagnostics ---------------- */
 
-label.inline input[type="checkbox"] { accent-color: var(--accent); margin: 0 0.3em 0 0; }
+.diag {
+  display: grid;
+  grid-template-columns: auto auto auto auto minmax(0, 1fr);
+  gap: 0.25em 0.6em;
+  font-size: 0.88em;
+  align-items: baseline;
+}
+.diag .s { color: var(--faint); }
+.diag .r { text-align: right; }
+.diag .hdr {
+  color: var(--faint);
+  font-family: var(--sans);
+  font-size: 0.85em;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-weight: 600;
+}
+.diag .ok, .diag .used { color: var(--true); }
+.diag .bad, .diag .wrong { color: var(--bad); }
+.diag .warn, .diag .gated { color: var(--warn); }
+.diag .off, .diag .held { color: #4A5058; }
+.diag .paired { color: var(--rcl); font-weight: 600; }
+.diag .post { color: #94A3B8; }
+.diag .reason {
+  text-align: left; color: var(--faint); font-size: 0.95em;
+  font-family: var(--sans);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 
-/* Pose-source switches. Independent toggles, not one entry per combination --
-   MCL/RCL/EKF/pods is 16 states and a dropdown listing them is unreadable. */
+.legend { display: flex; flex-wrap: wrap; gap: 0.25em 0.75em; margin-top: 0.7em; font-size: 0.82em; }
+.legend span { display: flex; align-items: center; gap: 0.35em; color: var(--faint); }
+.legend i { width: 0.55em; height: 0.55em; border-radius: 1px; display: inline-block; }
+
+/* ---------------- pose source ---------------- */
+
 .locbar {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 0.3em 0.75em;
-  padding: 0.25em 0.65em;
-  background: #14161b;
+  gap: 0.3em 0.8em;
+  padding: 0.3em 0.7em;
+  background: var(--sunken);
   border: 1px solid var(--line);
-  border-radius: 0.35em;
-  font-size: 0.9em;
+  border-radius: 3px;
+  font-size: 0.88em;
 }
-.locbar label { display: flex; align-items: center; gap: 0.3em; cursor: pointer; white-space: nowrap; }
+.locbar label { display: flex; align-items: center; gap: 0.35em; cursor: pointer; white-space: nowrap; color: var(--dim); }
+.locbar label:hover { color: var(--text); }
 .locbar input { margin: 0; cursor: pointer; }
 #loc-label {
-  min-width: 7.5em;
-  padding-right: 0.6em;
+  min-width: 8em;
+  padding-right: 0.7em;
   border-right: 1px solid var(--line);
-  color: #7dd3fc;
+  color: var(--text);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  font-size: 0.9em;
 }
+
+/* ---------------- other robots ---------------- */
+
+.actorlist { display: flex; flex-direction: column; gap: 0.3em; margin-top: 0.6em; }
+.actorlist:empty { display: none; }
+
+.actorrow {
+  display: grid;
+  grid-template-columns: 0.8em 1fr auto auto auto;
+  align-items: center;
+  gap: 0.45em;
+  padding: 0.35em 0.5em;
+  background: var(--sunken);
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--line-2);
+  border-radius: 2px;
+  font-size: 0.86em;
+}
+.actorrow.partner  { border-left-color: var(--beam); }
+.actorrow.opponent { border-left-color: var(--bad); }
+.actorrow.sel { border-color: var(--line-2); background: #191D22; }
+.actorrow .who { color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.actorrow .who b { color: var(--text); font-weight: 600; }
+.actorrow button {
+  padding: 0.1em 0.45em;
+  font-size: 0.9em;
+  font-family: var(--sans);
+  background: #1B1F24;
+}
+.actorrow button.on { background: var(--accent); color: var(--accent-in); border-color: var(--accent); }
+.actorrow input[type="checkbox"] { margin: 0; }
+
+#farside-state.armed { color: var(--true); }
+
+/* The detail strip for whichever robot is selected. */
+.actordetail:empty { display: none; }
+.actordetail { margin-top: 0.5em; display: flex; flex-direction: column; gap: 0.4em; }
+.actordetail .seg { width: 100%; }
+.actorface {
+  display: flex; align-items: center; gap: 0.4em;
+  color: var(--faint); font-size: 0.86em;
+}
+.actorface input { margin: 0; }
+
+#actor-status:empty { display: none; }
+
+/* ---------------- toggles ---------------- */
+
+.togglebar {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.35em;
+  margin-top: 0.6em;
+}
+.togglechip {
+  font-family: var(--mono);
+  font-size: 0.78em;
+  padding: 0.35em 0.2em;
+  border: 1px solid var(--line);
+  border-top: 3px solid var(--line-2);
+  background: var(--sunken);
+  color: var(--faint);
+}
+.togglechip.s0 { border-top-color: #E8C547; }
+.togglechip.s1 { border-top-color: var(--bad); color: var(--text); }
+.togglechip.s2 { border-top-color: var(--beam); color: var(--text); }
+
+/* Laying a patrol path: the field is a path editor and nothing else. */
+#field.laying { cursor: crosshair; }
+#stage-hint.busy { color: var(--accent); }
+
+/* ---------------- game pieces ---------------- */
+
+.piecebar {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.35em;
+  margin-top: 0.6em;
+  font-size: 0.86em;
+}
+.piecestat {
+  background: var(--sunken);
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  padding: 0.4em 0.5em;
+}
+.piecestat .k {
+  display: block;
+  color: var(--faint);
+  font-size: 0.78em;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-weight: 600;
+}
+.piecestat .v { font-family: var(--mono); font-size: 1.15em; color: var(--text); }
+.piecestat .v.on { color: var(--accent); }
+
+/* ---------------- run report ---------------- */
+
+.repsum { font: 400 0.85em/1.6 var(--mono); color: var(--dim); margin-bottom: 0.5em; }
+.repsum b { font-weight: 600; }
+.repsum .good, .report .good { color: var(--true); }
+.repsum .warn, .report .warn { color: var(--odom); }
+.repsum .bad,  .report .bad  { color: var(--bad); }
+
+table.report { width: 100%; border-collapse: collapse; font: 400 0.8em/1.7 var(--mono); }
+table.report th {
+  text-align: right;
+  color: var(--faint);
+  font: 600 0.92em/1.7 var(--sans);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  border-bottom: 1px solid var(--line);
+}
+table.report th:nth-child(2) { text-align: left; }
+table.report td { text-align: right; color: #C6CBD3; white-space: nowrap; }
+table.report td:nth-child(2) { text-align: left; color: var(--faint); font-family: var(--sans); }
+table.report tr.warn td { color: var(--odom); }
+table.report tr.bad td  { color: var(--bad); }
 
 /* ---------------- narrow and short windows ---------------- */
 
-/* Below this the three columns are each too thin to read, so the side panels
-   move under the field and the page scrolls as one instead. */
 @media (max-width: 900px) {
   html, body { overflow: auto; }
   #app { grid-template-columns: minmax(0, 1fr); height: auto; min-height: 100%; }
@@ -439,48 +722,6 @@ label.inline input[type="checkbox"] { accent-color: var(--accent); margin: 0 0.3
   #left, #right { border: 0; border-top: 1px solid var(--line); }
 }
 
-/* Laptop screens: the field keeps its size and the editor gives up its floor. */
 @media (max-height: 620px) {
   #editor { min-height: 5em; }
 }
-
-/* ---------------------------------------------------------------- report */
-/* Per-motion outcome for the last route run. */
-
-.notes {
-  margin-top: 4px;
-  font: 10px/1.4 ui-monospace, monospace;
-  color: #d19a4a;
-  word-break: break-word;
-}
-
-.repsum {
-  font: 11px/1.5 ui-monospace, monospace;
-  color: #8b93a1;
-  margin-bottom: 6px;
-}
-.repsum b { font-weight: 700; }
-.repsum .good, .report .good { color: #4ade80; }
-.repsum .warn, .report .warn { color: #fbbf24; }
-.repsum .bad,  .report .bad  { color: #f87171; }
-
-table.report {
-  width: 100%;
-  border-collapse: collapse;
-  font: 10px/1.6 ui-monospace, monospace;
-}
-table.report th {
-  text-align: right;
-  color: #6b7280;
-  font-weight: 400;
-  border-bottom: 1px solid #2a2f3a;
-}
-table.report th:nth-child(2) { text-align: left; }
-table.report td {
-  text-align: right;
-  color: #c3c9d4;
-  white-space: nowrap;
-}
-table.report td:nth-child(2) { text-align: left; color: #8b93a1; }
-table.report tr.warn td { color: #fbbf24; }
-table.report tr.bad td  { color: #f87171; }

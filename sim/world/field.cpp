@@ -29,6 +29,19 @@ void Field::addCircle(float x, float y, float r, int kind) {
     mCircles.push_back({x, y, r, kind});
 }
 
+void Field::setDynamic(std::vector<Segment> segs) {
+    mDynamic = std::move(segs);
+}
+
+void Field::clearDynamic() {
+    mDynamic.clear();
+    mDynamicCircles.clear();
+}
+
+void Field::setDynamicCircles(std::vector<Circle> circles) {
+    mDynamicCircles = std::move(circles);
+}
+
 void Field::addBox(float cx, float cy, float w, float h, int kind) {
     const float hw = w * 0.5f, hh = h * 0.5f;
     addSegment(cx - hw, cy - hh, cx + hw, cy - hh, kind);
@@ -48,17 +61,24 @@ void Field::loadDefault() {
     addSegment( kHalf,  kHalf, -kHalf,  kHalf, 0);
     addSegment(-kHalf,  kHalf, -kHalf, -kHalf, 0);
 
-    // The posts are taken verbatim from kFieldPosts in
-    // gamespecific/config.cpp -- your numbers, not guesses.
-    addCircle(-47.0f, -23.5f, 2.0f, 1);
-    addCircle(-23.5f, -47.0f, 2.0f, 1);
-    addCircle( 23.5f,  47.0f, 2.0f, 1);
-    addCircle( 47.0f,  23.5f, 2.0f, 1);
-    addCircle(  0.0f,   0.0f, 2.0f, 1);
-    addCircle(-47.0f,  23.5f, 2.0f, 1);
-    addCircle( 23.5f, -47.0f, 2.0f, 1);
-    addCircle(-23.5f,  47.0f, 2.0f, 1);
-    addCircle( 47.0f, -23.5f, 2.0f, 1);
+    // The nine Goals, in the order and at the positions kFieldPosts in
+    // gamespecific/config.cpp registers them -- your numbers, not guesses.
+    // The radius is 2.85, half the 5.7 in across-flats measured off Figure
+    // FO-2 in the Override manual with the Alliance Goals as scale.
+    //
+    // Kind says which Goal it is, 10 + GoalKind, so the browser can colour
+    // them without a second table: red, blue, neutral short, neutral tall.
+    // Nothing in the physics reads it -- every circle stops a beam and a body.
+    constexpr float kGoalR = 2.85f;
+    addCircle(-47.0f, -23.5f, kGoalR, 10);
+    addCircle(-23.5f, -47.0f, kGoalR, 10);
+    addCircle( 23.5f,  47.0f, kGoalR, 11);
+    addCircle( 47.0f,  23.5f, kGoalR, 11);
+    addCircle(  0.0f,   0.0f, kGoalR, 13);
+    addCircle(-47.0f,  23.5f, kGoalR, 12);
+    addCircle( 23.5f, -47.0f, kGoalR, 12);
+    addCircle(-23.5f,  47.0f, kGoalR, 12);
+    addCircle( 47.0f, -23.5f, kGoalR, 12);
 }
 
 // ============================================================================
@@ -138,23 +158,42 @@ RayHit Field::rayCircle(float ox, float oy, float dc, float ds,
     return out;
 }
 
-RayHit Field::cast(float ox, float oy, float dc, float ds, float maxRange) const {
+RayHit Field::cast(float ox, float oy, float dc, float ds, float maxRange,
+                   unsigned layers) const {
     RayHit best;
     best.dist = maxRange;
 
-    for (const auto& s : mSegments) {
-        const RayHit h = raySegment(ox, oy, dc, ds, s, best.dist);
-        if (h.hit && h.dist < best.dist) best = h;
+    if (layers & CAST_STATIC) {
+        for (const auto& s : mSegments) {
+            const RayHit h = raySegment(ox, oy, dc, ds, s, best.dist);
+            if (h.hit && h.dist < best.dist) best = h;
+        }
+        for (const auto& c : mCircles) {
+            RayHit h = rayCircle(ox, oy, dc, ds, c, best.dist);
+            if (h.hit && h.dist < best.dist) { h.isCircle = true; best = h; }
+        }
     }
-    for (const auto& c : mCircles) {
-        RayHit h = rayCircle(ox, oy, dc, ds, c, best.dist);
-        if (h.hit && h.dist < best.dist) { h.isCircle = true; best = h; }
+    // A robot parked in front of a sensor is the whole reason this exists: the
+    // beam has to stop on it and report its range, exactly as it would stop on
+    // a wall. Nothing downstream is told the difference, which is the point.
+    if (layers & CAST_ROBOTS) {
+        for (const auto& s : mDynamic) {
+            const RayHit h = raySegment(ox, oy, dc, ds, s, best.dist);
+            if (h.hit && h.dist < best.dist) best = h;
+        }
+    }
+    if (layers & CAST_PIECES) {
+        for (const auto& c : mDynamicCircles) {
+            RayHit h = rayCircle(ox, oy, dc, ds, c, best.dist);
+            if (h.hit && h.dist < best.dist) { h.isCircle = true; best = h; }
+        }
     }
     return best;
 }
 
-float Field::raycast(float ox, float oy, float dc, float ds, float maxRange) const {
-    const RayHit h = cast(ox, oy, dc, ds, maxRange);
+float Field::raycast(float ox, float oy, float dc, float ds, float maxRange,
+                     unsigned layers) const {
+    const RayHit h = cast(ox, oy, dc, ds, maxRange, layers);
     return h.hit ? h.dist : maxRange;
 }
 
@@ -213,6 +252,17 @@ bool Field::collidesBody(float x, float y, float cosT, float sinT,
     }
 
     if (!includeObstacles) return false;
+
+    for (const auto& s : mDynamic) {
+        const auto [ax, ay] = toBody(s.x1, s.y1);
+        const auto [bx, by] = toBody(s.x2, s.y2);
+        if (segmentHitsBox(ax, ay, bx, by, halfLen, halfWid)) return true;
+    }
+
+    // mDynamicCircles -- the game pieces -- deliberately do NOT stop the body.
+    // A pin weighs nothing next to a robot; driving over one is something the
+    // routines do on purpose, and a filter that has to survive a beam stopping
+    // on a pin is a different question from the robot being stopped by it.
     for (const auto& c : mCircles) {
         // Post centre in the robot frame, then the nearest point on the body to
         // it. Clamping inside the rectangle gives a zero separation, so a post
@@ -229,6 +279,17 @@ bool Field::collidesBody(float x, float y, float cosT, float sinT,
 Field::Nearest Field::nearest(float x, float y) const {
     Nearest best;
     best.dist = 1e9f;
+
+    auto trySeg = [&](const Segment& s) {
+        const float ex = s.x2 - s.x1, ey = s.y2 - s.y1;
+        const float len2 = ex * ex + ey * ey;
+        float t = (len2 > 1e-9f) ? ((x - s.x1) * ex + (y - s.y1) * ey) / len2 : 0.0f;
+        t = (t < 0.0f) ? 0.0f : (t > 1.0f ? 1.0f : t);
+        const float cx = s.x1 + t * ex, cy = s.y1 + t * ey;
+        const float d = std::sqrt((x - cx) * (x - cx) + (y - cy) * (y - cy));
+        if (d < best.dist) best = {d, cx, cy};
+    };
+    for (const auto& s : mDynamic) trySeg(s);
 
     for (const auto& s : mSegments) {
         const float ex = s.x2 - s.x1, ey = s.y2 - s.y1;

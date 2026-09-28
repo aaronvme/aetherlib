@@ -322,6 +322,10 @@ const METHODS = {
   swingToHeading:  { op: OP.SWING, pos: ['h', 'side'], timeoutAt: 2, params: 'SwingParams' },
   moveRAMSETE:     { op: OP.FOLLOW_PATH, pos: ['path'], timeoutAt: 1, params: 'RAMSETEParams' },
   waitUntilSettled:{ op: OP.WAIT_SETTLED, pos: [] },
+  // Open loop, and the reason it is routable: the match routines drive with
+  // tank/delay pairs, so an editor that dropped them into notes ran a
+  // completely different route from the compiled function it was pasted from.
+  tank:            { op: OP.TANK, pos: ['left', 'right'] },
   setLateralGains: { op: OP.LATERAL_GAINS, pos: ['gains'] },
   setAngularGains: { op: OP.ANGULAR_GAINS, pos: ['gains'] },
 };
@@ -330,7 +334,7 @@ const METHODS = {
 // rather than an error -- unlike a misspelled method, which is a typo worth
 // catching here instead of at the next compile.
 const UNROUTABLE = new Set([
-  'calibrate', 'setPosition', 'setHeading', 'getPose', 'tank', 'arcade',
+  'calibrate', 'setPosition', 'setHeading', 'getPose', 'arcade',
   'curvature', 'isSettled', 'cancelMotion', 'abortMotion', 'waitUntilDist',
   'odom', 'rcl',
   'mcl', 'ekf', 'startTracking', 'stopTracking', 'setPidTuning',

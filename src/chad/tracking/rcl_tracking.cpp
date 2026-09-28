@@ -2,8 +2,18 @@
 
 #include <algorithm>
 #include <cmath>
+#include <mutex>
 
 namespace chad {
+namespace {
+/// Median of a small scratch array, in place.
+float medianOf(float* v, int n) {
+    if (n <= 0) return 0.0f;
+    std::sort(v, v + n);
+    return (n & 1) ? v[n / 2] : 0.5f * (v[n / 2 - 1] + v[n / 2]);
+}
+}  // namespace
+
 float RclTracking::intersectLineSegment(float rx, float ry,
                                          float rCos, float rSin,
                                          float x1, float y1,
@@ -39,24 +49,49 @@ std::pair<int, float> RclTracking::nearestWall(const RclSensor& s) const {
     float minDist = 1e9f;
     int wall = -1;
 
+    // Choose the wall from a point INSIDE the field, whatever the estimate
+    // currently claims. The robot is always inside it, so a beam pointing east
+    // can only be looking at the east wall -- but an estimate that has run out
+    // through a wall reverses that: from x = -180 the west wall is the one
+    // ahead of an east-facing beam, so the solve picks it, computes a
+    // coordinate against the wrong wall, and the recovery it was supposed to
+    // drive lands the pose somewhere else wrong. That is the 69 in residual a
+    // post-wedge used to settle at instead of recovering.
+    //
+    // Clamped to just INSIDE the wall rather than onto it. Exactly on it, the
+    // wall a ray points at sits at distance zero, which fails the `> 0` test
+    // and leaves that ray with no wall at all -- and the ray that loses out is
+    // the one aimed at the near wall, which is the short, unambiguous reading
+    // recovery depends on. A wedged robot had its one good sensor discarded
+    // for that reason and sat 136 in out with nothing to pull it back.
+    constexpr float kInsetIn = 1.0f;
+    const float W = Field::FIELD_HALF_WALL;
+    const float px = clamp(s.worldX, -W + kInsetIn, W - kInsetIn);
+    const float py = clamp(s.worldY, -W + kInsetIn, W - kInsetIn);
+
     if (std::fabs(s.rayCos) > 1e-6f) {
-        float dEast = (Field::FIELD_HALF_WALL - s.worldX) / s.rayCos;
+        float dEast = (W - px) / s.rayCos;
         if (dEast > 0.0f && dEast < minDist) { minDist = dEast; wall = 2; }
 
-        float dWest = (-Field::FIELD_HALF_WALL - s.worldX) / s.rayCos;
+        float dWest = (-W - px) / s.rayCos;
         if (dWest > 0.0f && dWest < minDist) { minDist = dWest; wall = 4; }
     }
 
     if (std::fabs(s.raySin) > 1e-6f) {
-        float dNorth = (Field::FIELD_HALF_WALL - s.worldY) / s.raySin;
+        float dNorth = (W - py) / s.raySin;
         if (dNorth > 0.0f && dNorth < minDist) { minDist = dNorth; wall = 1; }
 
-        float dSouth = (-Field::FIELD_HALF_WALL - s.worldY) / s.raySin;
+        float dSouth = (-W - py) / s.raySin;
         if (dSouth > 0.0f && dSouth < minDist) { minDist = dSouth; wall = 3; }
     }
 
     if (wall < 0) return {-1, 0.0f};
     return {wall, minDist};
+}
+
+bool RclTracking::farSide(float px, float py) const {
+    if (!mConfig.farSideGate) return false;
+    return mConfig.farSideNx * px + mConfig.farSideNy * py > mConfig.farSideD;
 }
 
 RclTracking::RclTracking(OdomTracking& odom, const Config& config)
@@ -68,15 +103,23 @@ RclTracking::~RclTracking() {
 
 void RclTracking::setSensor(int index, pros::Distance* sensor, const Pose& mountOffset) {
     if (index < 0 || index >= MAX_DISTANCE_SENSORS) return;
+    std::lock_guard<pros::Mutex> lock(mMutex);
     mSensors[index].sensor = sensor;
     mSensors[index].mountOffset = mountOffset;
     mSensors[index].enabled = true;
+    mSensors[index].rawMm = -1;
+    mSensors[index].heldMs = 0.0f;
 }
 
 void RclTracking::configureSensors(const std::array<pros::Distance*, MAX_DISTANCE_SENSORS>& sensors,
                                      const std::array<Pose, MAX_DISTANCE_SENSORS>& mounts) {
     int activeCount = 0;
+    std::lock_guard<pros::Mutex> lock(mMutex);
     for (int i = 0; i < MAX_DISTANCE_SENSORS; i++) {
+        mSensors[i].rawMm = -1;
+        mSensors[i].heldMs = 0.0f;
+        mSensors[i].fresh = false;
+        mSensors[i].cls = ReadingClass::Invalid;
         if (sensors[i] != nullptr) {
             mSensors[i].sensor       = sensors[i];
             mSensors[i].mountOffset  = mounts[i];
@@ -91,46 +134,172 @@ void RclTracking::configureSensors(const std::array<pros::Distance*, MAX_DISTANC
         }
     }
 
-    mConfig.sensorCount = (activeCount > 0) ? activeCount : 1;
+    // A count, not a loop bound. Every walk below covers all the slots and
+    // skips the empty ones, so a config that leaves a hole -- ports 0, 1, 2 and
+    // 5 populated, say -- is read in full instead of stopping at slot 3 and
+    // calling an empty one a sensor.
+    mConfig.sensorCount = activeCount;
 }
 
 void RclTracking::enableSensor(int index) {
     if (index < 0 || index >= MAX_DISTANCE_SENSORS) return;
+    std::lock_guard<pros::Mutex> lock(mMutex);
     mSensors[index].enabled = true;
 }
 
 void RclTracking::disableSensor(int index) {
     if (index < 0 || index >= MAX_DISTANCE_SENSORS) return;
+    std::lock_guard<pros::Mutex> lock(mMutex);
     mSensors[index].enabled = false;
 }
 
 void RclTracking::disableSensorFor(int index, float durationMs) {
     if (index < 0 || index >= MAX_DISTANCE_SENSORS) return;
+    std::lock_guard<pros::Mutex> lock(mMutex);
     mSensors[index].enabled = false;
     mDisableTimers[index] = durationMs;
 }
 
 void RclTracking::addLineObstacle(float x1, float y1, float x2, float y2, float lifetimeMs) {
+    std::lock_guard<pros::Mutex> lock(mMutex);
     mLineObstacles.push_back({x1, y1, x2, y2, lifetimeMs});
 }
 
 void RclTracking::addCircleObstacle(float x, float y, float radius, float lifetimeMs) {
+    std::lock_guard<pros::Mutex> lock(mMutex);
     mCircleObstacles.push_back({x, y, radius, lifetimeMs});
 }
 
 void RclTracking::clearObstacles() {
+    std::lock_guard<pros::Mutex> lock(mMutex);
     mLineObstacles.clear();
     mCircleObstacles.clear();
+}
+
+void RclTracking::armFarSideLocked(float nx, float ny, float d, float lifetimeMs) {
+    const float len = std::hypot(nx, ny);
+    if (len < 1e-6f) return;
+    mConfig.farSideNx = nx / len;
+    mConfig.farSideNy = ny / len;
+    mConfig.farSideD = d / len;
+    mConfig.farSideGate = true;
+    mFarSideTimer = lifetimeMs;
+}
+
+void RclTracking::clearFarSideLocked() {
+    mConfig.farSideGate = false;
+    mFarSideTimer = 0.0f;
+}
+
+void RclTracking::setFarSideGate(float nx, float ny, float d, float lifetimeMs) {
+    std::lock_guard<pros::Mutex> lock(mMutex);
+    armFarSideLocked(nx, ny, d, lifetimeMs);
+}
+
+void RclTracking::setFarSideGateFromLine(float x1, float y1, float x2, float y2,
+                                         float lifetimeMs) {
+    // Normal of the segment, either orientation.
+    float nx = -(y2 - y1);
+    float ny =  (x2 - x1);
+    const float len = std::hypot(nx, ny);
+    if (len < 1e-6f) return;
+    nx /= len;
+    ny /= len;
+    const float d = nx * x1 + ny * y1;
+
+    // Point it away from wherever the robot is now, so the half it keeps is the
+    // half it is standing in. Nothing here needs to know the alliance.
+    const Pose p = mOdom.getPose();
+    if (nx * p.x + ny * p.y > d) { nx = -nx; ny = -ny; }
+
+    std::lock_guard<pros::Mutex> lock(mMutex);
+    armFarSideLocked(nx, ny, nx * x1 + ny * y1, lifetimeMs);
+}
+
+void RclTracking::clearFarSideGate() {
+    std::lock_guard<pros::Mutex> lock(mMutex);
+    clearFarSideLocked();
+}
+
+void RclTracking::setConfig(const Config& config) {
+    std::lock_guard<pros::Mutex> lock(mMutex);
+
+    const int count = mConfig.sensorCount;
+    const bool gate = mConfig.farSideGate;
+    const float gnx = mConfig.farSideNx, gny = mConfig.farSideNy;
+    const float gd = mConfig.farSideD;
+
+    mConfig = config;
+
+    mConfig.sensorCount = count;
+    // The gate is match state, not tuning. It is armed by the routine and
+    // expires on its own clock, so a Config written over the top of it -- which
+    // is what every slider in the simulator does -- must not take it down.
+    mConfig.farSideGate = gate;
+    mConfig.farSideNx = gnx;
+    mConfig.farSideNy = gny;
+    mConfig.farSideD = gd;
+}
+
+void RclTracking::setAutoSync(bool enabled) {
+    std::lock_guard<pros::Mutex> lock(mMutex);
+    mConfig.autoSync = enabled;
+}
+
+bool RclTracking::readDevices() {
+    bool anyFresh = false;
+
+    for (int i = 0; i < MAX_DISTANCE_SENSORS; i++) {
+        auto& s = mSensors[i];
+        if (s.sensor == nullptr || !s.enabled) {
+            s.fresh = false;
+            continue;
+        }
+
+        const int readingMm = s.sensor->get();
+
+        // The device holds its last value between its own refreshes -- about
+        // every 30 ms against this loop's 10 -- so an unchanged raw reading is
+        // the signature of a sample already counted. Folding it in again lets
+        // one physical measurement vote three times, which triples the
+        // effective sync rate and makes the noise look three times more
+        // consistent than it is.
+        //
+        // A value that genuinely has not moved for staleHoldMs is let through
+        // again: a robot sitting still against a wall reports the same
+        // millimetre for as long as you leave it there, and refusing that would
+        // blind the filter exactly where it is most sure of itself.
+        if (readingMm != s.rawMm) {
+            s.fresh = true;
+            s.heldMs = 0.0f;
+        } else {
+            s.heldMs += mConfig.updatePeriodMs;
+            if (mConfig.staleHoldMs > 0.0f && s.heldMs >= mConfig.staleHoldMs) {
+                s.fresh = true;
+                s.heldMs = 0.0f;
+            } else {
+                s.fresh = false;
+            }
+        }
+        s.rawMm = readingMm;
+        s.readingInch = readingMm * MM_TO_INCH;
+        s.confidence = s.sensor->get_confidence();
+        if (s.fresh) anyFresh = true;
+    }
+
+    return anyFresh;
 }
 
 void RclTracking::updateSensorPoses(const Pose& robotPose) {
     float rCos = std::cos(robotPose.theta);
     float rSin = std::sin(robotPose.theta);
 
-    for (int i = 0; i < mConfig.sensorCount; i++) {
+    for (int i = 0; i < MAX_DISTANCE_SENSORS; i++) {
         auto& s = mSensors[i];
-        if (!s.enabled || s.sensor == nullptr) {
+        if (s.sensor == nullptr || !s.enabled) {
             s.valid = false;
+            s.fresh = false;
+            s.cls = ReadingClass::Invalid;
             continue;
         }
 
@@ -141,57 +310,86 @@ void RclTracking::updateSensorPoses(const Pose& robotPose) {
         s.worldHeading = sensorWorldAngle;
         s.rayCos = std::cos(sensorWorldAngle);
         s.raySin = std::sin(sensorWorldAngle);
-
-        int readingMm = s.sensor->get();
-        s.readingInch = readingMm * MM_TO_INCH;
-        s.confidence = s.sensor->get_confidence();
-
-        s.valid = isValidReading(i);
     }
-}
 
-bool RclTracking::isValidReading(int index) const {
-    float wallDist = 0.0f;
-    ReadingClass c = classifyReading(index, wallDist);
+    classifyAll();
+    checkPairs();
 
-    if (c == ReadingClass::WallHit) return true;
-    return mDisplaced && (c == ReadingClass::TooFar || c == ReadingClass::Blocked);
+    for (int i = 0; i < MAX_DISTANCE_SENSORS; i++) {
+        mSensors[i].valid = isValidReading(i);
+    }
 }
 
 RclTracking::ReadingClass RclTracking::classifyReading(int index, float& wallDist) const {
     wallDist = 0.0f;
+    if (index < 0 || index >= MAX_DISTANCE_SENSORS) return ReadingClass::Invalid;
     const auto& s = mSensors[index];
     if (!s.enabled || s.sensor == nullptr) return ReadingClass::Invalid;
+
+    // A cone that is sweeping cannot be pinned to one heading, and the smear is
+    // common to every sensor, so the gate suppresses the cycle rather than
+    // picking winners inside it.
+    if (mTurnHeld) return ReadingClass::Turning;
+
+    if (!s.fresh) return ReadingClass::Stale;
 
     float readingInch = s.readingInch;
     if (readingInch < 1.0f * MM_TO_INCH) return ReadingClass::Invalid;
 
     if (readingInch > 2000.0f * MM_TO_INCH) {
-        float range = 0.0f;
-        auto [w, d] = nearestWall(s);
-        range = d;
-        if (w >= 0 && range < mConfig.noReturnWallLimit) return ReadingClass::Impossible;
+        auto [w, range] = nearestWall(s);
+        // Silence with a wall well inside reach is itself a measurement: the
+        // wall is not where the pose says it is.
+        if (w >= 0 && range < mConfig.noReturnWallLimit) {
+            // Unless the gate says we should not have been looking there.
+            if (farSide(s.worldX + s.rayCos * range, s.worldY + s.raySin * range)) {
+                return ReadingClass::FarSide;
+            }
+            return ReadingClass::Impossible;
+        }
         return ReadingClass::Invalid;
     }
 
     if (readingInch > 200.0f * MM_TO_INCH && s.confidence < mConfig.confidenceThreshold) {
-        return ReadingClass::Invalid;
+        return ReadingClass::LowConfidence;
     }
 
     float angleTolRad = degToRad(mConfig.angleTolerance);
     float angleMod = std::fmod(std::fabs(s.worldHeading), HALF_PI);
     if (angleMod > angleTolRad && angleMod < HALF_PI - angleTolRad) {
-        return ReadingClass::Invalid;
+        return ReadingClass::OffAxis;
     }
 
     auto [wall, wallRange] = nearestWall(s);
     if (wall < 0) return ReadingClass::Invalid;
     wallDist = wallRange;
 
+    // The return itself, not the wall behind it: a reading that lands across
+    // the auton line is ranging one of the two robots over there.
+    if (farSide(s.worldX + s.rayCos * readingInch,
+                s.worldY + s.raySin * readingInch)) {
+        return ReadingClass::FarSide;
+    }
+
+    // The post map, applied whatever state the filter is in -- including a
+    // recovery, where the pose it is evaluated against is known to be wrong.
+    //
+    // Suspending it during a recovery was tried, on the reasoning that a wrong
+    // pose puts the posts in the wrong places and the test only costs readings.
+    // It does cost readings -- a pose 34 in out put a post in front of all four
+    // beams at once and left the recovery with nothing -- but suspending it was
+    // measurably worse: the filter recovered onto a post and settled 14 in from
+    // the truth calling itself healthy, where keeping it leaves the pose 34 in
+    // out and still flying the recovery flag.
+    //
+    // Wrong and quiet loses matches; wrong and loud does not. The beam reset in
+    // the routines scores every reading against this same map at once and can
+    // tell a post from a wall, which is the tool for the job, and isDisplaced()
+    // is what tells it to run.
     for (const auto& obs : mLineObstacles) {
         float dist = intersectLineSegment(s.worldX, s.worldY, s.rayCos, s.raySin,
-                                           obs.x1, obs.y1, obs.x2, obs.y2, wallRange);
-        if (dist < wallRange) return ReadingClass::Invalid;
+                                          obs.x1, obs.y1, obs.x2, obs.y2, wallRange);
+        if (dist < wallRange) return ReadingClass::PostOwned;
     }
 
     for (const auto& obs : mCircleObstacles) {
@@ -204,10 +402,10 @@ RclTracking::ReadingClass RclTracking::classifyReading(int index, float& wallDis
 
         const float postRange = std::sqrt(ox * ox + oy * oy) - obs.radius;
         if (std::fabs(readingInch - postRange) <= mConfig.obstacleRangeTol) {
-            return ReadingClass::Invalid;
+            return ReadingClass::PostOwned;
         }
         if (postRange > 0.0f && postRange + mConfig.obstacleRangeTol < wallRange) {
-            return ReadingClass::Invalid;
+            return ReadingClass::PostOwned;
         }
     }
 
@@ -222,7 +420,104 @@ RclTracking::ReadingClass RclTracking::classifyReading(int index, float& wallDis
     return ReadingClass::WallHit;
 }
 
+void RclTracking::classifyAll() {
+    for (int i = 0; i < MAX_DISTANCE_SENSORS; i++) {
+        auto& s = mSensors[i];
+        s.pairVerified = false;
+        s.outlier = false;
+        if (s.sensor == nullptr || !s.enabled) {
+            s.cls = ReadingClass::Invalid;
+            s.innovationIn = 0.0f;
+            continue;
+        }
+        // A sensor with nothing new keeps the verdict it already had. It cannot
+        // vote either way -- voteTier() requires a fresh sample -- so
+        // reclassifying it would only replace a useful answer with "no new
+        // sample" on most cycles, which is what made the diagnostics flicker
+        // rather than read.
+        if (!s.fresh) continue;
+
+        float wallDist = 0.0f;
+        s.cls = classifyReading(i, wallDist);
+        s.innovationIn = (wallDist > 0.0f) ? (s.readingInch - wallDist) : 0.0f;
+    }
+}
+
+int RclTracking::voteTier(int index) const {
+    if (index < 0 || index >= MAX_DISTANCE_SENSORS) return -1;
+    const auto& s = mSensors[index];
+    if (s.sensor == nullptr || !s.enabled) return -1;
+    // One physical sample, one vote. Without this a 30 ms device feeding a
+    // 10 ms loop is counted three times.
+    if (!s.fresh) return -1;
+
+    // An opposing pair that spans the field is right about the wall whatever
+    // the estimate thinks -- which is the whole point of checking it, and why
+    // it outranks the innovation gate that would otherwise throw it away for
+    // disagreeing with the pose that is itself the thing in the wrong.
+    if (s.pairVerified) return 2;
+    if (s.cls == ReadingClass::WallHit) return 1;
+
+    // Readings the innovation gate rejected. While the pose is known to be
+    // wrong that gate is meaningless -- it is measuring against the very thing
+    // under suspicion -- so these become usable, but only as a last resort:
+    // an axis that still has a clean reading uses that instead. Mixing the two
+    // is what made a wedged robot worse rather than better, because the beam
+    // ranging a post outvoted the one ranging the wall.
+    if (mDisplaced && (s.cls == ReadingClass::TooFar ||
+                       s.cls == ReadingClass::Blocked)) return 0;
+    return -1;
+}
+
+void RclTracking::checkPairs() {
+    // Two beams pointing opposite ways along one axis must span the field
+    // between them. That identity involves the difference of their two origins,
+    // which depends on the heading and the mount offsets but NOT on where the
+    // robot is -- so a pair that spans correctly is confirmed without ever
+    // consulting the estimate it is about to correct. It is the only check here
+    // a wrong pose cannot talk its way through.
+    const float span = 2.0f * Field::FIELD_HALF_WALL;
+
+    for (int i = 0; i < MAX_DISTANCE_SENSORS; i++) {
+        auto& a = mSensors[i];
+        if (a.sensor == nullptr || !a.enabled) continue;
+        if (a.cls != ReadingClass::WallHit && a.cls != ReadingClass::TooFar &&
+            a.cls != ReadingClass::Blocked) continue;
+
+        for (int j = i + 1; j < MAX_DISTANCE_SENSORS; j++) {
+            auto& b = mSensors[j];
+            if (b.sensor == nullptr || !b.enabled) continue;
+            if (b.cls != ReadingClass::WallHit && b.cls != ReadingClass::TooFar &&
+                b.cls != ReadingClass::Blocked) continue;
+
+            const float dot = a.rayCos * b.rayCos + a.raySin * b.raySin;
+            if (dot > -0.98f) continue;
+
+            float measured;
+            if (std::fabs(a.rayCos) > 0.7f) {
+                measured = a.readingInch * a.rayCos - b.readingInch * b.rayCos
+                         + (a.worldX - b.worldX);
+            } else if (std::fabs(a.raySin) > 0.7f) {
+                measured = a.readingInch * a.raySin - b.readingInch * b.raySin
+                         + (a.worldY - b.worldY);
+            } else {
+                continue;
+            }
+
+            if (std::fabs(std::fabs(measured) - span) <= mConfig.pairSpanTolIn) {
+                a.pairVerified = true;
+                b.pairVerified = true;
+            }
+        }
+    }
+}
+
+bool RclTracking::isValidReading(int index) const {
+    return voteTier(index) >= 0;
+}
+
 std::pair<CoordType, float> RclTracking::getBotCoordFromSensor(int index) const {
+    if (index < 0 || index >= MAX_DISTANCE_SENSORS) return {CoordType::INVALID, 0.0f};
     const auto& s = mSensors[index];
     if (!isValidReading(index)) return {CoordType::INVALID, 0.0f};
 
@@ -250,7 +545,10 @@ std::pair<CoordType, float> RclTracking::getBotCoordFromSensor(int index) const 
         result = -Field::FIELD_HALF_WALL - cosA * reading;
     }
 
-    float robotHeading = mOdom.getPose().theta;
+    // Back out the mount offset in the SAME frame the geometry above was built
+    // in. updateSensorPoses ran against the pose at sample time, so the heading
+    // used here has to be that one too, not whatever the IMU says now.
+    float robotHeading = s.worldHeading - s.mountOffset.theta;
     float rCos = std::cos(robotHeading);
     float rSin = std::sin(robotHeading);
     float offX = s.mountOffset.x * rCos - s.mountOffset.y * rSin;
@@ -262,28 +560,106 @@ std::pair<CoordType, float> RclTracking::getBotCoordFromSensor(int index) const 
     return {type, result};
 }
 
-RclTracking::AxisEstimate RclTracking::estimateAxes() const {
-    float sumX = 0.0f, sumY = 0.0f;
-    int xCount = 0, yCount = 0;
+RclTracking::AxisEstimate RclTracking::solveAxes(bool* keptOut) const {
+    if (keptOut != nullptr) {
+        for (int i = 0; i < MAX_DISTANCE_SENSORS; i++) keptOut[i] = false;
+    }
 
-    for (int i = 0; i < mConfig.sensorCount; i++) {
+    float xVal[MAX_DISTANCE_SENSORS], yVal[MAX_DISTANCE_SENSORS];
+    int xIdx[MAX_DISTANCE_SENSORS], yIdx[MAX_DISTANCE_SENSORS];
+    int xTier[MAX_DISTANCE_SENSORS], yTier[MAX_DISTANCE_SENSORS];
+    int nx = 0, ny = 0;
+    int xBest = -1, yBest = -1;
+
+    for (int i = 0; i < MAX_DISTANCE_SENSORS; i++) {
+        if (mSensors[i].sensor == nullptr) continue;
+        const int tier = voteTier(i);
+        if (tier < 0) continue;
         auto [type, coord] = getBotCoordFromSensor(i);
         if (type == CoordType::X) {
-            sumX += coord;
-            xCount++;
+            xVal[nx] = coord; xIdx[nx] = i; xTier[nx] = tier; nx++;
+            if (tier > xBest) xBest = tier;
         } else if (type == CoordType::Y) {
-            sumY += coord;
-            yCount++;
+            yVal[ny] = coord; yIdx[ny] = i; yTier[ny] = tier; ny++;
+            if (tier > yBest) yBest = tier;
         }
     }
 
-    AxisEstimate est;
-    est.xCount = xCount;
-    est.yCount = yCount;
+    // Best evidence only, then a median filter inside it.
+    //
+    // The tiers matter more than the median does. Averaging a pair-verified
+    // reading with an unverified one dilutes the only measurement on the robot
+    // that does not depend on the pose being corrected; averaging a clean wall
+    // hit with one the innovation gate rejected is worse still, because during
+    // a recovery the rejected one is usually a beam ranging a post.
+    //
+    // Within a tier, median-then-drop rather than a plain mean: one beam that
+    // clipped a robot would otherwise pull the axis by half its error, and with
+    // two sensors per axis the mean of a good reading and a blocked one looks
+    // like a slightly-off pose rather than a rejected sample. Two readings that
+    // disagree leave the axis with nothing, which is the honest answer -- one
+    // of them is wrong and this cannot tell which.
+    auto reduce = [&](float* val, int* idx, int* tier, int n, int best,
+                      float& outVal, int& outCount, float& outSpread) {
+        outCount = 0;
+        outSpread = 0.0f;
+        if (n <= 0 || best < 0) return;
 
-    est.x = (xCount > 0) ? sumX / static_cast<float>(xCount) : mOdom.getPose().x;
-    est.y = (yCount > 0) ? sumY / static_cast<float>(yCount) : mOdom.getPose().y;
+        float keep[MAX_DISTANCE_SENSORS];
+        int keepIdx[MAX_DISTANCE_SENSORS];
+        int nk = 0;
+        for (int k = 0; k < n; k++) {
+            if (tier[k] != best) continue;
+            keep[nk] = val[k]; keepIdx[nk] = idx[k]; nk++;
+        }
+        if (nk <= 0) return;
+
+        if (nk > 1) {
+            float scratch[MAX_DISTANCE_SENSORS];
+            for (int k = 0; k < nk; k++) scratch[k] = keep[k];
+            const float med = medianOf(scratch, nk);
+            int w = 0;
+            for (int k = 0; k < nk; k++) {
+                if (std::fabs(keep[k] - med) > mConfig.axisAgreeIn) continue;
+                keep[w] = keep[k]; keepIdx[w] = keepIdx[k]; w++;
+            }
+            nk = w;
+        }
+        if (nk <= 0) return;
+
+        float sum = 0.0f, lo = keep[0], hi = keep[0];
+        for (int k = 0; k < nk; k++) {
+            sum += keep[k];
+            lo = std::fmin(lo, keep[k]);
+            hi = std::fmax(hi, keep[k]);
+            if (keptOut != nullptr) keptOut[keepIdx[k]] = true;
+        }
+        outVal = sum / static_cast<float>(nk);
+        outCount = nk;
+        outSpread = hi - lo;
+    };
+
+    AxisEstimate est;
+    const Pose fallback = mOdom.getPose();
+    est.x = fallback.x;
+    est.y = fallback.y;
+    reduce(xVal, xIdx, xTier, nx, xBest, est.x, est.xCount, est.xSpread);
+    reduce(yVal, yIdx, yTier, ny, yBest, est.y, est.yCount, est.ySpread);
+    est.xPaired = (xBest == 2 && est.xCount > 0);
+    est.yPaired = (yBest == 2 && est.yCount > 0);
+
+    // The solve ran against the pose at sample time; carry the answer forward
+    // by whatever the robot did while the reading was in flight, so what comes
+    // out is an estimate of where it is NOW and syncUpdate differences like
+    // with like.
+    if (est.xCount > 0) est.x += mLagShiftX;
+    if (est.yCount > 0) est.y += mLagShiftY;
+
     return est;
+}
+
+RclTracking::AxisEstimate RclTracking::estimateAxes() const {
+    return solveAxes(nullptr);
 }
 
 std::pair<Pose, int> RclTracking::computePose() const {
@@ -295,6 +671,8 @@ std::pair<Pose, int> RclTracking::computePose() const {
 }
 
 void RclTracking::update() {
+    std::lock_guard<pros::Mutex> lock(mMutex);
+
     for (int i = 0; i < MAX_DISTANCE_SENSORS; i++) {
         if (mDisableTimers[i] > 0.0f) {
             mDisableTimers[i] -= mConfig.updatePeriodMs;
@@ -305,30 +683,155 @@ void RclTracking::update() {
         }
     }
 
-    Pose currentPose = mOdom.getPose();
-    updateSensorPoses(currentPose);
+    if (mConfig.farSideGate && mFarSideTimer > 0.0f) {
+        mFarSideTimer -= mConfig.updatePeriodMs;
+        if (mFarSideTimer <= 0.0f) clearFarSideLocked();
+    }
 
+    const Pose currentPose = mOdom.getPose();
+    const float dtSec = mConfig.updatePeriodMs / 1000.0f;
+
+    // Motion, from successive poses, MINUS whatever the last sync put there.
+    // Odometry moves for two reasons -- the robot drove, and this filter
+    // corrected it -- and only the first is velocity. During a recovery the
+    // correction is up to maxSyncDist every 10 ms, which reads as 500 in/s and
+    // feeds the latency compensation a 15 in shift built entirely out of the
+    // filter watching itself work.
+    //
+    // Low-passed hard on top of that: a 10 ms difference of a pose quantised to
+    // encoder ticks is mostly quantisation.
+    if (mHavePrevPose && dtSec > 1e-6f) {
+        const float k = 0.25f;
+        const float dxDriven = (currentPose.x - mPrevPose.x) - mAppliedDx;
+        const float dyDriven = (currentPose.y - mPrevPose.y) - mAppliedDy;
+        mVelX += k * (dxDriven / dtSec - mVelX);
+        mVelY += k * (dyDriven / dtSec - mVelY);
+        const float omega = angleDiffRad(currentPose.theta, mPrevPose.theta) / dtSec;
+        mTurnRate += k * (std::fabs(omega) - mTurnRate);
+    }
+    mPrevPose = currentPose;
+    mHavePrevPose = true;
+    mAppliedDx = mAppliedDy = 0.0f;
+
+    mTurnHeld = mConfig.maxTurnRateRadS > 0.0f && mTurnRate > mConfig.maxTurnRateRadS;
+
+    // Roll the pose back to when the light actually left, solve there, and let
+    // solveAxes carry the answer forward by the same amount.
+    const float lagSec = mConfig.sensorLatencyMs / 1000.0f;
+    Pose samplePose = currentPose;
+    if (lagSec > 0.0f) {
+        samplePose.x -= mVelX * lagSec;
+        samplePose.y -= mVelY * lagSec;
+    }
+    mLagShiftX = currentPose.x - samplePose.x;
+    mLagShiftY = currentPose.y - samplePose.y;
+
+    if (!readDevices()) {
+        // Nothing new arrived. Every reported number below -- the classes, the
+        // vote count, the spread -- belongs to the last cycle that had real
+        // data, and recomputing them from a held sample would say the same
+        // thing while letting that one sample vote a second and third time.
+        // Leaving them alone is both the honest answer and the stable one: the
+        // diagnostics stop flickering between a verdict and "no new sample" two
+        // frames in three.
+        mLastSyncStep = 0.0f;
+        return;
+    }
+
+    updateSensorPoses(samplePose);
+
+    // Displacement evidence. Only cycles that saw new samples are counted, so
+    // the recovery timers are measured in readings rather than in loop ticks.
     int evidence = 0;
-    for (int i = 0; i < mConfig.sensorCount; i++) {
-        float wallDist = 0.0f;
-        switch (classifyReading(i, wallDist)) {
+    for (int i = 0; i < MAX_DISTANCE_SENSORS; i++) {
+        const auto& s = mSensors[i];
+        if (s.sensor == nullptr || !s.enabled) continue;
+        // Scale with how badly the reading misses. A beam 9 in out on an 8 in
+        // gate is noise at the edge of a threshold; one 125 in out is the pose
+        // being somewhere else entirely, and waiting for a second sensor to
+        // agree before admitting that wastes the only cycles there are.
+        const float gross = 4.0f * mConfig.maxWallInnovation;
+        const bool huge = std::fabs(s.innovationIn) > gross;
+
+        switch (s.cls) {
             case ReadingClass::TooFar:     evidence += 2; break;
+            // A pose that has run PAST the truth reads long; one that has
+            // fallen short reads short. Scoring only the first meant a robot
+            // wedged against a post -- drive wheels turning, body not moving,
+            // odom running ahead of it -- recovered, but the same robot pushed
+            // backwards never did.
+            case ReadingClass::Blocked:    evidence += huge ? 2 : 1; break;
             case ReadingClass::Impossible: evidence += 1; break;
             default: break;
         }
     }
-    mDisplaceCycles = (evidence >= 2) ? (mDisplaceCycles + 1) : 0;
-    if (mDisplaceCycles >= mConfig.displaceCycles) {
-        mDisplaced = true;
-    } else if (evidence == 0) {
-        mDisplaced = false;
+
+    // One sensor disagreeing by a moderate amount, however long it keeps
+    // saying so, is NOT evidence of a displacement. A beam reading 15 in short
+    // of the wall is a robot parked in front of it just as readily as it is a
+    // 15 in pose error, and no amount of repetition separates the two: the
+    // parked robot goes on reading the same 15 in. Treating persistence as
+    // proof was measured relocating the pose 15.7 in onto an alliance partner
+    // standing against a wall -- the filter driving itself into the exact
+    // failure the innovation gate exists to prevent.
+    //
+    // So the bar stays at two: either two sensors disagree at once, or one
+    // disagrees grossly (see the magnitude weighting above), which no
+    // obstruction inside the field can produce. Everything short of that holds
+    // the pose and drops the reading, and the honest fixes for a genuine small
+    // error are the other axis, or a beam reset that scores against the map.
+    if (evidence >= 2) {
+        mDisplaceCycles++;
+        if (mDisplaceCycles >= mConfig.displaceCycles) mDisplaced = true;
+    } else {
+        mDisplaceCycles = 0;
     }
 
-    AxisEstimate est = estimateAxes();
+    // Leaving a recovery is decided by convergence, never by the readings
+    // agreeing again. Two reasons, and both of them were measured:
+    //
+    // Agreement is not recovery. nearestWall() reads the walls from a position
+    // clamped into the field, so a pose that has run outside it predicts a wall
+    // about an inch away and then agrees with any sensor that really is near
+    // one -- evidence falls to zero while the pose is still most of a field
+    // out, and the recovery ends before it has done anything.
+    //
+    // And disagreement is not proof it is still needed. A recovery suspends the
+    // post-occlusion test, so the beams that really are ranging posts start
+    // reading short, which scores as evidence, which holds the recovery open,
+    // which keeps the test suspended. That loop never exits on its own: the
+    // pose came back to 0.4 in and the filter was still calling itself lost.
+    //
+    // Odometry having caught up with what this filter believes is the whole
+    // definition of the job being done, and it cannot latch.
+    const float dx = mLatestEstimate.x - currentPose.x;
+    const float dy = mLatestEstimate.y - currentPose.y;
+    if (std::hypot(dx, dy) < mConfig.maxSyncDist) {
+        mCleanCycles++;
+        // Hysteresis. Leaving on a single clean reading made the filter flap
+        // between a 0.25 and a 0.9 sync proportion, which reads as the pose
+        // twitching rather than converging.
+        if (mDisplaced && mCleanCycles >= mConfig.recoverCycles) {
+            mDisplaced = false;
+            mDisplaceCycles = 0;
+        }
+    } else {
+        mCleanCycles = 0;
+    }
+
+    bool kept[MAX_DISTANCE_SENSORS];
+    AxisEstimate est = solveAxes(kept);
+    for (int i = 0; i < MAX_DISTANCE_SENSORS; i++) {
+        auto& s = mSensors[i];
+        s.outlier = !kept[i] && isValidReading(i) &&
+                    getBotCoordFromSensor(i).first != CoordType::INVALID;
+    }
+
     mXMeasured = est.xCount > 0;
     mYMeasured = est.yCount > 0;
     int sensorCount = est.xCount + est.yCount;
     mActiveSensorCount = sensorCount;
+    mSpreadIn = std::fmax(est.xSpread, est.ySpread);
 
     if (sensorCount > 0) {
         if (mConfig.useAccumulation) {
@@ -346,6 +849,15 @@ void RclTracking::update() {
             mLatestEstimate.y = mYMeasured ? est.y : currentPose.y;
         }
         mLatestEstimate.theta = currentPose.theta;
+    }
+
+    // While recovering, an axis may only move the pose if enough sensors agree
+    // on it. The snap is hard and unbounded, and the readings feeding it are
+    // ones the innovation gate had already rejected -- one of those on its own
+    // is as likely to be a robot parked in front of the sensor as a wall.
+    if (mDisplaced) {
+        if (est.xCount < mConfig.recoveryMinVotes && !est.xPaired) mXMeasured = false;
+        if (est.yCount < mConfig.recoveryMinVotes && !est.yPaired) mYMeasured = false;
     }
 
     for (auto& o : mLineObstacles) {
@@ -370,13 +882,20 @@ void RclTracking::update() {
                        [](const CircleObstacle& o) { return o.lifetimeMs < 0.0f; }),
         mCircleObstacles.end());
 
-    if (mConfig.autoSync && sensorCount >= 1) {
-        syncUpdate();
+    if (mConfig.autoSync && (mXMeasured || mYMeasured)) {
+        syncUpdateLocked();
+    } else {
+        mLastSyncStep = 0.0f;
     }
 }
 
 void RclTracking::syncUpdate() {
-    if (mActiveSensorCount == 0) return;
+    std::lock_guard<pros::Mutex> lock(mMutex);
+    syncUpdateLocked();
+}
+
+void RclTracking::syncUpdateLocked() {
+    if (!mXMeasured && !mYMeasured) { mLastSyncStep = 0.0f; return; }
 
     Pose odomPose = mOdom.getPose();
 
@@ -384,19 +903,34 @@ void RclTracking::syncUpdate() {
                      : (mDisplaced ? mConfig.recoverySyncProp : mConfig.syncProp);
 
     const float rateStep = mConfig.maxSyncRate * (mConfig.updatePeriodMs / 1000.0f);
-    const float maxStep = (mDisplaced || mConfig.hardSync)
+    // Recovery is fast but not instant. maxSyncDist per reading crosses the
+    // whole field in well under a second, which is quick enough inside a 15 s
+    // routine, while a single wrong reading can only move the pose that far
+    // before the next one gets a say. Teleporting it -- which an unbounded step
+    // does -- means one beam that caught a robot relocates the robot.
+    const float maxStep = mConfig.hardSync
                               ? Field::FIELD_LENGTH
-                              : std::min(mConfig.maxSyncDist, rateStep);
+                              : (mDisplaced ? mConfig.maxSyncDist
+                                            : std::min(mConfig.maxSyncDist, rateStep));
 
-    float dx = mXMeasured ? (mLatestEstimate.x - odomPose.x) * prop : 0.0f;
-    float dy = mYMeasured ? (mLatestEstimate.y - odomPose.y) * prop : 0.0f;
+    mLastResidualX = mXMeasured ? (mLatestEstimate.x - odomPose.x) : 0.0f;
+    mLastResidualY = mYMeasured ? (mLatestEstimate.y - odomPose.y) : 0.0f;
+
+    float dx = mLastResidualX * prop;
+    float dy = mLastResidualY * prop;
     float dist = std::hypot(dx, dy);
 
     if (dist > maxStep) {
         float scale = maxStep / dist;
         dx *= scale;
         dy *= scale;
+        dist = maxStep;
     }
+    mLastSyncStep = dist;
+    // Remembered so the next cycle can tell this correction apart from the
+    // robot actually moving.
+    mAppliedDx = dx;
+    mAppliedDy = dy;
 
     mOdom.syncPose({
         odomPose.x + dx,
@@ -406,12 +940,23 @@ void RclTracking::syncUpdate() {
 }
 
 bool RclTracking::updateBotPoseFromBestSensor() {
+    std::lock_guard<pros::Mutex> lock(mMutex);
+
+    // A one-shot outside the loop, so it has to poll the devices itself --
+    // updateSensorPoses only lays out the geometry now.
+    readDevices();
+    // Whatever the device last reported is the best that is available to a
+    // caller asking for a fix right now; refusing it for being the same value
+    // as last cycle would make this return false for a stationary robot, which
+    // is the one case it is most often called in.
+    for (auto& s : mSensors) if (s.sensor != nullptr && s.enabled) s.fresh = true;
     updateSensorPoses(mOdom.getPose());
 
     int bestIndex = -1;
     float bestDist = 999.0f;
 
-    for (int i = 0; i < mConfig.sensorCount; i++) {
+    for (int i = 0; i < MAX_DISTANCE_SENSORS; i++) {
+        if (mSensors[i].sensor == nullptr) continue;
         if (isValidReading(i)) {
             float dist = mSensors[i].readingInch;
             if (dist < bestDist) {
@@ -436,10 +981,59 @@ bool RclTracking::updateBotPoseFromBestSensor() {
     return true;
 }
 
+void RclTracking::hardReset(const Pose& pose) {
+    std::lock_guard<pros::Mutex> lock(mMutex);
+
+    mLatestEstimate = pose;
+
+    mResidualX = mResidualY = 0.0f;
+    mLastResidualX = mLastResidualY = 0.0f;
+    mLastSyncStep = 0.0f;
+    mSpreadIn = 0.0f;
+
+    mDisplaced = false;
+    mDisplaceCycles = 0;
+    mCleanCycles = 0;
+
+    mXMeasured = mYMeasured = false;
+    mActiveSensorCount = 0;
+
+    // Velocity history belongs to the pose that was just discarded, and a beam
+    // reset is taken standing still anyway.
+    mPrevPose = pose;
+    mHavePrevPose = true;
+    mVelX = mVelY = 0.0f;
+    mAppliedDx = mAppliedDy = 0.0f;
+    mTurnRate = 0.0f;
+    mTurnHeld = false;
+    mLagShiftX = mLagShiftY = 0.0f;
+
+    // Every held sample was measured against the old pose. Letting them stand
+    // would have the next cycle classify them against the new one and call the
+    // disagreement evidence of a displacement.
+    for (int i = 0; i < MAX_DISTANCE_SENSORS; i++) {
+        mSensors[i].rawMm = -1;
+        mSensors[i].heldMs = 0.0f;
+        mSensors[i].fresh = false;
+        mSensors[i].valid = false;
+        mSensors[i].pairVerified = false;
+        mSensors[i].outlier = false;
+        mSensors[i].cls = ReadingClass::Invalid;
+        mSensors[i].innovationIn = 0.0f;
+    }
+}
+
+Pose RclTracking::latestEstimate() const {
+    std::lock_guard<pros::Mutex> lock(mMutex);
+    return mLatestEstimate;
+}
+
 void RclTracking::startTracking() {
     if (mTask == nullptr) {
         mRunning = true;
         mLatestEstimate = mOdom.getPose();
+        mPrevPose = mLatestEstimate;
+        mHavePrevPose = true;
         mTask = new pros::Task([this]() { run(); });
     }
 }

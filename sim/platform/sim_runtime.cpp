@@ -15,6 +15,15 @@ std::mt19937 gGen{0xC0FFEEu};
 std::normal_distribution<float>       gNormal{0.0f, 1.0f};
 std::uniform_real_distribution<float> gUniform{0.0f, 1.0f};
 
+// A second stream, for noise that is NOT part of what a seeded run is
+// reproducing. Every draw from gGen shifts the whole sequence after it, so
+// adding one new consumer anywhere silently changes what every localization
+// test measures -- synthesising the claw sensor moved the MCL disturbance
+// battery's worst case from 28 in to 74 without a line of filter code
+// changing. Devices the estimators never read belong here instead.
+std::mt19937 gAuxGen{0x5EED1234u};
+std::normal_distribution<float> gAuxNormal{0.0f, 1.0f};
+
 }  // namespace
 
 void DeviceBus::reset() { *this = DeviceBus{}; }
@@ -54,10 +63,14 @@ void seedRng(std::uint32_t seed) {
     gGen.seed(seed);
     gNormal.reset();
     gUniform.reset();
+    gAuxGen.seed(seed ^ 0x5EED1234u);
+    gAuxNormal.reset();
 }
 
 float randUniform() { return gUniform(gGen); }
 float randNormal()  { return gNormal(gGen); }
 float randNormal(float mean, float stddev) { return mean + gNormal(gGen) * stddev; }
+
+float randNormalAux() { return gAuxNormal(gAuxGen); }
 
 }  // namespace sim

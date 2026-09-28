@@ -14,6 +14,7 @@
 //   arc(x: 10, y: 20, radius: 24);
 //   swing(heading: 90, side: right);
 //   delay(ms: 300);              waitSettled();
+//   tank(left: -50, right: -50);   open loop, holds until the next one
 //   maxSpeed(80);
 //   lateralGains(kp: 5, ki: 0, kd: 5);
 //   angularGains(kp: 50, ki: 0, kd: 6);
@@ -31,7 +32,7 @@ export const OP = {
   SET_POSE: 0, MOVE_TO: 1, TURN_HEADING: 2, TURN_POINT: 3, DRIVE: 4,
   BOOMERANG: 5, ARC: 6, SWING: 7, DELAY: 8, WAIT_SETTLED: 9,
   LATERAL_GAINS: 10, ANGULAR_GAINS: 11, MAX_SPEED: 12, FOLLOW_PATH: 13,
-  CLAW: 14,
+  CLAW: 14, TANK: 15,
 };
 
 const truthy = v => v === 'true' || v === '1';
@@ -179,6 +180,11 @@ function parseStatement(raw, base) {
       return { cmd: [OP.DELAY, num('ms') ?? pos(0) ?? 0, 0, 0, 0] };
     case 'waitSettled':
       return { cmd: [OP.WAIT_SETTLED, 0, 0, 0, 0] };
+    case 'tank':
+      // Open loop. It holds until the next tank(), so it is almost always
+      // followed by a delay.
+      return { cmd: [OP.TANK, num('left', 'l') ?? pos(0) ?? 0,
+                     num('right', 'r') ?? pos(1) ?? 0, 0, 0] };
     case 'maxSpeed':
       return { cmd: [OP.MAX_SPEED, num('speed', 'v') ?? pos(0) ?? 127, 0, 0, 0] };
     case 'lateralGains':

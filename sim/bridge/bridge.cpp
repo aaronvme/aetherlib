@@ -14,13 +14,18 @@
 
 #include "../platform/sim_runtime.hpp"
 #include "../platform/sim_sched.hpp"
+#include "../world/actors.hpp"
 #include "../world/field.hpp"
+#include "../world/pieces.hpp"
+#include "../world/toggles.hpp"
 #include "../world/world.hpp"
 
 #include "chad/movement_control/spline.hpp"
 
 #include "gamespecific/autons.hpp"
+#include "gamespecific/claw.hpp"
 #include "gamespecific/config.hpp"
+#include "gamespecific/lift.hpp"
 
 namespace {
 
@@ -41,14 +46,54 @@ std::uint32_t gSeed = 0xC0FFEEu;
 
 // Manual drive command in volts, applied when no routine is running.
 float gManualLeft = 0.0f;
+float gManualLift = 0.0f;
 float gManualRight = 0.0f;
 bool  gManualActive = false;
+/// <SG5>: each robot starts touching one Pin. Off by default, because a
+/// routine written without one grabs whatever is in front of the jaws and a
+/// preload that was not asked for changes what that is.
+bool  gPreload = false;
+/// The Preload placed by the last reset, so the next one can take it away
+/// again. Cleared whenever the piece set is rebuilt, because loadDefault()
+/// restarts numbering and a stale id would then name somebody else.
+int   gPreloadId = -1;
 
 sim::TaskId gRouteTask = sim::kInvalidTask;
+
+// --- match period ----------------------------------------------------------
+//
+// A routine that needs 17 s is not a 15 s routine, and the only place that ever
+// shows up otherwise is at a competition. The clock starts with the run and
+// cuts the drive at expiry, so a route that does not fit says so here instead.
+constexpr float kAutonPeriodMs  = 15000.0f;
+constexpr float kSkillsPeriodMs = 60000.0f;
+int    gPeriodMode = 0;          // 0 off, 1 auton, 2 skills
+double gPeriodStartMs = -1.0;
+bool   gPeriodExpired = false;
+
+// Whether the field is carrying game pieces. They start off: a pin or a cup is
+// a real obstacle that no filter has in its map, so loading them by default
+// would quietly change what every localization run measures -- the MCL
+// disturbance battery went from one failure to three when they were on. They
+// are a thing you ask for, and once asked for a reset puts the same ones back
+// so two runs of a routine face the same field.
+bool gPiecesLoaded = false;
+
+/// Arm the far-side gate whenever the period starts, so the sim matches what
+/// registerAutonDisableLine() does on the robot without the routine having to
+/// call it.
+bool gAutoFarSide = false;
+
+float periodLengthMs() {
+    if (gPeriodMode == 1) return kAutonPeriodMs;
+    if (gPeriodMode == 2) return kSkillsPeriodMs;
+    return 0.0f;
+}
 
 // Defined with the rest of the route machinery further down. Declared here so
 // sim_init() can wrap it into the physics tick.
 void sampleRouteStep();
+void tickPeriod(double dtMs);
 
 // --- optional dead wheels ---------------------------------------------------
 //
@@ -96,12 +141,25 @@ struct AutonEntry { const char* name; const char* symbol; void (*fn)(); };
 /// that defines it, and the browser can draw that source as a planned path.
 #define CHAD_AUTON(label, f) { label, #f, chad::f }
 
+void autonNone() {}
+
+// The first five mirror src/main.cpp exactly, so an index here is the same
+// routine the brain's selector has at that index. Anything after them is sim
+// only, appended rather than interleaved so that stays true.
+//
+// The list named autonBlue3PinPid, which has never existed in this tree -- the
+// sim has not compiled since, and nothing said so because the one gate that
+// builds it was not being run.
 const AutonEntry kAutons[] = {
-    CHAD_AUTON("Example",    autonExample),
-    CHAD_AUTON("Red 3 Pin",  autonRed3Pin),
-    CHAD_AUTON("Blue 3 Pin", autonBlue3Pin),
-    CHAD_AUTON("Blue 3 Pin PID", autonBlue3PinPid),
-    CHAD_AUTON("Skills",     autonSkills),
+    CHAD_AUTON("Red 3 Pin",     autonRed3Pin),
+    { "None", "autonNone", autonNone },
+    CHAD_AUTON("Blue 3 Pin",    autonBlue3Pin),
+    CHAD_AUTON("Skills",        autonSkills),
+    CHAD_AUTON("UNc",           autonTemp),
+
+    CHAD_AUTON("Red 3 Pin Far", autonRed3PinFar),
+    CHAD_AUTON("Blue 3 Pin Far", autonBlue3PinFar),
+    CHAD_AUTON("Example",       autonExample),
 };
 constexpr int kAutonCount = static_cast<int>(sizeof(kAutons) / sizeof(kAutons[0]));
 
@@ -125,6 +183,88 @@ void applyManualDrive() {
     if (!gManualActive) return;
     chad::drivetrain.setVoltage(gManualLeft / 12.0f * 127.0f,
                                 gManualRight / 12.0f * 127.0f);
+    // Hold the lift where it is when nothing is asking for it, so it does not
+    // sag while you drive. A routine owns the lift instead, which is why this
+    // only runs while the manual drive does.
+    chad::liftMotor.move(gManualLift != 0.0f
+                             ? static_cast<int>(gManualLift)
+                             : static_cast<int>(std::lround(liftHoldPower())));
+}
+
+/// Put the Preload in the jaws. <SG5> says one Pin, touching the robot and
+/// nothing else, and red loads red/yellow while blue loads blue/yellow -- so
+/// which colour it is comes from which side of the Autonomous Line the robot
+/// was placed on, the same way registerAutonDisableLine() picks its half.
+void placePreload() {
+    if (!gPreload) {
+        if (gPreloadId >= 0) sim::pieces().remove(gPreloadId);
+        gPreloadId = -1;
+        sim::pieces().publish();
+        return;
+    }
+
+    const auto& tr = sim::world().truth();
+    const chad::Pose pose{tr.x, tr.y, tr.theta};
+    float cx = 0.0f, cy = 0.0f, cdir = 0.0f;
+    sim::pieces().clawPoint(pose, cx, cy, cdir);
+
+    // Where a carried piece rides, so the claw is already on it when it shuts.
+    const float reach = 2.0f + sim::kPinRadiusIn;
+    const float px = cx + std::cos(cdir) * reach;
+    const float py = cy + std::sin(cdir) * reach;
+
+    // Moved, not replaced. Removing and re-adding walked the id up by one on
+    // every reset, and the HUD names the piece it is holding.
+    sim::Piece* p = (gPreloadId >= 0) ? sim::pieces().get(gPreloadId) : nullptr;
+    if (p == nullptr) {
+        gPreloadId = sim::pieces().add(sim::PieceKind::Pin, px, py, 0.0f);
+        p = sim::pieces().get(gPreloadId);
+        if (p == nullptr) return;
+    } else {
+        p->x = px;
+        p->y = py;
+        p->theta = 0.0f;
+        p->goal = -1;
+        p->inCup = -1;
+        p->level = 0;
+    }
+    p->upright = true;
+    p->color = (tr.x + tr.y < 0.0f) ? sim::PinColor::RedYellow
+                                    : sim::PinColor::BlueYellow;
+
+    // A closed claw is already gripping it -- that is how the robot is put on
+    // the field, and it has to arrive that way rather than being picked up a
+    // tick later once the sensor notices something in front of the jaws.
+    if (chad::claw.is_extended()) {
+        sim::pieces().hold(gPreloadId);
+    } else if (sim::pieces().heldId() >= 0) {
+        sim::pieces().release();
+    }
+    sim::pieces().markDirty();
+    sim::pieces().publish();
+}
+
+/// Arm the auton-period read gate on the diagonal, from wherever the robot is
+/// now. Mirrors chad::registerAutonDisableLine(), which the routines call for
+/// themselves -- this is for driving the sim by hand.
+void armFarSideGate(float lifetimeMs) {
+    chad::chassis.rcl().setFarSideGateFromLine(
+        chad::Field::FIELD_HALF, -chad::Field::FIELD_HALF,
+        -chad::Field::FIELD_HALF, chad::Field::FIELD_HALF, lifetimeMs);
+}
+
+void tickPeriod(double dtMs) {
+    (void)dtMs;
+    if (gPeriodMode == 0 || gPeriodStartMs < 0.0 || gPeriodExpired) return;
+    if (sim::preciseMillis() - gPeriodStartMs < periodLengthMs()) return;
+
+    gPeriodExpired = true;
+    // Cut the drive here and leave the route task for sim_step to unwind: this
+    // runs inside the scheduler, and killing the fiber that is currently on the
+    // stack takes the whole run down with it.
+    chad::chassis.cancelMotion();
+    chad::drivetrain.setVoltage(0.0f, 0.0f);
+    gManualLeft = gManualRight = gManualLift = 0.0f;
 }
 
 // --- run recorder -----------------------------------------------------------
@@ -132,7 +272,7 @@ void applyManualDrive() {
 // A flat float ring the browser reads directly out of the heap and plots. One
 // row per sample; keep kRecordStride in step with the column list below.
 
-constexpr int kRecordStride = 14;
+constexpr int kRecordStride = 18;
 constexpr int kRecordMax = 20000;          // ~6.5 min at 20 ms
 constexpr double kRecordPeriodMs = 20.0;
 
@@ -158,7 +298,9 @@ void recordSample() {
     const float ey = odom.y - t.y;
 
     // Columns: t, trueX, trueY, trueH, odomX, odomY, odomH, mclX, mclY, mclH,
-    //          errDist, errHeading, vLin, vAng
+    //          errDist, errHeading, vLin, vAng,
+    //          rclResidX, rclResidY, rclSyncStep, rclVotes
+    // Keep kRecordStride in step with this list.
     gRecord.push_back(static_cast<float>(now / 1000.0));
     gRecord.push_back(t.x);
     gRecord.push_back(t.y);
@@ -173,6 +315,15 @@ void recordSample() {
     gRecord.push_back(chad::angleDiffRad(t.theta, odom.theta) * chad::RAD_TO_DEG);
     gRecord.push_back(t.vLinIn);
     gRecord.push_back(t.vAngRad * chad::RAD_TO_DEG);
+
+    // What RCL is asking for against what it is allowed to apply. A residual
+    // that stays large while the step stays at the rate limit is the filter
+    // being held back; one that oscillates is it fighting itself.
+    const auto& r = chad::chassis.rcl();
+    gRecord.push_back(r.residualX());
+    gRecord.push_back(r.residualY());
+    gRecord.push_back(r.lastSyncStepIn());
+    gRecord.push_back(static_cast<float>(r.activeSensorCount()));
 }
 
 }  // namespace
@@ -193,12 +344,34 @@ void sim_init() {
 
     sim::seedRng(gSeed);
     sim::world().init();
+    sim::toggles().loadDefault();
 
     // World::init() installs itself as the physics function; wrap it so route
     // clearance is sampled on the same 10 ms tick the physics runs on rather
     // than once per browser frame.
     sim::setPhysicsFn([](double dtMs) {
+        // Actors first: their footprints have to be on the field BEFORE the
+        // distance sensors are synthesised, or every beam is one tick behind
+        // the robot it is supposed to be ranging.
+        sim::actors().step(dtMs);
+        sim::actors().publish();
+        // Pieces follow the claw, so they move with the robot's TRUE pose and
+        // have to be placed before the beams are synthesised -- a pin in the
+        // jaws is something the claw sensor can see.
+        const auto& tr = sim::world().truth();
+        const auto& rp = sim::world().params();
+        sim::pieces().step({tr.x, tr.y, tr.theta}, chad::claw.is_extended(),
+                           liftNearestPin(liftPosition()),
+                           0.5f * rp.robotLengthIn, 0.5f * rp.robotWidthIn,
+                           dtMs);
         sim::world().step(dtMs);
+        // After the world, so it sees the pose the robot actually reached: a
+        // toggle is flipped by being pressed against the wall, and the press is
+        // exactly the case where the commanded move was refused.
+        sim::toggles().step({tr.x, tr.y, tr.theta},
+                            0.5f * rp.robotLengthIn, 0.5f * rp.robotWidthIn,
+                            sim::world().truth().vLinIn);
+        tickPeriod(dtMs);
         sampleRouteStep();
     });
 
@@ -266,7 +439,20 @@ void sim_reset(float x, float y, float thetaDeg) {
     gOdomTrail.xy.clear();
     gRecord.clear();
     gRecordNextMs = 0.0;
-    gManualLeft = gManualRight = 0.0f;
+    gManualLeft = gManualRight = gManualLift = 0.0f;
+
+    sim::actors().rewind();
+    // A re-run has to face the same field, or the second attempt is measuring
+    // where the last one happened to leave the pins. An empty field stays empty.
+    // loadDefault() renumbers from 1, so anything holding an id from before it
+    // is holding somebody else's now.
+    if (gPiecesLoaded) { sim::pieces().loadDefault(); gPreloadId = -1; }
+    placePreload();
+    sim::toggles().resetStates();
+    gPeriodStartMs = (gPeriodMode != 0) ? 0.0 : -1.0;
+    gPeriodExpired = false;
+    chad::chassis.rcl().clearFarSideGate();
+    if (gAutoFarSide) armFarSideGate(periodLengthMs());
 
     // Odometry's task was never stopped, so this only re-arms the enabled flag.
     chad::chassis.odom().startBackgroundOdom();
@@ -289,6 +475,14 @@ void sim_step(float ms) {
     applyManualDrive();
     sim::sched().runFor(ms);
 
+    // tickPeriod cut the drive from inside the scheduler; the fiber can only be
+    // destroyed out here, where it is not the one running.
+    if (gPeriodExpired && gRouteTask != sim::kInvalidTask) {
+        sim::sched().kill(gRouteTask);
+        gRouteTask = sim::kInvalidTask;
+        chad::drivetrain.setVoltage(0.0f, 0.0f);
+    }
+
     const auto& t = sim::world().truth();
     pushTrail(gTrueTrail, t.x, t.y);
     const chad::Pose op = chad::chassis.getPose();
@@ -305,6 +499,16 @@ EMSCRIPTEN_KEEPALIVE
 void sim_set_drive(float leftVolts, float rightVolts) {
     gManualLeft = leftVolts;
     gManualRight = rightVolts;
+    gManualActive = true;
+}
+
+/// Drive the lift by hand, -127..127. Anything nonzero cancels a lift motion a
+/// routine left running, because two things commanding it at once is how you
+/// get a lift that will not move and no reason why.
+EMSCRIPTEN_KEEPALIVE
+void sim_set_lift(float power) {
+    if (power != 0.0f && liftBusy()) liftCancel();
+    gManualLift = power;
     gManualActive = true;
 }
 
@@ -367,6 +571,14 @@ void beginRun() {
     // The sampler keys off the clock it was just handed a new zero for.
     gRecordNextMs = 0.0;
     breakTrails();
+
+    // The traffic has to start where it started last time or a re-run measures
+    // the actors' phase rather than the change under test.
+    sim::actors().rewind();
+
+    gPeriodStartMs = (gPeriodMode != 0) ? 0.0 : -1.0;
+    gPeriodExpired = false;
+    if (gAutoFarSide) armFarSideGate(periodLengthMs());
 }
 
 EMSCRIPTEN_KEEPALIVE
@@ -387,7 +599,7 @@ void sim_stop_auton() {
     }
     chad::chassis.cancelMotion();
     gManualActive = true;
-    gManualLeft = gManualRight = 0.0f;
+    gManualLeft = gManualRight = gManualLift = 0.0f;
 }
 
 EMSCRIPTEN_KEEPALIVE
@@ -423,6 +635,7 @@ enum RouteOp {
     OP_MAX_SPEED,
     OP_FOLLOW_PATH,
     OP_CLAW,             // a: 0 retract, 1 extend, 2 toggle
+    OP_TANK,             // a: left, b: right, open loop, returns at once
 };
 
 // One `.field = value` from a designated initializer in the route source.
@@ -769,6 +982,13 @@ void execRoute() {
             case OP_MAX_SPEED:
                 gRouteMaxSpeed = c.a;
                 break;
+            // Open loop, and deliberately non-blocking: the routines that use
+            // it set a voltage, delay, then set another. Chassis::tank() has
+            // its own isSettled() guard, so a tank issued under a running
+            // async motion is dropped here exactly as it is on the robot.
+            case OP_TANK:
+                chad::chassis.tank(c.a, c.b);
+                break;
             case OP_CLAW: {
                 const int how = static_cast<int>(c.a);
                 if (how == 0) chad::claw.retract();
@@ -979,6 +1199,14 @@ void sim_set_param(const char* name, float value) {
     else if (k == "distConeRays")      p.distConeRays = static_cast<int>(value);
     else if (k == "distMaxIncidenceDeg") p.distMaxIncidenceDeg = value;
     else if (k == "distConeSigmaFrac") p.distConeSigmaFrac = value;
+    else if (k == "distSeePieces")     p.distSeePieces = (value != 0.0f);
+    else if (k == "clawMountX")        p.clawMountX = value;
+    else if (k == "clawMountY")        p.clawMountY = value;
+    else if (k == "clawMountDeg")      p.clawMountDeg = value;
+    else if (k == "liftDegPerSec")     p.liftDegPerSec = value;
+    else if (k == "alignerWidthIn")    p.alignerWidthIn = value;
+    else if (k == "alignerMouthIn")    p.alignerMouthIn = value;
+    else if (k == "alignerDepthIn")    p.alignerDepthIn = value;
     else if (k == "collideObstacles") p.collideObstacles = (value != 0.0f);
     else if (k == "imuPeriodMs")       p.imuPeriodMs = value;
     else if (k == "encoderPeriodMs")   p.encoderPeriodMs = value;
@@ -1002,6 +1230,26 @@ void sim_set_param(const char* name, float value) {
         if (k == "mclObsCone") c.obstacleConeFrac = value;
         else                   c.obstacleRangeTol = value;
         chad::chassis.mcl().setConfig(c);
+    } else if (k.rfind("rcl", 0) == 0) {
+        auto c = chad::chassis.rcl().config();
+        if      (k == "rclSyncProp")     c.syncProp = value;
+        else if (k == "rclMaxSyncRate")  c.maxSyncRate = value;
+        else if (k == "rclMaxSyncDist")  c.maxSyncDist = value;
+        else if (k == "rclMaxInnov")     c.maxWallInnovation = value;
+        else if (k == "rclAngleTol")     c.angleTolerance = value;
+        else if (k == "rclConfMin")      c.confidenceThreshold = static_cast<int>(value);
+        else if (k == "rclStaleHoldMs")  c.staleHoldMs = value;
+        else if (k == "rclMaxTurnRate")  c.maxTurnRateRadS = value;
+        else if (k == "rclLatencyMs")    c.sensorLatencyMs = value;
+        else if (k == "rclAxisAgree")    c.axisAgreeIn = value;
+        else if (k == "rclPairTol")      c.pairSpanTolIn = value;
+        else if (k == "rclRecoverProp")  c.recoverySyncProp = value;
+        else if (k == "rclDisplaceCyc")  c.displaceCycles = static_cast<int>(value);
+        else if (k == "rclRecoverCyc")   c.recoverCycles = static_cast<int>(value);
+        else if (k == "rclObsCone")      c.obstacleConeFrac = value;
+        else if (k == "rclObsTol")       c.obstacleRangeTol = value;
+        else if (k == "rclNoReturnLim")  c.noReturnWallLimit = value;
+        chad::chassis.rcl().setConfig(c);
     } else if (k.rfind("ekf", 0) == 0) {
         auto c = chad::chassis.ekf().config();
         if      (k == "ekfMclSigmaScale") c.mclSigmaScale = value;
@@ -1228,6 +1476,34 @@ float sim_get_param(const char* name) {
     else if (k == "mclObsTol")   return mc.obstacleRangeTol;
     else if (k == "mclSyncProp") return mc.distSyncProp;
 
+    if      (k == "distSeePieces") return sim::world().params().distSeePieces ? 1.0f : 0.0f;
+    else if (k == "clawMountX")    return sim::world().params().clawMountX;
+    else if (k == "clawMountY")    return sim::world().params().clawMountY;
+    else if (k == "clawMountDeg")  return sim::world().params().clawMountDeg;
+    else if (k == "liftDegPerSec") return sim::world().params().liftDegPerSec;
+    else if (k == "alignerWidthIn") return sim::world().params().alignerWidthIn;
+    else if (k == "alignerMouthIn") return sim::world().params().alignerMouthIn;
+    else if (k == "alignerDepthIn") return sim::world().params().alignerDepthIn;
+
+    const auto rc = chad::chassis.rcl().config();
+    if      (k == "rclSyncProp")    return rc.syncProp;
+    else if (k == "rclMaxSyncRate") return rc.maxSyncRate;
+    else if (k == "rclMaxSyncDist") return rc.maxSyncDist;
+    else if (k == "rclMaxInnov")    return rc.maxWallInnovation;
+    else if (k == "rclAngleTol")    return rc.angleTolerance;
+    else if (k == "rclConfMin")     return static_cast<float>(rc.confidenceThreshold);
+    else if (k == "rclStaleHoldMs") return rc.staleHoldMs;
+    else if (k == "rclMaxTurnRate") return rc.maxTurnRateRadS;
+    else if (k == "rclLatencyMs")   return rc.sensorLatencyMs;
+    else if (k == "rclAxisAgree")   return rc.axisAgreeIn;
+    else if (k == "rclPairTol")     return rc.pairSpanTolIn;
+    else if (k == "rclRecoverProp") return rc.recoverySyncProp;
+    else if (k == "rclDisplaceCyc") return static_cast<float>(rc.displaceCycles);
+    else if (k == "rclRecoverCyc")  return static_cast<float>(rc.recoverCycles);
+    else if (k == "rclObsCone")     return rc.obstacleConeFrac;
+    else if (k == "rclObsTol")      return rc.obstacleRangeTol;
+    else if (k == "rclNoReturnLim") return rc.noReturnWallLimit;
+
     return std::nanf("");
 }
 
@@ -1403,6 +1679,335 @@ const char* sim_tuning_json() {
 }
 
 // ============================================================================
+// Other robots on the field
+// ============================================================================
+
+EMSCRIPTEN_KEEPALIVE
+int sim_actor_add(float x, float y, float headingDeg, int team) {
+    return sim::actors().add(x, y, chad::vexToStdRad(headingDeg), team);
+}
+
+EMSCRIPTEN_KEEPALIVE
+void sim_actor_remove(int id) {
+    sim::actors().remove(id);
+    sim::actors().publish();
+}
+
+EMSCRIPTEN_KEEPALIVE
+void sim_actor_clear() {
+    sim::actors().clear();
+    sim::field().clearDynamic();
+}
+
+EMSCRIPTEN_KEEPALIVE
+void sim_actor_set_pose(int id, float x, float y, float headingDeg) {
+    if (auto* a = sim::actors().get(id)) {
+        a->x = x;
+        a->y = y;
+        a->theta = chad::vexToStdRad(headingDeg);
+        sim::actors().publish();
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE
+void sim_actor_set_size(int id, float lengthIn, float widthIn) {
+    if (auto* a = sim::actors().get(id)) {
+        a->lengthIn = lengthIn;
+        a->widthIn = widthIn;
+        sim::actors().publish();
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE
+void sim_actor_set_flags(int id, int enabled, int patrol, int loop, int faceTravel) {
+    if (auto* a = sim::actors().get(id)) {
+        a->enabled = (enabled != 0);
+        a->patrol = (patrol != 0);
+        a->loop = (loop != 0);
+        a->faceTravel = (faceTravel != 0);
+        sim::actors().publish();
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE
+void sim_actor_set_speed(int id, float speedIn) {
+    if (auto* a = sim::actors().get(id)) a->speedIn = speedIn;
+}
+
+/// Replace the whole patrol path. Points are pushed one at a time because
+/// marshalling a float array across the boundary for four points is not worth
+/// the heap juggling on either side.
+EMSCRIPTEN_KEEPALIVE
+void sim_actor_path_clear(int id) {
+    if (auto* a = sim::actors().get(id)) {
+        a->path.clear();
+        a->leg = 0;
+        a->legT = 0.0f;
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE
+void sim_actor_path_push(int id, float x, float y) {
+    if (auto* a = sim::actors().get(id)) {
+        a->path.push_back(x);
+        a->path.push_back(y);
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE
+const char* sim_actors_json() {
+    std::string out = "[";
+    bool first = true;
+    for (const auto& a : sim::actors().all()) {
+        char b[256];
+        std::snprintf(b, sizeof(b),
+            "%s{\"id\":%d,\"x\":%.2f,\"y\":%.2f,\"h\":%.2f,\"team\":%d,"
+            "\"len\":%.2f,\"wid\":%.2f,\"on\":%s,\"patrol\":%s,\"loop\":%s,"
+            "\"face\":%s,\"speed\":%.1f,\"path\":[",
+            first ? "" : ",", a.id, a.x, a.y, chad::stdRadToVexDeg(a.theta),
+            a.team, a.lengthIn, a.widthIn,
+            a.enabled ? "true" : "false", a.patrol ? "true" : "false",
+            a.loop ? "true" : "false", a.faceTravel ? "true" : "false",
+            a.speedIn);
+        out += b;
+        for (std::size_t i = 0; i < a.path.size(); i++) {
+            char c[32];
+            std::snprintf(c, sizeof(c), "%s%.2f", i ? "," : "", a.path[i]);
+            out += c;
+        }
+        out += "]}";
+        first = false;
+    }
+    out += "]";
+    gStateJson = out;
+    return gStateJson.c_str();
+}
+
+// ============================================================================
+// Game pieces
+// ============================================================================
+
+EMSCRIPTEN_KEEPALIVE
+int sim_piece_add(int kind, float x, float y, float headingDeg) {
+    const auto k = (kind == 1) ? sim::PieceKind::Cup : sim::PieceKind::Pin;
+    const int id = sim::pieces().add(k, x, y, chad::vexToStdRad(headingDeg));
+    sim::pieces().publish();
+    return id;
+}
+
+EMSCRIPTEN_KEEPALIVE
+void sim_piece_remove(int id) {
+    sim::pieces().remove(id);
+    sim::pieces().publish();
+}
+
+/// 1 when Rapier is driving the pieces, 0 when they are on the built-in
+/// kinematic model. A silent fallback would look like a solver that simply
+/// does nothing, which is the hardest kind of broken to notice.
+EMSCRIPTEN_KEEPALIVE
+int sim_pieces_external() {
+    return sim::pieces().externalPhysics() ? 1 : 0;
+}
+
+EMSCRIPTEN_KEEPALIVE
+void sim_piece_clear() {
+    sim::pieces().clear();
+    sim::pieces().publish();
+    gPiecesLoaded = false;
+    gPreloadId = -1;
+}
+
+EMSCRIPTEN_KEEPALIVE
+void sim_piece_default() {
+    sim::pieces().loadDefault();
+    gPiecesLoaded = true;
+    gPreloadId = -1;
+}
+
+/// Drag one around. A piece in the jaws is released first -- moving it by hand
+/// while the claw still claims it would have the next tick snap it back.
+EMSCRIPTEN_KEEPALIVE
+void sim_piece_set_pose(int id, float x, float y, float headingDeg) {
+    if (sim::pieces().heldId() == id) sim::pieces().release();
+    if (auto* p = sim::pieces().get(id)) {
+        p->x = x;
+        p->y = y;
+        p->theta = chad::vexToStdRad(headingDeg);
+        p->goal = -1;
+        p->inCup = -1;
+        p->held = false;
+        // Rapier owns where a piece is; a pose written behind its back is one
+        // it undoes on the next step.
+        sim::pieces().markDirty();
+        sim::pieces().publish();
+    }
+}
+
+/// Work the claw by hand: 0 opens, 1 closes, anything else toggles. The claw
+/// grips extended, which is why closing is the extend. Without this the only
+/// way to pick anything up was to run a whole routine, which is no way to
+/// check whether a grab works.
+EMSCRIPTEN_KEEPALIVE
+void sim_set_claw(int how) {
+    if (how == 0) chad::claw.retract();
+    else if (how == 1) chad::claw.extend();
+    else chad::claw.toggle();
+}
+
+/// Colour, and which way up. Separate from the pose so a scenario can lay a
+/// pin on its side without also having to say where it is -- a lying pin is
+/// 6.5 in of obstacle and an upright one 1.6, which is the whole reason to be
+/// able to set it.
+EMSCRIPTEN_KEEPALIVE
+void sim_piece_set_flags(int id, int color, int upright, int clearUp) {
+    if (auto* p = sim::pieces().get(id)) {
+        if (color >= 0 && color <= 3) p->color = static_cast<sim::PinColor>(color);
+        p->upright = upright != 0;
+        p->clearUp = clearUp != 0;
+        sim::pieces().markDirty();
+        sim::pieces().publish();
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE
+const char* sim_pieces_json() {
+    std::string out = "{\"clawX\":";
+    char head[192];
+    float cx = 0.0f, cy = 0.0f, cdir = 0.0f;
+    const auto& tr = sim::world().truth();
+    sim::pieces().clawPoint({tr.x, tr.y, tr.theta}, cx, cy, cdir);
+    const auto& cb = sim::world().clawBeam();
+    std::snprintf(head, sizeof(head),
+                  "%.2f,\"clawY\":%.2f,\"clawDir\":%.2f,\"clawRange\":%.2f,"
+                  "\"clawHit\":%s,\"closed\":%s,\"held\":%d,"
+                  "\"liftDeg\":%.1f,\"liftPin\":%d,\"pieces\":[",
+                  cx, cy, cdir * chad::RAD_TO_DEG,
+                  cb.inRange ? cb.rangeIn : -1.0f,
+                  cb.inRange ? "true" : "false",
+                  chad::claw.is_extended() ? "true" : "false",
+                  sim::pieces().heldId(),
+                  liftPosition(), liftNearestPin(liftPosition()));
+    out += head;
+
+    bool first = true;
+    for (const auto& p : sim::pieces().all()) {
+        char b[256];
+        std::snprintf(b, sizeof(b),
+            "%s{\"id\":%d,\"kind\":%d,\"x\":%.2f,\"y\":%.2f,\"h\":%.1f,"
+            "\"r\":%.2f,\"held\":%s,\"goal\":%d,\"level\":%d,"
+            "\"color\":%d,\"up\":%s,\"clear\":%s,\"cup\":%d}",
+            first ? "" : ",", p.id, static_cast<int>(p.kind), p.x, p.y,
+            chad::stdRadToVexDeg(p.theta), p.radiusIn,
+            p.held ? "true" : "false", p.goal, p.level,
+            static_cast<int>(p.color), p.upright ? "true" : "false",
+            p.clearUp ? "true" : "false", p.inCup);
+        out += b;
+        first = false;
+    }
+    out += "]}";
+    gStateJson = out;
+    return gStateJson.c_str();
+}
+
+// ============================================================================
+// Toggles
+// ============================================================================
+
+EMSCRIPTEN_KEEPALIVE
+const char* sim_toggles_json() {
+    std::string out = "[";
+    bool first = true;
+    for (const auto& t : sim::toggles().all()) {
+        char b[160];
+        std::snprintf(b, sizeof(b),
+            "%s{\"id\":%d,\"wall\":%d,\"x\":%.2f,\"y\":%.2f,\"len\":%.2f,"
+            "\"state\":%d,\"on\":%s}",
+            first ? "" : ",", t.id, t.wall, t.x, t.y, t.lengthIn,
+            static_cast<int>(t.state), t.contact ? "true" : "false");
+        out += b;
+        first = false;
+    }
+    out += "]";
+    gStateJson = out;
+    return gStateJson.c_str();
+}
+
+/// Set one by hand: 0 neutral, 1 red, 2 blue. Ramming is the real way in, but
+/// a scenario that starts with a quadrant already owned should not have to be
+/// driven into existence.
+EMSCRIPTEN_KEEPALIVE
+void sim_toggle_set(int id, int state) {
+    const int s = ((state % 3) + 3) % 3;
+    sim::toggles().setState(id, static_cast<sim::ToggleState>(s));
+}
+
+/// Turn one on by a face, the way driving into it would. Which colour comes
+/// next depends on the wall, so the browser must not do the arithmetic itself.
+/// Start every reset with a Preload in the jaws, or stop doing so.
+EMSCRIPTEN_KEEPALIVE
+void sim_set_preload(int on) {
+    gPreload = (on != 0);
+}
+
+EMSCRIPTEN_KEEPALIVE
+int sim_preload(void) {
+    return gPreload ? 1 : 0;
+}
+
+EMSCRIPTEN_KEEPALIVE
+void sim_toggle_cycle(int id) {
+    sim::toggles().cycle(id);
+}
+
+EMSCRIPTEN_KEEPALIVE
+void sim_toggle_reset() {
+    sim::toggles().resetStates();
+}
+
+// ============================================================================
+// Match period
+// ============================================================================
+
+/// 0 = no clock, 1 = 15 s autonomous, 2 = 60 s skills.
+EMSCRIPTEN_KEEPALIVE
+void sim_set_period_mode(int mode) {
+    gPeriodMode = (mode < 0 || mode > 2) ? 0 : mode;
+    gPeriodExpired = false;
+    gPeriodStartMs = (gPeriodMode != 0) ? sim::preciseMillis() : -1.0;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int sim_period_mode() { return gPeriodMode; }
+
+/// Milliseconds left, or -1 when no clock is running.
+EMSCRIPTEN_KEEPALIVE
+float sim_period_remaining_ms() {
+    if (gPeriodMode == 0 || gPeriodStartMs < 0.0) return -1.0f;
+    const float left = periodLengthMs() -
+                       static_cast<float>(sim::preciseMillis() - gPeriodStartMs);
+    return left > 0.0f ? left : 0.0f;
+}
+
+// ============================================================================
+// Auton read gate ("autonomous disable line")
+// ============================================================================
+
+/// Arm or disarm the far-side gate by hand. Lifetime 0 means until cleared.
+EMSCRIPTEN_KEEPALIVE
+void sim_set_far_side_gate(int on, float lifetimeMs) {
+    if (on) armFarSideGate(lifetimeMs);
+    else    chad::chassis.rcl().clearFarSideGate();
+}
+
+/// Re-arm it automatically whenever a run starts, which is what the routines
+/// do for themselves via registerAutonDisableLine().
+EMSCRIPTEN_KEEPALIVE
+void sim_set_auto_far_side(int on) { gAutoFarSide = (on != 0); }
+
+EMSCRIPTEN_KEEPALIVE
+int sim_auto_far_side() { return gAutoFarSide ? 1 : 0; }
+
+// ============================================================================
 // Field editing
 // ============================================================================
 
@@ -1503,12 +2108,13 @@ const char* sim_state_json() {
     // just before MCL diverges.
     const float nEff = (gLocMode & kLocMcl)
         ? chad::chassis.mcl().getEstimate().second : 0.0f;
-    const chad::Pose rcl = chad::chassis.rcl().latestEstimate();
+    const auto& rclT = chad::chassis.rcl();
+    const chad::Pose rcl = rclT.latestEstimate();
     const chad::Pose ekf = chad::chassis.ekf().getEstimate();
     const auto ekfSigma = chad::chassis.ekf().uncertainty();
     const float mclInject = chad::chassis.mcl().randomInjectFraction();
 
-    char buf[8192];
+    char buf[16384];
     int n = std::snprintf(buf, sizeof(buf),
         "{\"t\":%.3f,"
         "\"true\":{\"x\":%.3f,\"y\":%.3f,\"h\":%.2f},"
@@ -1518,6 +2124,10 @@ const char* sim_state_json() {
         "\"ekf\":{\"x\":%.3f,\"y\":%.3f,\"h\":%.2f,\"sx\":%.3f,\"sy\":%.3f,"
             "\"st\":%.3f,\"beams\":%d,\"reloc\":%d},"
         "\"mclInject\":%.3f,"
+        "\"rcl2\":{\"displaced\":%s,\"spread\":%.2f,\"sync\":%.3f,"
+            "\"rx\":%.3f,\"ry\":%.3f,\"turn\":%.2f,\"held\":%s,\"votes\":%d,"
+            "\"gate\":%s,\"gnx\":%.3f,\"gny\":%.3f,\"gd\":%.2f,\"gms\":%.0f},"
+        "\"period\":{\"mode\":%d,\"left\":%.0f},"
         "\"err\":{\"dist\":%.3f,\"heading\":%.2f},"
         "\"vel\":{\"lin\":%.2f,\"ang\":%.2f,\"left\":%.2f,\"right\":%.2f},"
         "\"colliding\":%s,\"routeRunning\":%s,\"settled\":%s,"
@@ -1533,6 +2143,14 @@ const char* sim_state_json() {
         ekfSigma.sigmaTheta * chad::RAD_TO_DEG,
         chad::chassis.ekf().beamsUsed(), chad::chassis.ekf().relocateCount(),
         mclInject,
+        rclT.isDisplaced() ? "true" : "false", rclT.spreadIn(),
+        rclT.lastSyncStepIn(), rclT.residualX(), rclT.residualY(),
+        rclT.turnRateRadS(), rclT.turnGateHeld() ? "true" : "false",
+        rclT.activeSensorCount(),
+        rclT.farSideGateActive() ? "true" : "false",
+        rclT.config().farSideNx, rclT.config().farSideNy,
+        rclT.config().farSideD, rclT.farSideGateRemainingMs(),
+        gPeriodMode, sim_period_remaining_ms(),
         errDist, errHeadingDeg,
         t.vLinIn, t.vAngRad * chad::RAD_TO_DEG, t.leftVelIn, t.rightVelIn,
         t.colliding ? "true" : "false",
@@ -1574,12 +2192,18 @@ const char* sim_state_json() {
         n += std::snprintf(buf + n, sizeof(buf) - n,
             "%s{\"i\":%d,\"mclValid\":%s,\"mclIn\":%.2f,"
             "\"rclValid\":%s,\"rclIn\":%.2f,\"rclConf\":%d,\"mclDead\":%.2f,"
-            "\"rx\":%.2f,\"ry\":%.2f,\"rdx\":%.3f,\"rdy\":%.3f}",
+            "\"rx\":%.2f,\"ry\":%.2f,\"rdx\":%.3f,\"rdy\":%.3f,"
+            "\"cls\":%d,\"fresh\":%s,\"pair\":%s,\"out\":%s,\"innov\":%.2f}",
             first ? "" : ",", i,
             mclValid[i] ? "true" : "false", mclRead[i],
             rs.valid ? "true" : "false", rs.readingInch, rs.confidence,
             mclDead[i],
-            rs.worldX, rs.worldY, rs.rayCos, rs.raySin);
+            rs.worldX, rs.worldY, rs.rayCos, rs.raySin,
+            static_cast<int>(rs.cls),
+            rs.fresh ? "true" : "false",
+            rs.pairVerified ? "true" : "false",
+            rs.outlier ? "true" : "false",
+            rs.innovationIn);
         first = false;
     }
     std::snprintf(buf + n, sizeof(buf) - n, "]}");

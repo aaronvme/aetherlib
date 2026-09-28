@@ -19,6 +19,19 @@ try {
 
 const M = await createChadSim();
 
+// Rapier drives the pins and the cups. It has to be installed before the first
+// tick, because pieces.cpp asks once per step whether a solver is there and
+// falls back to its own kinematic model if not. Failing to load is not fatal:
+// the fallback is the old behaviour, and the HUD says which one is running.
+let physicsEngine = 'kinematic';
+try {
+  const { installRapier } = await import('./rapier_pieces.js');
+  await installRapier(M);
+  physicsEngine = 'rapier';
+} catch (err) {
+  console.warn('rapier unavailable, pieces fall back to the kinematic model', err);
+}
+
 // ============================================================================
 // WASM API
 // ============================================================================
@@ -69,7 +82,64 @@ const api = {
                   ['number', 'number', 'number', 'number', 'number']),
   fieldAddCirc: w('sim_field_add_circle', null,
                   ['number', 'number', 'number', 'number']),
+
+  actorAdd:     w('sim_actor_add', 'number', ['number', 'number', 'number', 'number']),
+  actorRemove:  w('sim_actor_remove', null, ['number']),
+  actorClear:   w('sim_actor_clear', null, []),
+  actorPose:    w('sim_actor_set_pose', null, ['number', 'number', 'number', 'number']),
+  actorSize:    w('sim_actor_set_size', null, ['number', 'number', 'number']),
+  actorFlags:   w('sim_actor_set_flags', null,
+                  ['number', 'number', 'number', 'number', 'number']),
+  actorSpeed:   w('sim_actor_set_speed', null, ['number', 'number']),
+  actorPathClr: w('sim_actor_path_clear', null, ['number']),
+  actorPathAdd: w('sim_actor_path_push', null, ['number', 'number', 'number']),
+  actorsJson:   w('sim_actors_json', 'string', []),
+
+  setPeriod:    w('sim_set_period_mode', null, ['number']),
+  periodMode:   w('sim_period_mode', 'number', []),
+  periodLeft:   w('sim_period_remaining_ms', 'number', []),
+
+  setFarSide:   w('sim_set_far_side_gate', null, ['number', 'number']),
+  setAutoFar:   w('sim_set_auto_far_side', null, ['number']),
+
+  pieceAdd:     w('sim_piece_add', 'number', ['number', 'number', 'number', 'number']),
+  pieceRemove:  w('sim_piece_remove', null, ['number']),
+  pieceClear:   w('sim_piece_clear', null, []),
+  pieceDefault: w('sim_piece_default', null, []),
+  piecePose:    w('sim_piece_set_pose', null, ['number', 'number', 'number', 'number']),
+  piecesJson:   w('sim_pieces_json', 'string', []),
+  setClaw:      w('sim_set_claw', null, ['number']),
+  setPreload:   w('sim_set_preload', null, ['number']),
+  setLift:      w('sim_set_lift', null, ['number']),
+  togglesJson:  w('sim_toggles_json', 'string', []),
+  toggleSet:    w('sim_toggle_set', null, ['number', 'number']),
+  toggleCycle:  w('sim_toggle_cycle', null, ['number']),
+  toggleReset:  w('sim_toggle_reset', null, []),
 };
+
+// ============================================================================
+// RCL reading classes
+// ============================================================================
+//
+// Mirrors chad::RclTracking::ReadingClass. The order is the contract: the
+// bridge sends the raw enum value. Grouped by what the answer means to you --
+// `used` is working, `gated` is the filter declining to look, and `wrong` is a
+// reading that disagrees with where the pose says the robot is, which is the
+// only group that tells you something is actually broken.
+const RCL_CLASS = [
+  { key: 'invalid', short: '—',      label: 'no device',        grp: 'held',   col: '#4b5563' },
+  { key: 'wall',    short: 'use',    label: 'wall hit',         grp: 'used',   col: '#4ade80' },
+  { key: 'stale',   short: 'held',   label: 'no new sample',    grp: 'held',   col: '#4b5563' },
+  { key: 'conf',    short: 'conf',   label: 'low confidence',   grp: 'gated',  col: '#e2b341' },
+  { key: 'axis',    short: 'skew',   label: 'off axis',         grp: 'gated',  col: '#e2b341' },
+  { key: 'turn',    short: 'turn',   label: 'turning too fast', grp: 'gated',  col: '#e2b341' },
+  { key: 'post',    short: 'post',   label: 'obstacle owns it', grp: 'post',   col: '#94A3B8' },
+  { key: 'far',     short: 'far',    label: 'across auton line', grp: 'gated', col: '#38bdf8' },
+  { key: 'short',   short: 'short',  label: 'reads short (blocked)', grp: 'wrong', col: '#f87171' },
+  { key: 'long',    short: 'long',   label: 'reads long',       grp: 'wrong',  col: '#f87171' },
+  { key: 'silent',  short: 'silent', label: 'no return, wall in reach', grp: 'wrong', col: '#fb7185' },
+];
+const rclClass = i => RCL_CLASS[i] || RCL_CLASS[0];
 
 // RAMSETEParams::smoothSpacingIn's default, for the preview when a route does
 // not set one. sim/test/auton_cpp.mjs reads the header and fails if it moves.
@@ -133,16 +203,21 @@ const LAYERS = [
   ['grid',      'tile grid',     true],
   ['obstacles', 'goals & posts', true],
   ['robot',     'robot (true)',  true],
-  ['claw',      'claw',          true],
   ['odom',      'odom pose',     true],
   ['mcl',       'mcl pose',      true],
   ['particles', 'MCL particles', true],
   ['beams',     'sensor beams',  true],
-  ['cones',     'sensor cones',  false],
+  ['cones',     'sensor cones',  true],
   ['truePath',  'true path',     true],
   ['odomPath',  'odom path',     true],
   ['plan',      'route preview', true],
   ['rcl',       'rcl pose & rays', true],
+  ['rclreject', 'rcl rejects',   true],
+  ['actors',    'other robots',  true],
+  ['pieces',    'game pieces',   true],
+  ['toggles',   'toggles',       true],
+  ['claw',      'claw beam',     true],
+  ['autonline', 'auton line',    true],
   ['ghost',     'replay ghost',  true],
 ];
 const layers = Object.fromEntries(LAYERS.map(([k, , v]) => [k, v]));
@@ -211,6 +286,7 @@ function buildParams(hostId, defs) {
       if (from !== 'slide') slide.value = v;
       if (from !== 'num') num.value = +v.toFixed(4);
       api.setParam(d.key, v);
+      if (typeof onParamPushed === 'function') onParamPushed(d.key);
     };
     slide.addEventListener('input', () => push(parseFloat(slide.value), 'slide'));
     // 'change' not 'input', so a half-typed "0.0" is not pushed as 0 mid-edit.
@@ -262,10 +338,86 @@ buildParams('params-drive', [
   { key: 'responseTauMs', label: 'drive lag ms', min: 0, max: 300, step: 5, value: 70 },
 ]);
 
+// The claw mount is a reading of where the routines drive from, not a
+// measurement off the robot -- correct it here rather than in C++.
+buildParams('params-claw', [
+  { key: 'clawMountX', label: 'claw x in', min: -12, max: 12, step: 0.25,
+    value: api.getParam('clawMountX'),
+    help: 'robot frame: negative is behind the centre, which is where this claw is' },
+  { key: 'clawMountY', label: 'claw y in', min: -8, max: 8, step: 0.25,
+    value: api.getParam('clawMountY') },
+  { key: 'clawMountDeg', label: 'claw facing °', min: 0, max: 359, step: 5,
+    value: api.getParam('clawMountDeg'),
+    help: '180 points it out of the back of the robot' },
+  { key: 'liftDegPerSec', label: 'lift °/s', min: 100, max: 3000, step: 50,
+    value: api.getParam('liftDegPerSec'),
+    help: 'free speed at full command; there is no load or gravity here' },
+  { key: 'alignerWidthIn', label: 'aligner throat in', min: 0, max: 16, step: 0.25,
+    value: api.getParam('alignerWidthIn'),
+    help: 'slot the goal ends up in; 0 removes the aligner entirely' },
+  { key: 'alignerMouthIn', label: 'aligner mouth in', min: 0, max: 24, step: 0.25,
+    value: api.getParam('alignerMouthIn'),
+    help: 'opening at the arm tips -- how far off centre it can still catch one' },
+  { key: 'alignerDepthIn', label: 'aligner depth in', min: 0, max: 12, step: 0.25,
+    value: api.getParam('alignerDepthIn'),
+    help: 'how far the arms reach back past the claw' },
+]);
+
+// The drawn aligner has to follow its own sliders, so cache it rather than
+// calling into the wasm three times a frame.
+const ALIGNER = { width: 0, mouth: 0, depth: 0 };
+function readAligner() {
+  ALIGNER.width = api.getParam('alignerWidthIn');
+  ALIGNER.mouth = api.getParam('alignerMouthIn');
+  ALIGNER.depth = api.getParam('alignerDepthIn');
+}
+function onParamPushed(key) {
+  if (key.startsWith('aligner')) readAligner();
+}
+readAligner();
+
 buildParams('params-rate', [
   { key: 'distPeriodMs',    label: 'distance ms', min: 5, max: 100, step: 5, value: 30 },
   { key: 'imuPeriodMs',     label: 'IMU ms',      min: 1, max: 50,  step: 1, value: 10 },
   { key: 'encoderPeriodMs', label: 'encoder ms',  min: 1, max: 50,  step: 1, value: 10 },
+]);
+
+// The filter that owns the pose. Read back from the library rather than
+// restated here, so a number changed in gamespecific/config.cpp shows up in the
+// panel instead of the panel quietly overwriting it on load.
+buildParams('params-rcl', [
+  { key: 'rclSyncProp', label: 'sync prop', min: 0, max: 1, step: 0.01,
+    value: api.getParam('rclSyncProp'),
+    help: 'share of the residual applied per reading' },
+  { key: 'rclMaxSyncRate', label: 'sync rate in/s', min: 0, max: 60, step: 1,
+    value: api.getParam('rclMaxSyncRate'),
+    help: 'ceiling on that, so a correction cannot outrun the robot' },
+  { key: 'rclMaxInnov', label: 'innov gate in', min: 1, max: 40, step: 0.5,
+    value: api.getParam('rclMaxInnov'),
+    help: 'a reading further than this from the predicted wall is dropped' },
+  { key: 'rclAngleTol', label: 'axis tol °', min: 1, max: 45, step: 1,
+    value: api.getParam('rclAngleTol'),
+    help: 'a beam must be this close to a field axis to be used at all' },
+  { key: 'rclStaleHoldMs', label: 'stale hold ms', min: 0, max: 200, step: 5,
+    value: api.getParam('rclStaleHoldMs'),
+    help: 'an unchanged reading is re-used only after this long; 0 disables' },
+  { key: 'rclMaxTurnRate', label: 'turn gate rad/s', min: 0, max: 8, step: 0.1,
+    value: api.getParam('rclMaxTurnRate'),
+    help: 'above this the whole cycle is dropped — the cone smears' },
+  { key: 'rclLatencyMs', label: 'beam latency ms', min: 0, max: 100, step: 5,
+    value: api.getParam('rclLatencyMs'),
+    help: 'how far back the solve rewinds the pose to meet the sample' },
+  { key: 'rclAxisAgree', label: 'axis agree in', min: 0.2, max: 12, step: 0.1,
+    value: api.getParam('rclAxisAgree'),
+    help: 'votes further than this from their median are dropped' },
+  { key: 'rclPairTol', label: 'pair span tol in', min: 0.2, max: 8, step: 0.1,
+    value: api.getParam('rclPairTol'),
+    help: 'how exactly two opposing beams must span the field to confirm' },
+  { key: 'rclMaxSyncDist', label: 'recover step in', min: 0.5, max: 30, step: 0.5,
+    value: api.getParam('rclMaxSyncDist'),
+    help: 'furthest one reading may move the pose while recovering' },
+  { key: 'rclConfMin', label: 'min confidence', min: 0, max: 63, step: 1,
+    value: api.getParam('rclConfMin') },
 ]);
 
 // ============================================================================
@@ -690,6 +842,9 @@ document.getElementById('btn-place').addEventListener('click', doReset);
 document.getElementById('chk-collide').addEventListener('change', e => {
   api.setParam('collideObstacles', e.target.checked ? 1 : 0);
 });
+document.getElementById('chk-seepieces').addEventListener('change', e => {
+  api.setParam('distSeePieces', e.target.checked ? 1 : 0);
+});
 // Localization is four independent switches. The bridge still takes a bitmask, so
 // it is assembled here rather than enumerated as one option per combination.
 const locBits = { 'loc-mcl': 1, 'loc-rcl': 2, 'loc-ekf': 4 };
@@ -742,6 +897,16 @@ const keys = new Set();
 addEventListener('keydown', e => {
   if (e.target === editor || e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
   if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) e.preventDefault();
+  // Escape gets out of laying a path, which otherwise swallowed every click on
+  // the field until you found the button again.
+  if (e.key === 'Escape') { finishPathMode(); return; }
+  // Space works the claw. A tap, not a hold -- it is a pneumatic.
+  if (e.key === ' ') {
+    e.preventDefault();
+    api.setClaw(pieceState.closed ? 0 : 1);
+    refreshPieces();
+    return;
+  }
   keys.add(e.key.toLowerCase());
 });
 addEventListener('keyup', e => keys.delete(e.key.toLowerCase()));
@@ -751,6 +916,10 @@ function applyKeyboardDrive() {
   const fwd = (keys.has('w') || keys.has('arrowup')) - (keys.has('s') || keys.has('arrowdown'));
   const turn = (keys.has('d') || keys.has('arrowright')) - (keys.has('a') || keys.has('arrowleft'));
   api.setDrive((fwd + turn * 0.6) * 9, (fwd - turn * 0.6) * 9);
+  // R raises, F lowers. Held, not tapped: the lift has no position loop here,
+  // so this is the jog the tuning routines use.
+  const lift = (keys.has('r') ? 1 : 0) - (keys.has('f') ? 1 : 0);
+  api.setLift(lift * 110);
 }
 
 // --- pointer: drag to kidnap, shift-click to append a waypoint ---------------
@@ -777,6 +946,67 @@ function waypointAt(x, y, grabRadius = 4) {
 canvas.addEventListener('pointerdown', e => {
   const [x, y] = pointerIn(e);
 
+  // Laying a patrol path takes the click outright: while that mode is on, the
+  // field is a path editor and nothing else.
+  if (actorPathMode >= 0) {
+    if (e.button === 2) popActorWaypoint(actorPathMode);
+    else {
+      api.actorPathAdd(actorPathMode, x, y);
+      refreshActors();
+      renderActorList();
+    }
+    return;
+  }
+
+  // An existing waypoint, so a path can be corrected instead of relaid.
+  if (layers.actors) {
+    const wp = actorWaypointAt(x, y);
+    if (wp) {
+      dragActorWp = wp;
+      selectedActor = wp.id;
+      canvas.classList.add('dragging');
+      canvas.setPointerCapture(e.pointerId);
+      renderActorList();
+      return;
+    }
+  }
+
+  // A toggle, which is flat against a wall where nothing else lives.
+  if (layers.toggles) {
+    const t = toggleAt(x, y);
+    if (t >= 0) {
+      api.toggleCycle(t);
+      refreshToggles(); renderToggles();
+      return;
+    }
+  }
+
+  // A game piece, first of all -- they are the smallest thing on the field and
+  // the easiest to miss if something larger claims the click.
+  if (layers.pieces) {
+    const hit = pieceAt(x, y);
+    if (hit >= 0) {
+      draggingPiece = hit;
+      canvas.classList.add('dragging');
+      canvas.setPointerCapture(e.pointerId);
+      return;
+    }
+  }
+
+  // One of the other robots, before the route waypoints and before the kidnap.
+  // They are opaque rectangles you can see, so clicking one has to grab it.
+  if (layers.actors) {
+    const hit = actorAt(x, y);
+    if (hit >= 0) {
+      draggingActor = hit;
+      selectedActor = hit;
+      renderActorList();
+      canvas.classList.add('dragging');
+      canvas.setPointerCapture(e.pointerId);
+      return;
+    }
+  }
+
   if (e.shiftKey) {
     editor.value = appendStatement(editor.value, moveToStatement(x, y));
     saveScratch();
@@ -797,8 +1027,52 @@ canvas.addEventListener('pointerdown', e => {
 });
 
 canvas.addEventListener('pointermove', e => {
-  if (!dragging && dragWaypoint < 0) return;
+  // Tracked whether or not anything is being dragged: the rubber band from the
+  // last waypoint to the pointer is the only feedback that path mode is live
+  // before there are two points to draw a line between.
+  [hoverX, hoverY] = pointerIn(e);
+
+  if (!dragging && dragWaypoint < 0 && draggingActor < 0 && draggingPiece < 0
+      && !dragActorWp) return;
   const [x, y] = pointerIn(e);
+
+  if (dragActorWp) {
+    const a = actorState.find(v => v.id === dragActorWp.id);
+    if (a) {
+      const pts = a.path.slice();
+      pts[dragActorWp.index * 2] = x;
+      pts[dragActorWp.index * 2 + 1] = y;
+      writeActorPath(a.id, pts);
+    }
+    return;
+  }
+
+  if (draggingPiece >= 0) {
+    const p = pieceState.pieces.find(v => v.id === draggingPiece);
+    api.piecePose(draggingPiece, x, y, p ? p.h : 0);
+    refreshPieces();
+    return;
+  }
+
+  if (draggingActor >= 0) {
+    const a = actorState.find(v => v.id === draggingActor);
+    // Placing one by hand means you want it there, so stop it driving off the
+    // moment you let go. It used to snap straight back to its path.
+    if (a && a.patrol) {
+      api.actorFlags(a.id, a.on ? 1 : 0, 0, a.loop ? 1 : 0, a.face ? 1 : 0);
+      actorMsg('moved by hand, so it stopped driving', '');
+    }
+    // Alt turns it instead of moving it: a robot parked at an angle across a
+    // corner blocks differently from one square to the wall.
+    if (a && e.altKey) {
+      const deg = 90 - Math.atan2(y - a.y, x - a.x) * 180 / Math.PI;
+      api.actorPose(draggingActor, a.x, a.y, deg);
+    } else {
+      api.actorPose(draggingActor, x, y, a ? a.h : 0);
+    }
+    refreshActors();
+    return;
+  }
 
   if (dragWaypoint >= 0) {
     const wp = plan[dragWaypoint];
@@ -812,12 +1086,21 @@ canvas.addEventListener('pointermove', e => {
 });
 
 const endDrag = () => {
+  if (draggingActor >= 0 || dragActorWp) { renderActorList(); renderActorDetail(); }
   dragging = false;
   dragWaypoint = -1;
+  draggingActor = -1;
+  draggingPiece = -1;
+  dragActorWp = null;
   canvas.classList.remove('dragging');
 };
 canvas.addEventListener('pointerup', endDrag);
 canvas.addEventListener('pointercancel', endDrag);
+// Right-click is "take that point back" while laying a path, so the browser
+// menu has to stay out of the way.
+canvas.addEventListener('contextmenu', e => {
+  if (actorPathMode >= 0) e.preventDefault();
+});
 
 // ============================================================================
 // Field editor
@@ -831,9 +1114,10 @@ function showFieldGeom() {
   fieldFacts.innerHTML =
     `<div class="k">segments</div><div class="v">${fieldGeom.segments.length}</div>` +
     `<div class="k">circles</div><div class="v">${fieldGeom.circles.length}</div>`;
-  // The trailing element is `kind`: 0 = perimeter, 1 = structure, 2 = added.
-  // Kept in the text rather than stripped, because applying it back is how the
-  // field is edited and a perimeter that returns as kind 2 stops being a wall.
+  // The trailing element is `kind`: 0 = perimeter, 1 = structure, 2 = added,
+  // and 10-13 for the nine goals by type. Kept in the text rather than
+  // stripped, because applying it back is how the field is edited and a
+  // perimeter that returns as kind 2 stops being a wall.
   fieldJsonEl.value = JSON.stringify({
     segments: fieldGeom.segments.map(s => s.slice(0, 5)),
     circles: fieldGeom.circles.map(c => c.slice(0, 4)),
@@ -887,6 +1171,697 @@ document.getElementById('field-img-file').addEventListener('change', e => {
 });
 
 // ============================================================================
+// Game pieces
+// ============================================================================
+//
+// Pins and cups draw at the size they really are -- a pin is 1.6 in across, a
+// cup 3.16 -- and from the same radius the raycaster uses, so what you see is
+// what the beams stop on. At a wide zoom that is only a couple of pixels,
+// hence the floor on the drawn radius: below it a piece would vanish while
+// still blocking a beam, which is the one thing this view exists to show.
+
+let pieceState = { pieces: [], held: -1, closed: false, clawX: 0, clawY: 0,
+                   clawDir: 0, clawRange: -1, clawHit: false, liftDeg: 0, liftPin: 0 };
+let draggingPiece = -1;
+
+const PIN_YELLOW = '#E8C547';
+const PIN_RED    = '#D8484A';
+const PIN_BLUE   = '#5AA9E8';
+const PIN_EDGE   = '#15120B';
+const CUP_CLEAR  = '#EFECE3';
+const CUP_GRAY   = '#6B7078';
+const CUP_EDGE   = '#0B0C0E';
+const PIN_LEN_IN = 6.5;
+
+// The four pin colourings the manual lists, in enum order: red/yellow,
+// blue/yellow, yellow/yellow, red/blue. First entry is the marked half.
+const PIN_HALVES = [
+  [PIN_RED,    PIN_YELLOW],
+  [PIN_BLUE,   PIN_YELLOW],
+  [PIN_YELLOW, PIN_YELLOW],
+  [PIN_RED,    PIN_BLUE],
+];
+
+function refreshPieces() {
+  try { pieceState = JSON.parse(api.piecesJson()); }
+  catch { /* keep the last good frame */ }
+}
+
+function hexPath(r) {
+  ctx.beginPath();
+  for (let i = 0; i < 6; i++) {
+    const a = Math.PI / 6 + i * Math.PI / 3;
+    const x = Math.cos(a) * r, y = Math.sin(a) * r;
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+}
+
+// A pin on its side, drawn the way the manual's legend draws one: a body with
+// a point on the leading end.
+function lyingPath(halfLen, halfWid) {
+  ctx.beginPath();
+  ctx.moveTo(-halfLen, -halfWid);
+  ctx.lineTo(halfLen - halfWid, -halfWid);
+  ctx.lineTo(halfLen, 0);
+  ctx.lineTo(halfLen - halfWid, halfWid);
+  ctx.lineTo(-halfLen, halfWid);
+  ctx.closePath();
+}
+
+function drawPin(p) {
+  const [px, py] = toPx(p.x, p.y);
+  const r = Math.max(p.r * SCALE, 2.2);
+  const [mark, body] = PIN_HALVES[p.color] || PIN_HALVES[2];
+  const halfLen = Math.max((PIN_LEN_IN / 2) * SCALE, 5);
+
+  ctx.save();
+  ctx.translate(px, py);
+  // p.h is VEX degrees, as the bridge sends it. toPx has already flipped the y
+  // axis, so the rotation is negated to turn the same way the field does.
+  if (!p.up) ctx.rotate(-(90 - p.h) * Math.PI / 180);
+
+  if (p.up) hexPath(r); else lyingPath(halfLen, r);
+  ctx.fillStyle = body;
+  ctx.fill();
+
+  // The marked half: the top of an upright pin, the point of a lying one.
+  ctx.save();
+  ctx.clip();
+  ctx.fillStyle = mark;
+  if (p.up) ctx.fillRect(-r, -r, r * 2, r);
+  else ctx.fillRect(halfLen * 0.3, -r, halfLen, r * 2);
+  ctx.restore();
+
+  ctx.strokeStyle = p.held ? '#FF4D00' : PIN_EDGE;
+  ctx.lineWidth = p.held ? 2 : 1;
+  if (p.up) hexPath(r); else lyingPath(halfLen, r);
+  ctx.stroke();
+  ctx.restore();
+
+  // Nested in a goal: a ring, plus the lift preset it went on at.
+  if (p.goal >= 0) {
+    ctx.strokeStyle = 'rgba(232,197,71,0.55)';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(px, py, r * 2.6, 0, Math.PI * 2); ctx.stroke();
+    if (r > 5) {
+      ctx.fillStyle = '#0B0C0E';
+      ctx.font = `600 ${Math.round(r * 1.1)}px 'JetBrains Mono', monospace`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(String(p.level), px, py + 0.5);
+      ctx.textAlign = 'start';
+      ctx.textBaseline = 'alphabetic';
+    }
+  }
+}
+
+function drawCup(p) {
+  const [px, py] = toPx(p.x, p.y);
+  const r = Math.max(p.r * SCALE, 3);
+
+  // Half and half, the way the manual's legend tells them apart: clear side up
+  // is the light half on top. A pin nested in the clear half scores and one in
+  // the opaque half does not, so which way up it is worth seeing.
+  ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI * 2);
+  ctx.fillStyle = p.clear ? CUP_GRAY : CUP_CLEAR;
+  ctx.fill();
+  ctx.save(); ctx.clip();
+  ctx.fillStyle = p.clear ? CUP_CLEAR : CUP_GRAY;
+  ctx.fillRect(px - r, py - r, r * 2, r);
+  ctx.restore();
+
+  ctx.strokeStyle = p.held ? '#FF4D00' : CUP_EDGE;
+  ctx.lineWidth = p.held ? 2 : 1;
+  ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI * 2); ctx.stroke();
+}
+
+function drawPieces() {
+  // Cups first: a nested pin stands in one and has to read on top of it.
+  for (const p of pieceState.pieces) if (p.kind === 1) drawCup(p);
+  for (const p of pieceState.pieces) if (p.kind !== 1) drawPin(p);
+}
+
+// The claw's own beam, and the jaws. Distinct from the four localization
+// sensors: this one is what clawSees() and the auto-grab read.
+function drawClawBeam() {
+  const s = pieceState;
+  // clawDir is standard-math degrees, as the bridge sends it. Work the whole
+  // thing out in field inches and let toPx do the flip -- mixing canvas angles
+  // with field angles is how a beam ends up drawn mirrored.
+  const rad = s.clawDir * Math.PI / 180;
+  const dx = Math.cos(rad), dy = Math.sin(rad);
+  const len = Math.min(s.clawRange > 0 ? s.clawRange : 20, 40);
+
+  const [ox, oy] = toPx(s.clawX, s.clawY);
+  const [ex, ey] = toPx(s.clawX + dx * len, s.clawY + dy * len);
+
+  ctx.strokeStyle = s.closed ? 'rgba(255,77,0,0.8)' : 'rgba(232,197,71,0.45)';
+  ctx.lineWidth = 1.4;
+  ctx.setLineDash(s.clawHit ? [] : [3, 4]);
+  ctx.beginPath(); ctx.moveTo(ox, oy); ctx.lineTo(ex, ey); ctx.stroke();
+  ctx.setLineDash([]);
+
+  if (s.clawHit) {
+    ctx.fillStyle = s.closed ? '#FF4D00' : '#E8C547';
+    ctx.beginPath(); ctx.arc(ex, ey, 2.5, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // The jaws. Open reads as two marks apart, closed as one.
+  const jawLen = 3.0, nx = -dy, ny = dx;
+  const spread = s.closed ? 0.5 : 1.8;
+  ctx.strokeStyle = s.closed ? '#FF4D00' : '#E8C547';
+  ctx.lineWidth = 2;
+  for (const sign of [-1, 1]) {
+    const bx = s.clawX + nx * spread * sign, by = s.clawY + ny * spread * sign;
+    const [jx0, jy0] = toPx(bx, by);
+    const [jx1, jy1] = toPx(bx + dx * jawLen, by + dy * jawLen);
+    ctx.beginPath(); ctx.moveTo(jx0, jy0); ctx.lineTo(jx1, jy1); ctx.stroke();
+  }
+}
+
+/// The piece under a field point, or -1. Last one wins, so the most recently
+/// added is on top.
+function pieceAt(x, y) {
+  let hit = -1;
+  for (const p of pieceState.pieces) {
+    // A pin is 0.8 in of radius. Picking one up by its own footprint means
+    // hitting a 5 px target, so the grab radius has a floor of its own.
+    if (Math.hypot(p.x - x, p.y - y) <= Math.max(p.r, 1.5) + 1.5) hit = p.id;
+  }
+  return hit;
+}
+
+document.getElementById('btn-piece-pin').addEventListener('click', () => {
+  api.pieceAdd(0, 0, -12, 0); refreshPieces();
+});
+document.getElementById('btn-piece-cup').addEventListener('click', () => {
+  api.pieceAdd(1, 0, 12, 45); refreshPieces();
+});
+document.getElementById('btn-piece-reset').addEventListener('click', () => {
+  api.pieceDefault(); refreshPieces();
+});
+document.getElementById('btn-piece-clear').addEventListener('click', () => {
+  api.pieceClear(); refreshPieces();
+});
+// Working the claw by hand is the only way to check a grab without running a
+// whole routine to get to one.
+const clawBtn = document.getElementById('btn-claw');
+clawBtn.addEventListener('click', () => {
+  api.setClaw(pieceState.closed ? 0 : 1);
+  refreshPieces();
+});
+
+// <SG5>: one pin, in the jaws, on every reset. Its colour follows the half of
+// the field the robot was placed on, so it is red/yellow or blue/yellow without
+// being told which alliance you are.
+const preloadEl = document.getElementById('chk-preload');
+preloadEl.addEventListener('change', e => {
+  api.setPreload(e.target.checked ? 1 : 0);
+  api.reset(START.x, START.y, START.h);
+  refreshPieces();
+});
+
+const psClaw = document.getElementById('ps-claw');
+const psHeld = document.getElementById('ps-held');
+const psScored = document.getElementById('ps-scored');
+const psPhysics = document.getElementById('ps-physics');
+
+function updatePieceUi() {
+  const s = pieceState;
+  psClaw.textContent = s.closed ? 'closed' : 'open';
+  psClaw.className = 'v' + (s.closed ? ' on' : '');
+  clawBtn.textContent = s.closed ? 'Open claw' : 'Close claw';
+
+  const held = s.pieces.find(p => p.id === s.held);
+  psHeld.textContent = held ? (held.kind === 1 ? 'cup ' : 'pin ') + held.id : '—';
+  psHeld.className = 'v' + (held ? ' on' : '');
+
+  psScored.textContent = String(s.pieces.filter(p => p.goal >= 0).length);
+  psPhysics.textContent = physicsEngine;
+  psPhysics.className = 'v' + (physicsEngine === 'rapier' ? ' on' : '');
+}
+
+// ============================================================================
+// Toggles
+// ============================================================================
+//
+// A roller on the middle of each wall. Ram the FRONT of the robot into that
+// stretch and it rolls onto its next face; the face showing at the end of the
+// match decides who owns every yellow pin in that quadrant, which is 10 points
+// each. Clicking one here cycles it by hand.
+
+const TOGGLE_FILL = ['#E8C547', '#D8484A', '#5AA9E8'];
+const TOGGLE_NAME = ['neutral', 'red', 'blue'];
+const TOGGLE_DEPTH_IN = 2.2;
+
+let toggleState = [];
+let lastToggleSig = '';
+
+function refreshToggles() {
+  try { toggleState = JSON.parse(api.togglesJson()); }
+  catch { /* keep the last good frame */ }
+}
+
+/// The toggle's footprint in field inches: centre, and half extents along and
+/// across the wall it is mounted on.
+function toggleBox(t) {
+  const along = t.wall === 0 || t.wall === 2;      // north/south run in x
+  const halfA = t.len / 2, halfB = TOGGLE_DEPTH_IN / 2;
+  // Drawn just inside the wall so it reads as being on the field rather than
+  // floating off the edge of it.
+  const inset = TOGGLE_DEPTH_IN / 2;
+  const nx = t.wall === 1 ? 1 : (t.wall === 3 ? -1 : 0);
+  const ny = t.wall === 0 ? 1 : (t.wall === 2 ? -1 : 0);
+  return {
+    x: t.x - nx * inset, y: t.y - ny * inset,
+    hx: along ? halfA : halfB,
+    hy: along ? halfB : halfA,
+  };
+}
+
+function drawToggles() {
+  for (const t of toggleState) {
+    const b = toggleBox(t);
+    const [x0, y0] = toPx(b.x - b.hx, b.y + b.hy);
+    const [x1, y1] = toPx(b.x + b.hx, b.y - b.hy);
+    ctx.fillStyle = TOGGLE_FILL[t.state] || TOGGLE_FILL[0];
+    ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
+    // Lit while the robot is on it, so a ram that did not register is visible
+    // as the one that never lit.
+    ctx.strokeStyle = t.on ? '#FF4D00' : '#0B0C0E';
+    ctx.lineWidth = t.on ? 2 : 1;
+    ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
+  }
+}
+
+/// The toggle under a field point, or -1.
+function toggleAt(x, y) {
+  for (const t of toggleState) {
+    const b = toggleBox(t);
+    if (Math.abs(x - b.x) <= b.hx + 1.5 && Math.abs(y - b.y) <= b.hy + 1.5) return t.id;
+  }
+  return -1;
+}
+
+const toggleBarEl = document.getElementById('toggle-bar');
+
+function renderToggles() {
+  toggleBarEl.innerHTML = '';
+  const WALL = ['N', 'E', 'S', 'W'];
+  for (const t of toggleState) {
+    const b = document.createElement('button');
+    b.className = 'togglechip s' + t.state;
+    b.textContent = WALL[t.wall] + ' · ' + TOGGLE_NAME[t.state];
+    b.title = 'click to cycle; the robot flips it by ramming this wall';
+    b.addEventListener('click', () => {
+      api.toggleCycle(t.id);
+      refreshToggles(); renderToggles();
+    });
+    toggleBarEl.appendChild(b);
+  }
+}
+
+document.getElementById('btn-toggle-reset').addEventListener('click', () => {
+  api.toggleReset(); refreshToggles(); renderToggles();
+});
+
+// ============================================================================
+// Other robots, the auton gate, and the match clock
+// ============================================================================
+
+let actorState = [];
+let selectedActor = -1;
+let actorPathMode = -1;        // id whose path the next field click extends
+let draggingActor = -1;
+let dragActorWp = null;   // {id, index} while a waypoint is being dragged
+let hoverX = 0, hoverY = 0;   // pointer in field inches, for the rubber band
+
+const actorListEl = document.getElementById('actor-list');
+const actorDetailEl = document.getElementById('actor-detail');
+const actorStatusEl = document.getElementById('actor-status');
+
+function refreshActors() {
+  try { actorState = JSON.parse(api.actorsJson()); }
+  catch { actorState = []; }
+}
+
+/// Somewhere out of the way to drop a new one: spread along the far diagonal,
+/// which is where the robots this is modelling actually are. Stepping by the
+/// highest id rather than the count stops a fourth one landing on the first.
+let actorSpawn = 0;
+function freeSpot() {
+  const t = -30 + 30 * (actorSpawn++ % 3);
+  const nudge = Math.floor(actorSpawn / 3) * 6;
+  return { x: t + 18 + nudge, y: -t + 18 - nudge };
+}
+
+// The hint under the field, so "you are laying a path" is visible where you
+// are looking rather than only in the card you clicked.
+const stageHintEl = document.getElementById('stage-hint');
+const STAGE_HINT_DEFAULT = stageHintEl.innerHTML;
+function setStageHint(html) {
+  stageHintEl.innerHTML = html || STAGE_HINT_DEFAULT;
+  stageHintEl.classList.toggle('busy', !!html);
+}
+
+function actorMsg(text, kind) {
+  actorStatusEl.textContent = text || '';
+  actorStatusEl.className = 'status' + (kind ? ' ' + kind : '');
+}
+
+function addActor(team) {
+  const { x, y } = freeSpot();
+  const id = api.actorAdd(x, y, team === 1 ? 180 : 0, team);
+  selectedActor = id;
+  refreshActors();
+  renderActorList();
+}
+
+/// Rewrite one actor's whole path. The bridge only pushes points one at a
+/// time, so editing any of them means replaying the list.
+function writeActorPath(id, pts) {
+  api.actorPathClr(id);
+  for (let i = 0; i < pts.length; i += 2) api.actorPathAdd(id, pts[i], pts[i + 1]);
+  refreshActors();
+}
+
+function popActorWaypoint(id) {
+  const a = actorState.find(v => v.id === id);
+  if (!a || a.path.length < 2) return;
+  writeActorPath(id, a.path.slice(0, -2));
+  renderActorList();
+}
+
+/// Leaving path mode is what starts it driving: laying a path and then having
+/// to find a second button to make it go is most of what made this unusable.
+function finishPathMode() {
+  if (actorPathMode < 0) return;
+  const a = actorState.find(v => v.id === actorPathMode);
+  actorPathMode = -1;
+  canvas.classList.remove('laying');
+  setStageHint(null);
+  if (a && a.path.length >= 4) {
+    api.actorFlags(a.id, a.on ? 1 : 0, 1, a.loop ? 1 : 0, a.face ? 1 : 0);
+    actorMsg((a.path.length / 2) + ' points · driving', 'ok');
+  } else if (a) {
+    actorMsg('a path needs at least two points', 'err');
+  }
+  refreshActors();
+  renderActorList();
+  renderActorDetail();
+}
+
+/// A waypoint under a field point, or null. Only outside path mode, where a
+/// click means "lay another one" instead.
+function actorWaypointAt(x, y, grab = 3.5) {
+  for (const a of actorState) {
+    for (let i = 0; i < a.path.length; i += 2) {
+      if (Math.hypot(a.path[i] - x, a.path[i + 1] - y) <= grab) {
+        return { id: a.id, index: i / 2 };
+      }
+    }
+  }
+  return null;
+}
+
+function renderActorDetail() {
+  const a = actorState.find(v => v.id === selectedActor);
+  if (!a) { actorDetailEl.innerHTML = ''; return; }
+  actorDetailEl.innerHTML =
+    '<div class="param"><span title="how fast it drives its path">speed in/s</span>'
+    + '<input class="pslide" type="range" min="0" max="72" step="1" value="' + a.speed + '">'
+    + '<input class="pnum" type="number" step="1" value="' + a.speed + '"></div>'
+    + '<div class="seg actorseg">'
+    + '<button data-loop="1" class="' + (a.loop ? 'on' : '') + '">closed loop</button>'
+    + '<button data-loop="0" class="' + (a.loop ? '' : 'on') + '">there and back</button>'
+    + '</div>'
+    + '<label class="actorface"><input type="checkbox" ' + (a.face ? 'checked' : '')
+    + '> point it along the leg it is driving</label>';
+
+  const slide = actorDetailEl.querySelector('.pslide');
+  const num = actorDetailEl.querySelector('.pnum');
+  const pushSpeed = (v, from) => {
+    if (!Number.isFinite(v)) return;
+    if (from !== 'slide') slide.value = v;
+    if (from !== 'num') num.value = v;
+    api.actorSpeed(a.id, v);
+    refreshActors();
+  };
+  slide.addEventListener('input', () => pushSpeed(parseFloat(slide.value), 'slide'));
+  num.addEventListener('change', () => pushSpeed(parseFloat(num.value), 'num'));
+
+  actorDetailEl.querySelectorAll('[data-loop]').forEach(b =>
+    b.addEventListener('click', () => {
+      api.actorFlags(a.id, a.on ? 1 : 0, a.patrol ? 1 : 0,
+                     b.dataset.loop === '1' ? 1 : 0, a.face ? 1 : 0);
+      refreshActors(); renderActorDetail();
+    }));
+  actorDetailEl.querySelector('.actorface input').addEventListener('change', e => {
+    api.actorFlags(a.id, a.on ? 1 : 0, a.patrol ? 1 : 0, a.loop ? 1 : 0,
+                   e.target.checked ? 1 : 0);
+    refreshActors(); renderActorDetail();
+  });
+}
+
+function renderActorList() {
+  actorListEl.innerHTML = '';
+  for (const a of actorState) {
+    const row = document.createElement('div');
+    row.className = 'actorrow ' + (a.team === 1 ? 'opponent' : 'partner')
+                  + (a.id === selectedActor ? ' sel' : '');
+    const pts = a.path.length / 2;
+    row.innerHTML =
+      '<input type="checkbox" ' + (a.on ? 'checked' : '') + ' title="on the field">'
+      + '<span class="who"><b>' + (a.team === 1 ? 'Opp' : 'Ptnr') + ' ' + a.id + '</b> '
+      + a.x.toFixed(0) + ', ' + a.y.toFixed(0) + (pts ? ' · ' + pts + ' pt' : '')
+      + '</span>'
+      + '<button data-act="path" class="' + (actorPathMode === a.id ? 'on' : '') + '"'
+      + ' title="' + (actorPathMode === a.id
+          ? 'finish, and start it driving'
+          : 'then click the field to lay waypoints') + '">'
+      + (actorPathMode === a.id ? 'done' : 'path') + '</button>'
+      + '<button data-act="patrol" class="' + (a.patrol ? 'on' : '') + '"'
+      + ' title="drive the path on a loop">go</button>'
+      + '<button data-act="del" title="remove">&times;</button>';
+
+    // Selection on CLICK, and never from a control inside the row. On
+    // pointerdown this re-rendered the list, which removed the very button
+    // being pressed before its own click could fire -- so "path" did nothing
+    // at all unless the row already happened to be selected.
+    row.addEventListener('click', ev => {
+      if (ev.target.closest('button, input')) return;
+      selectedActor = a.id; renderActorList(); renderActorDetail();
+    });
+    row.querySelector('input').addEventListener('change', e => {
+      api.actorFlags(a.id, e.target.checked ? 1 : 0, a.patrol ? 1 : 0,
+                     a.loop ? 1 : 0, a.face ? 1 : 0);
+      refreshActors(); renderActorList();
+    });
+    row.querySelectorAll('button').forEach(b => b.addEventListener('click', ev => {
+      ev.stopPropagation();
+      const act = b.dataset.act;
+      if (act === 'del') {
+        api.actorRemove(a.id);
+        if (actorPathMode === a.id) actorPathMode = -1;
+        if (selectedActor === a.id) selectedActor = -1;
+      } else if (act === 'path') {
+        if (actorPathMode === a.id) { finishPathMode(); return; }
+        actorPathMode = a.id;
+        selectedActor = a.id;
+        canvas.classList.add('laying');
+        // Starting a fresh path is the common case; keeping the old one and
+        // appending to it is not what "path" reads as.
+        api.actorPathClr(a.id);
+        api.actorFlags(a.id, a.on ? 1 : 0, 0, 1, 1);
+        const who = (a.team === 1 ? 'Opp ' : 'Ptnr ') + a.id;
+        actorMsg('click the field to lay points · right-click undoes one · '
+                 + 'Esc or "done" finishes and starts it driving');
+        setStageHint('laying a path for <b>' + who + '</b> — click to add a '
+                     + 'point · right-click undoes · <b>Esc</b> finishes');
+      } else if (act === 'patrol') {
+        const want = a.patrol ? 0 : 1;
+        if (want && a.path.length < 4) {
+          actorMsg('that robot needs at least two path points', 'err');
+          return;
+        }
+        api.actorFlags(a.id, a.on ? 1 : 0, want, a.loop ? 1 : 0, a.face ? 1 : 0);
+        actorMsg('');
+      }
+      refreshActors(); renderActorList(); renderActorDetail();
+    }));
+    actorListEl.appendChild(row);
+  }
+}
+
+document.getElementById('btn-actor-partner').addEventListener('click', () => addActor(0));
+document.getElementById('btn-actor-opponent').addEventListener('click', () => addActor(1));
+document.getElementById('btn-actor-clear').addEventListener('click', () => {
+  api.actorClear();
+  selectedActor = actorPathMode = -1;
+  actorSpawn = 0;
+  canvas.classList.remove('laying');
+  actorMsg('');
+  refreshActors();
+  renderActorList();
+  renderActorDetail();
+});
+
+/// The actor whose body contains this point, or -1. Last one wins, so the most
+/// recently added is on top -- which is the one you just placed.
+function actorAt(x, y) {
+  let hit = -1;
+  for (const a of actorState) {
+    const rad = (90 - a.h) * Math.PI / 180;
+    const dx = x - a.x, dy = y - a.y;
+    const lx =  dx * Math.cos(rad) + dy * Math.sin(rad);
+    const ly = -dx * Math.sin(rad) + dy * Math.cos(rad);
+    if (Math.abs(lx) <= a.len / 2 && Math.abs(ly) <= a.wid / 2) hit = a.id;
+  }
+  return hit;
+}
+
+// --- auton read gate --------------------------------------------------------
+
+const farChk = document.getElementById('chk-farside');
+const farAutoChk = document.getElementById('chk-farside-auto');
+const farStateEl = document.getElementById('farside-state');
+
+farChk.addEventListener('change', e => api.setFarSide(e.target.checked ? 1 : 0, 0));
+farAutoChk.addEventListener('change', e => api.setAutoFar(e.target.checked ? 1 : 0));
+
+function updateFarSideUi(s) {
+  const g = s.rcl2 || {};
+  // The routine arms it for itself, so the checkbox follows the filter rather
+  // than the other way round.
+  if (farChk.checked !== !!g.gate) farChk.checked = !!g.gate;
+  farStateEl.classList.toggle('armed', !!g.gate);
+  if (!g.gate) { farStateEl.textContent = 'off — every return is considered'; return; }
+  const left = g.gms > 0 ? ' · ' + (g.gms / 1000).toFixed(1) + ' s left' : '';
+  farStateEl.textContent = 'armed — ignoring returns past the diagonal' + left;
+}
+
+// --- match clock ------------------------------------------------------------
+
+const periodSeg = document.getElementById('period-seg');
+for (const b of periodSeg.querySelectorAll('button')) {
+  b.addEventListener('click', () => {
+    periodSeg.querySelectorAll('button').forEach(o => o.classList.toggle('on', o === b));
+    api.setPeriod(parseInt(b.dataset.period, 10));
+  });
+}
+
+function updatePeriodHud(s) {
+  const p = s.period || { mode: 0, left: -1 };
+  if (!p.mode) {
+    hud.period.textContent = '—';
+    hud.period.className = '';
+    return;
+  }
+  const total = p.mode === 1 ? 15 : 60;
+  const left = Math.max(0, p.left) / 1000;
+  hud.period.textContent = left.toFixed(1) + ' / ' + total + ' s'
+                         + (left <= 0 ? '  EXPIRED' : '');
+  hud.period.className = left <= 0 ? 'out' : (left < 3 ? 'warn' : 'run');
+}
+
+// --- beam-block stress test -------------------------------------------------
+//
+// "Does RCL survive traffic" is not a question you can answer by watching. This
+// parks robots against the walls your route ranges off, runs it, and reports
+// the spread of the final error -- worst case, not average, because the worst
+// case is the one that loses the match.
+
+const stressOut = document.getElementById('stress-out');
+let stressAbort = false;
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+/// Wall-hugging spots. A robot in the middle of the field blocks nothing; one
+/// flat against a wall takes that wall away from every sensor using it.
+function randomBlockers(count) {
+  const spots = [];
+  for (let i = 0; i < count; i++) {
+    const wall = Math.floor(Math.random() * 4);
+    const along = (Math.random() * 2 - 1) * 55;
+    const off = 62 + Math.random() * 6;
+    const p = [{ x: off, y: along, h: 90 }, { x: -off, y: along, h: 90 },
+               { x: along, y: off, h: 0 }, { x: along, y: -off, h: 0 }][wall];
+    spots.push(p);
+  }
+  return spots;
+}
+
+async function runStress() {
+  const runs = Math.max(1, parseInt(document.getElementById('stress-runs').value, 10) || 1);
+  const bots = Math.max(1, parseInt(document.getElementById('stress-bots').value, 10) || 1);
+  const idx = parseInt(autonSel.value, 10);
+  if (!(idx >= 0)) {
+    stressOut.textContent = 'pick a compiled auton first — the stress test runs that';
+    stressOut.className = 'status err';
+    return;
+  }
+
+  const src = autonSource(idx);
+  const parsedSrc = src ? parseAuton(src) : null;
+  const start = (parsedSrc && !parsedSrc.error) ? openingPose(parsedSrc.cmds) : null;
+
+  stressAbort = false;
+  const saved = actorState.map(a => Object.assign({}, a));
+  const errs = [];
+  const oldSpeed = speed;
+  speed = 6;                      // the sim is deterministic; just go faster
+
+  for (let run = 0; run < runs && !stressAbort; run++) {
+    api.actorClear();
+    for (const p of randomBlockers(bots)) api.actorAdd(p.x, p.y, p.h, 1);
+    refreshActors();
+    renderActorList();
+
+    if (start) api.reset(start.x, start.y, start.h);
+    else api.reset.apply(null, readStart());
+    api.recClear();
+    api.runAuton(idx);
+    running = true;
+
+    // The route owns its own timing; poll the flag rather than guessing.
+    let guard = 0;
+    await sleep(150);
+    while (api.routeRunning() === 1 && guard++ < 4000 && !stressAbort) await sleep(25);
+
+    if (lastState) errs.push(lastState.err.dist);
+    stressOut.className = 'status';
+    const lastErr = errs.length ? errs[errs.length - 1].toFixed(2) : '—';
+    stressOut.textContent = 'run ' + (run + 1) + '/' + runs + '…  last ' + lastErr + ' in';
+  }
+
+  speed = oldSpeed;
+  api.actorClear();
+  for (const a of saved) {
+    const id = api.actorAdd(a.x, a.y, a.h, a.team);
+    for (let i = 0; i < a.path.length; i += 2) api.actorPathAdd(id, a.path[i], a.path[i + 1]);
+    api.actorFlags(id, a.on ? 1 : 0, a.patrol ? 1 : 0, a.loop ? 1 : 0, a.face ? 1 : 0);
+    api.actorSpeed(id, a.speed);
+  }
+  refreshActors();
+  renderActorList();
+
+  if (!errs.length) { stressOut.textContent = 'stopped'; return; }
+  const worst = Math.max.apply(null, errs);
+  const best = Math.min.apply(null, errs);
+  const mean = errs.reduce((a, b) => a + b, 0) / errs.length;
+  stressOut.className = 'status ' + (worst > 4 ? 'err' : 'ok');
+  stressOut.textContent = errs.length + ' runs · worst ' + worst.toFixed(2)
+    + ' in · mean ' + mean.toFixed(2) + ' in · best ' + best.toFixed(2) + ' in';
+}
+
+document.getElementById('btn-stress').addEventListener('click', runStress);
+document.getElementById('btn-stress-stop').addEventListener('click', () => {
+  stressAbort = true;
+  api.stopAuton();
+});
+
+// ============================================================================
 // Plots
 // ============================================================================
 
@@ -899,6 +1874,13 @@ const SIGNALS = [
   ['trueY',    'true y',        2,  '#64748b', false],
   ['mclX',     'mcl x',         7,  '#f472b6', false],
   ['mclY',     'mcl y',         8,  '#e879f9', false],
+  // What RCL wanted against what it was allowed to do. A residual that sits
+  // large while the step sits pinned at the rate limit is the filter being held
+  // back; one that changes sign every few samples is it fighting itself.
+  ['rclResX',  'rcl resid x in', 14, '#34d399', false],
+  ['rclResY',  'rcl resid y in', 15, '#2dd4bf', false],
+  ['rclStep',  'rcl sync step',  16, '#22d3ee', false],
+  ['rclVotes', 'rcl votes',      17, '#a3e635', false],
 ];
 const sigOn = Object.fromEntries(SIGNALS.map(([k, , , , on]) => [k, on]));
 
@@ -1088,7 +2070,8 @@ document.getElementById('btn-export').addEventListener('click', () => {
   const ptr = api.recPtr() >> 2;
   const buf = M.HEAPF32.subarray(ptr, ptr + n * stride);
   const cols = ['t', 'trueX', 'trueY', 'trueH', 'odomX', 'odomY', 'odomH',
-                'mclX', 'mclY', 'mclH', 'errDist', 'errHeading', 'vLin', 'vAng'];
+                'mclX', 'mclY', 'mclH', 'errDist', 'errHeading', 'vLin', 'vAng',
+                'rclResidX', 'rclResidY', 'rclSyncStep', 'rclVotes'];
   let csv = cols.join(',') + '\n';
   for (let i = 0; i < n; i++) {
     const row = [];
@@ -1146,16 +2129,45 @@ function drawField() {
   }
 }
 
+// Circle kind 10 + GoalKind, as sim/world/field.cpp tags them: red alliance,
+// blue alliance, short neutral, tall neutral. Anything else is geometry the
+// editor drew, and stays grey.
+const GOAL_FILL = { 10: 'rgba(216,72,74,0.28)', 11: 'rgba(90,169,232,0.28)',
+                    12: 'rgba(232,197,71,0.22)', 13: 'rgba(232,197,71,0.34)' };
+const GOAL_EDGE = { 10: '#D8484A', 11: '#5AA9E8', 12: '#E8C547', 13: '#E8C547' };
+
 function drawObstacles() {
   for (const c of fieldGeom.circles) {
     const [px, py] = toPx(c[0], c[1]);
+    const kind = c[3] ?? 0;
+    const r = c[2] * SCALE;
+    const goal = kind >= 10 && kind <= 13;
+
+    // A goal is an octagon on the field, and drawn as one here. The raycaster
+    // still treats it as the circle through the flats, so the outline is a
+    // hair outside what the beams stop on -- which is the right way round.
     ctx.beginPath();
-    ctx.arc(px, py, c[2] * SCALE, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(148,163,184,0.32)';
+    if (goal) {
+      for (let i = 0; i < 8; i++) {
+        const a = Math.PI / 8 + i * Math.PI / 4;
+        const x = px + Math.cos(a) * r * 1.082, y = py + Math.sin(a) * r * 1.082;
+        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      }
+      ctx.closePath();
+    } else {
+      ctx.arc(px, py, r, 0, Math.PI * 2);
+    }
+    ctx.fillStyle = GOAL_FILL[kind] || 'rgba(148,163,184,0.32)';
     ctx.fill();
-    ctx.strokeStyle = '#94a3b8';
-    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = GOAL_EDGE[kind] || '#94a3b8';
+    ctx.lineWidth = kind === 13 ? 2.2 : 1.5;
     ctx.stroke();
+
+    // The tall centre goal reads apart from the four short ones by carrying a
+    // second ring, the way it stands a head above them on the field.
+    if (kind === 13) {
+      ctx.beginPath(); ctx.arc(px, py, r * 0.5, 0, Math.PI * 2); ctx.stroke();
+    }
   }
 }
 
@@ -1295,37 +2307,16 @@ function drawPlan() {
 // Jaws on the BACK of the robot: every pin grab in the match autons reverses
 // into the pin, so that is the end the claw is on. Pivoted rather than slid,
 // because a pneumatic claw hinges.
-function drawClaw(pose, extended) {
-  const rad = (90 - pose.h) * Math.PI / 180;
-  const [px, py] = toPx(pose.x, pose.y);
-  const L = BODY_L * SCALE;
-  const reach = 0.34 * L;
-  const hinge = 0.17 * L;
-  const spread = extended ? 0.85 : -0.25;   // radians off the centre line
-
-  ctx.save();
-  ctx.translate(px, py);
-  ctx.rotate(-rad);
-  ctx.strokeStyle = extended ? '#f97316' : '#64748b';
-  ctx.lineWidth = 2.5;
-  ctx.lineCap = 'round';
-  for (const side of [-1, 1]) {
-    ctx.beginPath();
-    ctx.moveTo(-L / 2, side * hinge);
-    ctx.lineTo(-L / 2 - reach * Math.cos(spread),
-               side * (hinge + reach * Math.sin(spread)));
-    ctx.stroke();
-  }
-  ctx.lineCap = 'butt';
-  ctx.restore();
-}
-
 // The footprint the physics collides with, so the drawn box is the box that
 // stops on a wall rather than a 15 in stand-in for it.
 const BODY_L = api.getParam('robotLengthIn');
 const BODY_W = api.getParam('robotWidthIn');
 const MCL_PARTICLES = api.getParam('mclParticleCount');
 
+// The robot, drawn as the one on the field: all-omni drive, and a rear
+// aligner with the claw sitting inside it. The outline is still the exact
+// rectangle the collision test uses -- everything else is inside it, so what
+// you see is never bigger than what the physics stops.
 function drawRobot(pose, color, filled) {
   const rad = (90 - pose.h) * Math.PI / 180;
   const [px, py] = toPx(pose.x, pose.y);
@@ -1333,13 +2324,54 @@ function drawRobot(pose, color, filled) {
   ctx.save();
   ctx.translate(px, py);
   ctx.rotate(-rad);
-  ctx.strokeStyle = color;
-  ctx.lineWidth = 2;
+
   if (filled) {
     ctx.fillStyle = color.replace('rgb(', 'rgba(').replace(')', ',0.14)');
     ctx.fillRect(-L / 2, -W / 2, L, W);
   }
+
+  // Six omni wheels, three a side, matching the three motors per side in
+  // config.cpp. The cross-bar is the roller line -- an omni is the reason a
+  // rear aligner can pull the robot sideways onto a goal at all.
+  const wl = L * 0.2, ww = W * 0.09;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1;
+  ctx.globalAlpha = 0.75;
+  for (const sy of [-1, 1]) {
+    for (const fx of [-0.3, 0, 0.3]) {
+      const cx = fx * L, cy = sy * (W / 2 - ww / 2 - 1);
+      ctx.strokeRect(cx - wl / 2, cy - ww / 2, wl, ww);
+      ctx.beginPath();
+      ctx.moveTo(cx - wl / 2, cy); ctx.lineTo(cx + wl / 2, cy);
+      ctx.stroke();
+    }
+  }
+  ctx.globalAlpha = 1;
+
+  // The rear aligner: two arms reaching back past the claw, flared at the tips
+  // so a goal funnels into the throat instead of catching a corner.
+  if (ALIGNER.width > 0 && ALIGNER.depth > 0) {
+    const d = ALIGNER.depth * SCALE;
+    const hw = (ALIGNER.width / 2) * SCALE;
+    const hm = (ALIGNER.mouth / 2) * SCALE;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.6;
+    ctx.globalAlpha = 0.85;
+    for (const sy of [-1, 1]) {
+      ctx.beginPath();
+      ctx.moveTo(-L / 2, sy * hw);
+      ctx.lineTo(-L / 2 - d, sy * hm);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
   ctx.strokeRect(-L / 2, -W / 2, L, W);
+
+  // Front chevron. This end is also the toggle flipper: toggles.cpp only
+  // counts a ram when the front face is the one against the wall.
   ctx.beginPath();
   ctx.moveTo(L / 2, 0); ctx.lineTo(L / 2 - 6, -5);
   ctx.moveTo(L / 2, 0); ctx.lineTo(L / 2 - 6, 5);
@@ -1359,18 +2391,154 @@ function drawPoseMarker(pose, color) {
   ctx.stroke();
 }
 
+// One ray per sensor, coloured by what RCL decided about it. Drift with no
+// explanation is the hard part of tuning this filter; a ray that goes amber the
+// moment the robot turns, or red along one wall only, names the cause.
 function drawRclRays(s) {
   if (!s.filters) return;
   for (const f of s.filters) {
-    if (!f.rclValid) continue;
+    const cls = rclClass(f.cls);
+    const rejected = !f.rclValid;
+    if (rejected && !layers.rclreject) continue;
+    // A slot with no device has nothing to say.
+    if (f.cls === 0 && rejected) continue;
+
+    // A no-return reports the device ceiling -- 9999 mm, 393 in -- and drawing
+    // to it runs the ray most of three field lengths off the canvas.
+    const len = Math.min(f.rclIn > 0.5 ? f.rclIn : 4, 100);
     const [ox, oy] = toPx(f.rx, f.ry);
-    const [ex, ey] = toPx(f.rx + f.rdx * f.rclIn, f.ry + f.rdy * f.rclIn);
-    ctx.strokeStyle = 'rgba(52,211,153,0.7)';
-    ctx.lineWidth = 1.6;
+    const [ex, ey] = toPx(f.rx + f.rdx * len, f.ry + f.rdy * len);
+
+    ctx.strokeStyle = cls.col;
+    ctx.globalAlpha = rejected ? 0.45 : 0.85;
+    ctx.lineWidth = f.pair ? 2.6 : (rejected ? 1.1 : 1.8);
+    ctx.setLineDash(rejected ? [4, 4] : []);
     ctx.beginPath(); ctx.moveTo(ox, oy); ctx.lineTo(ex, ey); ctx.stroke();
-    ctx.fillStyle = '#34d399';
-    ctx.beginPath(); ctx.arc(ex, ey, 3, 0, Math.PI * 2); ctx.fill();
+    ctx.setLineDash([]);
+
+    ctx.fillStyle = cls.col;
+    ctx.beginPath(); ctx.arc(ex, ey, f.pair ? 4 : 3, 0, Math.PI * 2); ctx.fill();
+
+    // A vote that passed every gate and was then dropped for disagreeing with
+    // the other sensors on its axis is a different failure, and worth a ring.
+    if (f.out) {
+      ctx.strokeStyle = '#fb923c';
+      ctx.globalAlpha = 1;
+      ctx.lineWidth = 1.6;
+      ctx.beginPath(); ctx.arc(ex, ey, 6.5, 0, Math.PI * 2); ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
   }
+}
+
+// The other robots. Drawn from the same rectangle the raycaster uses, so what
+// you see is exactly what the beams stop on.
+function drawActors() {
+  for (const a of actorState) {
+    const rad = (90 - a.h) * Math.PI / 180;
+    const [px, py] = toPx(a.x, a.y);
+    const L = a.len * SCALE, W = a.wid * SCALE;
+    const col = a.team === 1 ? '#f87171' : '#38bdf8';
+
+    // Patrol path first, under the body, and drawn from the FIRST point rather
+    // than the second: a path editor whose opening click shows nothing is one
+    // you cannot tell apart from a broken one.
+    const laying = actorPathMode === a.id;
+    if (a.path.length >= 2) {
+      if (a.path.length >= 4) {
+        ctx.strokeStyle = a.team === 1 ? 'rgba(248,113,113,0.4)' : 'rgba(56,189,248,0.4)';
+        ctx.lineWidth = 1.2;
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        for (let i = 0; i < a.path.length; i += 2) {
+          const [wx, wy] = toPx(a.path[i], a.path[i + 1]);
+          i === 0 ? ctx.moveTo(wx, wy) : ctx.lineTo(wx, wy);
+        }
+        if (a.loop && !laying) ctx.closePath();
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+
+      // Where the next click would put a point.
+      if (laying) {
+        const [ax, ay] = toPx(a.path[a.path.length - 2], a.path[a.path.length - 1]);
+        const [bx, by] = toPx(hoverX, hoverY);
+        ctx.strokeStyle = '#FF4D00';
+        ctx.lineWidth = 1.2;
+        ctx.setLineDash([2, 3]);
+        ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+        ctx.setLineDash([]);
+      }
+
+      // Numbered, so the order it drives them in is not a guess.
+      for (let i = 0; i < a.path.length; i += 2) {
+        const [wx, wy] = toPx(a.path[i], a.path[i + 1]);
+        ctx.fillStyle = col;
+        ctx.beginPath(); ctx.arc(wx, wy, 4, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = '#0B0C0E';
+        ctx.font = "600 7px 'JetBrains Mono', monospace";
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(String(i / 2 + 1), wx, wy + 0.5);
+        ctx.textAlign = 'start';
+        ctx.textBaseline = 'alphabetic';
+      }
+    }
+
+    ctx.save();
+    ctx.translate(px, py);
+    ctx.rotate(-rad);
+    ctx.globalAlpha = a.on ? 1 : 0.32;
+    ctx.fillStyle = a.team === 1 ? 'rgba(248,113,113,0.16)' : 'rgba(56,189,248,0.16)';
+    ctx.fillRect(-L / 2, -W / 2, L, W);
+    ctx.strokeStyle = col;
+    ctx.lineWidth = a.id === selectedActor ? 2.6 : 1.6;
+    ctx.setLineDash(a.on ? [] : [3, 3]);
+    ctx.strokeRect(-L / 2, -W / 2, L, W);
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.moveTo(L / 2, 0); ctx.lineTo(L / 2 - 6, -5);
+    ctx.moveTo(L / 2, 0); ctx.lineTo(L / 2 - 6, 5);
+    ctx.stroke();
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+}
+
+// The auton read gate. Not a barrier -- beams pass straight through it. The
+// shading is the half whose returns RCL is ignoring, which is the only thing
+// about it that is worth seeing.
+function drawAutonLine(s) {
+  const g = s.rcl2;
+  if (!g || !g.gate) return;
+
+  // n.p = d is the line; shade the side where n.p > d.
+  const { gnx: nx, gny: ny, gd: d } = g;
+  const R = 200;
+  const tx = -ny, ty = nx;                       // along the line
+  const ax = nx * d + tx * R, ay = ny * d + ty * R;
+  const bx = nx * d - tx * R, by = ny * d - ty * R;
+
+  ctx.save();
+  const [x0, y0] = toPx(-72, 72);
+  ctx.beginPath(); ctx.rect(x0, y0, 144 * SCALE, 144 * SCALE); ctx.clip();
+
+  const [p1x, p1y] = toPx(ax, ay);
+  const [p2x, p2y] = toPx(bx, by);
+  const [p3x, p3y] = toPx(bx + nx * R, by + ny * R);
+  const [p4x, p4y] = toPx(ax + nx * R, ay + ny * R);
+  ctx.fillStyle = 'rgba(56,189,248,0.07)';
+  ctx.beginPath();
+  ctx.moveTo(p1x, p1y); ctx.lineTo(p2x, p2y);
+  ctx.lineTo(p3x, p3y); ctx.lineTo(p4x, p4y);
+  ctx.closePath(); ctx.fill();
+
+  ctx.strokeStyle = 'rgba(56,189,248,0.75)';
+  ctx.lineWidth = 1.8;
+  ctx.setLineDash([9, 6]);
+  ctx.beginPath(); ctx.moveTo(p1x, p1y); ctx.lineTo(p2x, p2y); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.restore();
 }
 
 function drawGhost(row) {
@@ -1391,17 +2559,21 @@ function render(s) {
   if (layers.photo) drawFieldImage();
   if (layers.grid) drawGrid();
   if (layers.obstacles) drawObstacles();
+  if (layers.toggles) drawToggles();
   if (layers.plan) drawPlan();
   if (layers.truePath) drawTrail(api.trailTruePtr, api.trailTrueCnt, 'rgba(74,222,128,0.5)');
   if (layers.odomPath) drawTrail(api.trailOdomPtr, api.trailOdomCnt, 'rgba(251,191,36,0.5)');
   if (layers.particles) drawParticles();
+  if (layers.autonline) drawAutonLine(s);
+  if (layers.actors) drawActors();
+  if (layers.pieces) drawPieces();
   if (layers.beams) drawBeams(s);
   if (layers.rcl && (s.locMode & 2)) { drawRclRays(s); drawPoseMarker(s.rcl, '#34d399'); }
   if (layers.odom) drawPoseMarker(s.odom, '#fbbf24');
   if (layers.mcl && (s.locMode & 1)) drawPoseMarker(s.mcl, '#f472b6');
   if (layers.ghost && replayRow) drawGhost(replayRow);
   if (layers.robot) drawRobot(s.true, s.colliding ? 'rgb(248,113,113)' : 'rgb(74,222,128)', true);
-  if (layers.claw) drawClaw(s.true, !!s.claw);
+  if (layers.claw) drawClawBeam();
 }
 
 // ============================================================================
@@ -1409,8 +2581,8 @@ function render(s) {
 // ============================================================================
 
 const hud = Object.fromEntries(
-  ['t', 'true', 'odom', 'mcl', 'ekf', 'ekfsig', 'err', 'speed', 'sensors',
-   'neff', 'tasks']
+  ['t', 'period', 'true', 'odom', 'rcl', 'rclstate', 'mcl', 'ekf', 'ekfsig',
+   'err', 'speed', 'sensors', 'neff', 'tasks', 'claw', 'lift']
     .map(k => [k, document.getElementById('hud-' + k)]));
 
 const diagEl = document.getElementById('sensor-diag');
@@ -1418,7 +2590,8 @@ const diagEl = document.getElementById('sensor-diag');
 function updateDiag(s) {
   if (!s.filters) return;
   const cell = (txt, cls) => `<div class="${cls}">${txt}</div>`;
-  let html = cell('#', 'hdr') + cell('sim', 'hdr r') + cell('mcl', 'hdr r') + cell('rcl', 'hdr r');
+  let html = cell('#', 'hdr') + cell('sim', 'hdr r') + cell('mcl', 'hdr r')
+           + cell('rcl', 'hdr r') + cell('why', 'hdr');
 
   for (const f of s.filters) {
     const beam = s.beams.find(b => b.i === f.i);
@@ -1433,14 +2606,44 @@ function updateDiag(s) {
     else if (dead > 0.60)   { mclTxt = 'dead ' + Math.round(dead * 100) + '%'; mclCls = 'bad'; }
     else if (dead > 0.05)   { mclTxt = 'part ' + Math.round(dead * 100) + '%'; mclCls = 'warn'; }
     else                    { mclTxt = 'use';  mclCls = 'ok'; }
-    const rclCls = (s.locMode & 2) ? (f.rclValid ? 'ok' : 'bad') : 'off';
+
+    // RCL says WHY, not just whether. A column that reads "drop" for every
+    // sensor tells you nothing you could act on.
+    let rclTxt, rclCls, why;
+    if (!(s.locMode & 2)) {
+      rclTxt = '–'; rclCls = 'off'; why = '';
+    } else {
+      const c = rclClass(f.cls);
+      rclTxt = f.pair ? 'pair' : c.short;
+      rclCls = f.pair ? 'paired' : c.grp;
+      why = f.pair ? 'spans the field' : c.label;
+      if (f.out) { rclCls = 'gated'; why = 'outvoted on its axis'; }
+      // The innovation is the number behind a short/long verdict.
+      if (c.grp === 'wrong' && Number.isFinite(f.innov)) {
+        why += ` ${f.innov > 0 ? '+' : ''}${f.innov.toFixed(1)}"`;
+      }
+    }
+
     html += cell(f.i, 's')
           + cell(simTxt, 'r')
           + cell(mclTxt, `r ${mclCls}`)
-          + cell((s.locMode & 2) ? (f.rclValid ? 'use' : 'drop') : '–', `r ${rclCls}`);
+          + cell(rclTxt, `r ${rclCls}`)
+          + cell(why, 'reason');
   }
   diagEl.innerHTML = html;
 }
+
+// Built once. Only the groups, not all eleven classes: the point is to read the
+// colours, and a legend longer than the table it explains is not a legend.
+document.getElementById('diag-legend').innerHTML = [
+  ['#4ade80', 'used'],
+  ['#34d399', 'pair-verified'],
+  ['#e2b341', 'gated'],
+  ['#94A3B8', 'post'],
+  ['#38bdf8', 'far side'],
+  ['#f87171', 'disagrees'],
+  ['#4b5563', 'no new sample'],
+].map(([c, t]) => `<span><i style="background:${c}"></i>${t}</span>`).join('');
 
 const fmtPose = p => `${p.x.toFixed(2)}, ${p.y.toFixed(2)} @ ${p.h.toFixed(1)}°`;
 
@@ -1448,6 +2651,23 @@ function updateHud(s) {
   hud.t.textContent = s.t.toFixed(2) + ' s';
   hud.true.textContent = fmtPose(s.true);
   hud.odom.textContent = fmtPose(s.odom);
+  updatePeriodHud(s);
+
+  const r = s.rcl2 || {};
+  hud.rcl.textContent = (s.locMode & 2) ? fmtPose(s.rcl) : '—';
+  if (!(s.locMode & 2)) {
+    hud.rclstate.textContent = '—';
+    hud.rclstate.style.color = '';
+  } else {
+    const bits = [`${r.votes | 0} vote${r.votes === 1 ? '' : 's'}`];
+    if (r.spread > 0.005) bits.push(`spread ${r.spread.toFixed(2)}"`);
+    bits.push(`step ${(r.sync || 0).toFixed(2)}"`);
+    if (r.held) bits.push('TURN-HELD');
+    if (r.gate) bits.push('gated');
+    hud.rclstate.textContent = r.displaced ? 'RECOVERING · ' + bits.join(' ') : bits.join(' ');
+    hud.rclstate.style.color = r.displaced ? '#f87171' : (r.held ? '#e2b341' : '');
+  }
+
   hud.mcl.textContent = (s.locMode & 1) ? fmtPose(s.mcl) : '—';
   hud.ekf.textContent = (s.locMode & 4) ? fmtPose(s.ekf) : '—';
   hud.ekfsig.textContent = (s.locMode & 4)
@@ -1465,6 +2685,14 @@ function updateHud(s) {
     ? `${s.mcl.nEff.toFixed(0)} / ${MCL_PARTICLES.toFixed(0)}`
       + (s.mclInject > 0.001 ? `  inject ${(s.mclInject * 100).toFixed(0)}%` : '')
     : '—';
+  const ps = pieceState;
+  const heldPiece = ps.pieces.find(p => p.id === ps.held);
+  hud.claw.textContent = (ps.closed ? 'closed' : 'open')
+    + (heldPiece ? ` · ${heldPiece.kind === 1 ? 'cup' : 'pin'} ${heldPiece.id}`
+                 : (ps.clawHit ? ` · ${ps.clawRange.toFixed(1)} in` : ''));
+  hud.claw.style.color = heldPiece ? '#FF4D00' : '';
+  hud.lift.textContent = `${ps.liftDeg.toFixed(0)}°  pin ${ps.liftPin}`;
+
   const ri = api.routeIndex();
   hud.tasks.textContent = `${s.tasks} live` + (ri >= 0 ? ` · cmd ${ri}` : '');
   updateDiag(s);
@@ -1489,8 +2717,19 @@ function frame(now) {
   }
 
   lastState = JSON.parse(api.stateJson());
+  // Actors move under their own script, so their poses have to be re-read every
+  // frame rather than only when the list is edited.
+  refreshActors();
+  refreshPieces();
+  refreshToggles();
   render(lastState);
   updateHud(lastState);
+  updateFarSideUi(lastState);
+  updatePieceUi();
+  // Ramming one changes it without anything in the UI being touched, so the
+  // chips are rebuilt when the states move rather than only when clicked.
+  const tsig = toggleState.map(t => t.state).join('');
+  if (tsig !== lastToggleSig) { lastToggleSig = tsig; renderToggles(); }
 
   // Render the report on the falling edge, once, rather than rebuilding the
   // table every frame while the route is still running.
@@ -1505,6 +2744,14 @@ function frame(now) {
 }
 
 requestAnimationFrame(frame);
+
+refreshActors();
+renderActorList();
+renderActorDetail();
+refreshPieces();
+updatePieceUi();
+refreshToggles();
+renderToggles();
 
 // Drivetrain facts, asked for rather than asserted. These were literals, and
 // two of them were wrong -- 10.4 in of track and a 3.25 in wheel against the

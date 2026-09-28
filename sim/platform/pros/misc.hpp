@@ -104,6 +104,28 @@ inline bool is_connected() { return false; }
 inline bool is_disabled() { return false; }
 }  // namespace competition
 
+// The C API alongside the C++ class. Routines reach for pros::c::* for the
+// haptics because the class form needs a Controller object in scope, and a
+// routine that only wants to buzz should not have to hold one.
+namespace c {
+inline std::int32_t controller_rumble(controller_id_e_t, const char*) { return 1; }
+inline std::int32_t controller_is_connected(controller_id_e_t) { return 1; }
+inline std::int32_t controller_get_analog(controller_id_e_t id,
+                                          controller_analog_e_t channel) {
+    return sim_input::state(static_cast<int>(id)).analog[static_cast<int>(channel)];
+}
+inline std::int32_t controller_get_digital(controller_id_e_t id,
+                                           controller_digital_e_t button) {
+    return sim_input::state(static_cast<int>(id)).digital[static_cast<int>(button)] ? 1 : 0;
+}
+inline std::int32_t controller_clear(controller_id_e_t) { return 1; }
+inline std::int32_t controller_clear_line(controller_id_e_t, std::uint8_t) { return 1; }
+inline std::int32_t controller_set_text(controller_id_e_t, std::uint8_t,
+                                        std::uint8_t, const char*) { return 1; }
+inline std::int32_t controller_print(controller_id_e_t, std::uint8_t,
+                                     std::uint8_t, const char*, ...) { return 1; }
+}  // namespace c
+
 inline std::uint8_t competition_get_status() { return 0; }
 inline bool competition_is_autonomous() { return false; }
 inline bool competition_is_connected() { return false; }

@@ -109,4 +109,9 @@ float randUniform();                      // [0, 1)
 float randNormal();                       // mean 0, stddev 1
 float randNormal(float mean, float stddev);
 
+/// Noise for devices no estimator reads -- the claw's own sensor. Drawn from a
+/// separate stream so adding one cannot renumber the sequence the seeded
+/// localization runs depend on.
+float randNormalAux();
+
 }  // namespace sim

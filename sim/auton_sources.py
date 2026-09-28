@@ -22,6 +22,14 @@ DEFAULT_OUT = os.path.join(ROOT, "sim", "web", "auton_sources.js")
 SIGNATURE = re.compile(r"^[ \t]*void[ \t]+(auton\w*)[ \t]*\([ \t]*(?:void)?[ \t]*\)[ \t]*\{",
                        re.MULTILINE)
 
+# `void autonBlue3Pin() { reflect(autonRed3Pin); }` -- the whole body. A mirror
+# has no motions of its own, so there is nothing here to draw a plan from: the
+# parser reads it as zero commands, which is useless to the front end and
+# indistinguishable from a routine it failed to understand. Emitting the red
+# body under the blue name would be worse -- the drawn path would be the
+# unmirrored route, which is a wrong answer rather than a missing one.
+REFLECT_ONLY = re.compile(r"\{\s*reflect\s*\(\s*auton\w*\s*\)\s*;\s*\}\s*$")
+
 
 def blank_noncode(text):
     """Same length, with comments and literals blanked, so brace counting is
@@ -85,7 +93,10 @@ def harvest(path):
         end = match_brace(scan, open_brace)
         if end == -1:
             continue
-        found[m.group(1)] = text[m.start():end].replace("\r\n", "\n").rstrip()
+        body = text[m.start():end].replace("\r\n", "\n").rstrip()
+        if REFLECT_ONLY.search(blank_noncode(body)):
+            continue
+        found[m.group(1)] = body
     return found
 
 

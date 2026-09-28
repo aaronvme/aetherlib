@@ -129,7 +129,7 @@ void Chassis::setPoseFieldFrame(const Pose& pose) {
     mOdom.setPose(pose);
 
     mMcl.setPose(pose);
-    mRcl.setRclPose(pose);
+    mRcl.hardReset(pose);
     mEkf.setPose(pose);
 }
 
@@ -146,7 +146,7 @@ void Chassis::setPosition(float x, float y) {
     mOdom.setPose(newPose);
 
     mMcl.setPose(newPose);
-    mRcl.setRclPose(newPose);
+    mRcl.hardReset(newPose);
     mEkf.setPose(newPose);
 }
 
@@ -162,7 +162,7 @@ void Chassis::setHeading(float thetaDeg) {
     mOdom.setPose(newPose);
 
     mMcl.setPose(newPose);
-    mRcl.setRclPose(newPose);
+    mRcl.hardReset(newPose);
     mEkf.setPose(newPose);
 }
 

@@ -40,7 +40,10 @@ SOURCES=(
     sim/platform/pros_support.cpp
     sim/platform/sim_runtime.cpp
     sim/platform/sim_sched.cpp
+    sim/world/actors.cpp
     sim/world/field.cpp
+    sim/world/pieces.cpp
+    sim/world/toggles.cpp
     sim/world/world.cpp
     sim/bridge/bridge.cpp
 )

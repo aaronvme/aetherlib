@@ -173,7 +173,7 @@ check('reading is held between refreshes and updates after one',
       `held ${held[0].toFixed(2)} x${held.length}, then ${refreshed.toFixed(2)}`);
 
 // Cone vs pencil ray. The front sensor has to sit a little off the centre
-// post's axis: far enough out that the on-axis ray misses a 2 in post and runs
+// post's axis: far enough out that the on-axis ray misses the post and runs
 // past max range to the far wall, close enough that a wide cone still clips it.
 //
 // Where that puts the ROBOT depends on the front mount, which is measured
@@ -184,7 +184,13 @@ check('reading is held between refreshes and updates after one',
 // read where the sensor actually ended up -- beams carry their own origin --
 // and correct. Heading 90 (VEX) points +X, so the sensor's y tracks the
 // robot's one for one.
-const kPostOffsetIn = 3.5;     // > 2 in post radius, << the 20 deg cone's reach
+// Read the goal's radius rather than asserting one. The offset used to be a
+// hardcoded 3.5 "> 2 in post radius", and went stale the day the goals became
+// their measured 2.85: the narrow ray still missed, but the range bound below
+// was computed against a surface 0.85 in further out than the real one.
+const kPostRadiusIn = JSON.parse(api.fieldJson()).circles
+    .find(c => c[0] === 0 && c[1] === 0)[2];
+const kPostOffsetIn = kPostRadiusIn + 1.5;  // << the 20 deg cone's reach
 api.setParam('distNoiseMm', 0);
 api.setParam('distFovDeg', 0.5);
 api.reset(-26, 0, 90);
@@ -196,12 +202,12 @@ const narrow = st().beams[0];
 api.setParam('distFovDeg', 40);
 run(120);
 const wide = st().beams[0];
-// The post is at the origin with a 2 in radius, so the nearest a cone hit on
-// it can land is hypot(origin) - 2. Bound against that, computed from the
+// The post is at the origin, so the nearest a cone hit on it can land is
+// hypot(origin) minus its radius. Bound against that, computed from the
 // sensor's own reported origin: the hardcoded 25 in this used to carry was
 // measured with the front mount at x +1.0, and went stale the moment
 // config.cpp shipped -1.0 and pushed every range 2 in out.
-const postSurfaceIn = Math.hypot(wide.ox, wide.oy) - 2;
+const postSurfaceIn = Math.hypot(wide.ox, wide.oy) - kPostRadiusIn;
 check('cone sees a post the centre ray misses',
       Math.abs(narrow.oy - kPostOffsetIn) < 0.05 &&
       !narrow.hit && wide.hit && wide.obs &&
@@ -265,6 +271,30 @@ run(6000);
 s = st();
 check('route drove toward its waypoint', s.true.x > -40,
       `true=(${s.true.x.toFixed(1)}, ${s.true.y.toFixed(1)})`);
+api.stopAuton();
+
+console.log('\n== chassis.tank ==');
+// Open loop, and non-blocking: set a voltage, delay, set another. The routines
+// in src/gamespecific/autons drive with these, and the editor used to drop
+// them entirely, so a route pasted from one moved nothing at all.
+api.setParam('distNoiseMm', 0);
+api.reset(-48, -60, 90);        // VEX 90 faces +x
+api.routeClear();
+api.routePush(OP.SET_POSE, -48, -60, 90, 0);
+api.routePush(OP.TANK, 70, 70, 0, 0);
+api.routePush(OP.DELAY, 600, 0, 0, 0);
+api.routePush(OP.TANK, 0, 0, 0, 0);
+api.routeRun();
+run(400);
+const tankMid = st();
+run(2000);
+s = st();
+check('tank drives the robot', s.true.x > -40,
+      `x -48.0 -> ${s.true.x.toFixed(1)}`);
+check('and it was already moving before the delay ran out',
+      tankMid.true.x > -47.5, `x at 400 ms ${tankMid.true.x.toFixed(1)}`);
+check('the second tank stops it', Math.abs(s.vel.lin) < 1.0,
+      `${s.vel.lin.toFixed(2)} in/s`);
 api.stopAuton();
 
 console.log('\n== setPose places the robot only at the start ==');
@@ -815,7 +845,8 @@ check('the profile still shapes the run, the floor does not',
 
 console.log('\n== run recording ==');
 check('samples were recorded', api.recCount() > 10, `${api.recCount()} rows`);
-check('stride matches the column list', api.recStride() === 14, `${api.recStride()}`);
+// 14 pose/velocity columns plus the four RCL diagnostics.
+check('stride matches the column list', api.recStride() === 18, `${api.recStride()}`);
 
 console.log('\n== filter diagnostics ==');
 api.reset(-48, -60, 90);
