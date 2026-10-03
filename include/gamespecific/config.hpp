@@ -56,9 +56,12 @@ void clearFieldObstacles();
 /// measuring one of them rather than a wall -- and at that distance it is the
 /// weakest reading on the robot even when it is honest.
 ///
-/// Call it AFTER setPose: the half it keeps is the half the robot is standing
-/// in when it runs, which is how it works for either alliance untold.
+/// The half it keeps is the half the robot is standing in, which is how it
+/// works for either alliance untold. Call it after the start setPose; called
+/// just before it instead, the setPose within 500 ms picks the side. The
+/// lifetime is wall-clock and runs out whether or not RCL runs.
 void registerAutonDisableLine(float lifetimeMs = 16000.0f);
 
+/// Disarm it outright, lifetime and pending side choice included.
 void clearAutonDisableLine();
 }

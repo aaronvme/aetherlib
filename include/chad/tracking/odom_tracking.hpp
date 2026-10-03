@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <vector>
 
 #include "pros/adi.hpp"
@@ -8,6 +9,7 @@
 #include "pros/rotation.hpp"
 #include "pros/rtos.hpp"
 
+#include "chad/tracking/odom_inputs.hpp"
 #include "chad/util/util.hpp"
 
 namespace chad {
@@ -27,7 +29,10 @@ public:
                   float offsetIn,
                   float gearRatio = 1.0f);
 
-    float distanceIn() const;
+    float distanceIn() const;   // holds the last good value on a sensor error
+
+    /// NaN when the sensor cannot be read.
+    float readDistanceIn() const;
 
     float offsetIn() const { return mOffsetIn; }
 
@@ -60,8 +65,6 @@ struct OdomSensors {
     std::vector<pros::Imu*> imuCollection;
 
     Drivetrain* drivetrain{nullptr};
-
-    float imuScaleFactor{1.0f};
 };
 
 class OdomTracking {
@@ -111,9 +114,12 @@ public:
 
     const OdomSensors& sensors() const { return mSensors; }
 
+    /// Guarded heading as of the last update(), setPose() or reset(), VEX degrees.
     float imuHeadingDeg() const;
 
-    uint32_t imuFaults() const { return mImuFaults; }
+    /// Unreadable IMU reads, plus readings re-anchored after a gap or a step
+    /// the gyro cannot make (a restart after a brown-out).
+    uint32_t imuFaults() const { return mImuFaults.load(); }
 
     float imuHeadingRad() const;
 
@@ -121,30 +127,65 @@ private:
     OdomSensors mSensors;
     Pose mPose;
 
+    // Guards the state below. Sensors are never read while it is held: a
+    // task deleted mid-read (a competition mode change) would orphan it.
     mutable pros::Mutex mMutex;
 
-    float mPrevVertDist{0.0f};
-    float mPrevHorizDist{0.0f};
-    float mPrevHeadingRad{0.0f};
+    // The devices of mSensors, copied out under mMutex so a reader never
+    // walks the vectors setSensors() replaces. gen changes with every
+    // setSensors(); a sample read against an older set is not integrated.
+    struct Devices {
+        TrackingWheel* vert[EncoderDeltaMean::kMaxEncoders]{};
+        TrackingWheel* horiz[EncoderDeltaMean::kMaxEncoders]{};
+        int nVert{0};
+        int nHoriz{0};
+        pros::Imu* imu{nullptr};
+        Drivetrain* drivetrain{nullptr};
+        std::uint32_t gen{0};
+    };
+    Devices mDevices;
 
-    // Rotation from the IMU's boot zero to the field frame, set by setPose.
-    float mHeadingOffsetRad{0.0f};
+    struct Sample {
+        std::uint64_t us{0};
+        float rawHeadingRad{0.0f};   // NaN when the IMU cannot be read
+        float inPerMotorDeg{0.0f};
+        int nVert{0};
+        int nHoriz{0};
+        int nLeft{0};
+        int nRight{0};
+        double vert[EncoderDeltaMean::kMaxEncoders];    // inches, NaN if unreadable
+        double horiz[EncoderDeltaMean::kMaxEncoders];
+        double left[EncoderDeltaMean::kMaxEncoders];    // motor degrees
+        double right[EncoderDeltaMean::kMaxEncoders];
+    };
 
-    mutable uint32_t mImuFaults{0};
+    EncoderDeltaMean mVertWheels;
+    EncoderDeltaMean mHorizWheels;
+    EncoderDeltaMean mLeftDrive;
+    EncoderDeltaMean mRightDrive;
+    std::uint64_t mLastSampleUs{0};
+
+    // Heading from the IMU's boot zero to the field frame, set by setPose.
+    ImuHeadingGuard mHeading;
+
+    mutable std::atomic<uint32_t> mImuFaults{0};
     std::atomic<bool> mBackgroundUpdatesEnabled{false};
 
     OdomDelta mLastDelta;
 
     OdomDelta mAccumDelta[DELTA_CHANNELS];
 
-    static float averageDistance(const std::vector<TrackingWheel*>& wheels);
+    static Devices devicesOf(const OdomSensors& sensors);
+    Devices devices() const;
+    static int readWheels(TrackingWheel* const* wheels, int n, double* out);
     static float averageOffset(const std::vector<TrackingWheel*>& wheels);
 
-    float currentVertDistance() const;
+    void readSample(const Devices& dev, Sample& out) const;
+    void rebase(const Sample& s);
+    void integrate(const Sample& s);
+    float driveTravelIn(const Sample& s, float dtSec, float dThetaRad);
 
-    float currentHorizDistance() const;
-
-    float rawHeadingRad() const;
+    float rawHeadingRad(const Devices& dev) const;
 
     float currentHeadingRad() const;
 

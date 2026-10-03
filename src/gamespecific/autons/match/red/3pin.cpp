@@ -7,12 +7,12 @@
 
 namespace chad {
 void autonRed3Pin() {
-    registerAutonDisableLine();
 //toggle========================================
     claw.toggle();
     // chassis.startTracking();
     chassis.setBrakeMode(pros::E_MOTOR_BRAKE_COAST);
     chassis.setPose({-61.5, 0, vexToStdRad(270)});
+    registerAutonDisableLine();
     // chassis.moveDistance(1.5, 250, {.minSpeed = 120});
     chassis.tank(-50, -50);
     pros::delay(150);

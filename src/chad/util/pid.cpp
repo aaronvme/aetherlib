@@ -1,6 +1,7 @@
+#include <cmath>
+
 #include "chad/util/util.hpp"
 #include "chad/util/pid.hpp"
-#include "pros/rtos.hpp"
 
 using namespace chad;
 
@@ -9,10 +10,10 @@ PID::PID(float kP,
          float kD,
          float windupRange,
          bool flipReset)
-    : mGains{kP, kI, kD}, mWindupRange(windupRange), mFlipReset(flipReset), mPreviousTime(pros::millis()) {}
+    : mGains{kP, kI, kD}, mWindupRange(windupRange), mFlipReset(flipReset) {}
 
     PID::PID(const PIDGains& gains, float windupRange, bool flipReset)
-        : mGains(gains), mWindupRange(windupRange), mFlipReset(flipReset), mPreviousTime(pros::millis()) {}
+        : mGains(gains), mWindupRange(windupRange), mFlipReset(flipReset) {}
 
     PIDGains PID::getGains() const {
         return mGains;
@@ -22,25 +23,13 @@ PID::PID(float kP,
         mGains = gains;
     }
 
-    float PID::update(float error) {
-        uint32_t currentTime = pros::millis();
-        float dt = (currentTime - mPreviousTime) / 1000.0f;
-
-        if (dt > 0.1f) dt = 0.1f;
-        mPreviousTime = currentTime;
-
-        if (mFixedDt > 0.0f) dt = mFixedDt;
+    float PID::step(float error, float dt) {
+        // A NaN error would sit in the integral and derivative state forever.
+        if (!std::isfinite(error)) return 0.0f;
 
         float p = mGains.kP * error;
 
-        mIntegral += error * dt;
-        if (mWindupRange > 0.0f) {
-            if (mIntegral > mWindupRange) {
-                mIntegral = mWindupRange;
-            } else if (mIntegral < -mWindupRange) {
-                mIntegral = -mWindupRange;
-            }
-        }
+        mIntegral = accumulateIntegral(mIntegral, error, dt, mGains.kI, mWindupRange);
         float i = mGains.kI * mIntegral;
 
         float d = 0.0f;
@@ -61,7 +50,7 @@ PID::PID(float kP,
         return p + i + d;
     }
 
-    void PID::reset() {
+    void PID::clearState() {
         if (mFlipReset) {
             mIntegral = -mIntegral;
         } else {
@@ -74,7 +63,6 @@ PID::PID(float kP,
         // the clamp on tick one of every motion.
         mHavePreviousError = false;
         mFilteredDerivative = 0.0f;
-        mPreviousTime = pros::millis();
     }
 
     void PID::setFlipReset(bool flipReset) {

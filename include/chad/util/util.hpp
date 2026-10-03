@@ -41,8 +41,9 @@ struct Pose {
     }
 };
 
+// Non-finite in, NaN out: a dead sensor must stay visible to isfinite guards.
 inline float wrapRad(float rad) {
-    if (!std::isfinite(rad)) return 0.0f;
+    if (!std::isfinite(rad)) return NAN;
     if (rad >= -PI && rad <= PI) return rad;
     rad = std::fmod(rad, TWO_PI);
     if (rad > PI) rad -= TWO_PI;

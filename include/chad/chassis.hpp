@@ -3,7 +3,6 @@
 #include <array>
 #include <atomic>
 #include <functional>
-#include <queue>
 #include <vector>
 
 #include "pros/distance.hpp"
@@ -19,6 +18,7 @@
 #include "chad/movement_control/feedforward.hpp"
 #include "chad/movement_control/ramsete.hpp"
 #include "chad/util/field_mirror.hpp"
+#include "chad/util/motion_slot.hpp"
 #include "chad/movement_control/velocity_profiles.hpp"
 #include "chad/tracking/ekf_tracking.hpp"
 #include "chad/tracking/mcl_tracking.hpp"
@@ -168,7 +168,9 @@ public:
 private:
 
     void startMotion();
-    void endMotion();
+    void endMotion(uint32_t seq);
+
+    void resetPose(const Pose& pose);
 
     float computeLateralError(float targetX, float targetY) const;
     float computeAngularError(float targetHeadingRad) const;
@@ -180,7 +182,6 @@ private:
 
     enum class MotionType { None, Distance, Point, Heading, TurnPoint, Arc, Boomerang, RAMSETE, Swing };
     struct MotionRequest {
-        uint32_t seq{0};
         MotionType type{MotionType::None};
         float targetX{0}, targetY{0}, targetHeadingRad{0}, targetRadius{0};
         float targetDistance{0};
@@ -198,7 +199,7 @@ private:
         std::vector<Pose> ramsetePath;
     };
 
-    void enqueueMotion(MotionRequest& req, bool async);
+    void enqueueMotion(MotionRequest&& req, bool async);
 
     TurnDirection mirrorTurn(TurnDirection dir) const;
     void applyMirror(MotionRequest& req) const;
@@ -219,12 +220,10 @@ private:
     FeedforwardController mRamseteFf;
 
     std::atomic<bool> mMotionRunning{false};
-    std::atomic<bool> mMotionCancelled{false};
     std::atomic<bool> mTaskShouldStop{false};
-    std::atomic<uint32_t> mMotionSeqCounter{0};
-    std::atomic<uint32_t> mCompletedSeq{0};
     MotionRequest mCurrentMotion;
-    std::queue<MotionRequest> mMotionQueue;
+    uint32_t mCurrentSeq{0};
+    MotionSlot<MotionRequest> mMotionSlot;
     pros::Mutex mQueueMutex;
     pros::Task* mMotionTask{nullptr};
 

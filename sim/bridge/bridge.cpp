@@ -25,6 +25,7 @@
 #include "gamespecific/autons.hpp"
 #include "gamespecific/claw.hpp"
 #include "gamespecific/config.hpp"
+#include "gamespecific/controls.hpp"
 #include "gamespecific/lift.hpp"
 
 namespace {
@@ -49,6 +50,10 @@ float gManualLeft = 0.0f;
 float gManualLift = 0.0f;
 float gManualRight = 0.0f;
 bool  gManualActive = false;
+/// One-shot stall for the next chassis telemetry callback, which runs on the
+/// motion task: stands in for a motion task that cannot reach its cancel check.
+std::uint32_t gMotionStallMs = 0;
+bool gMotionStallHooked = false;
 /// <SG5>: each robot starts touching one Pin. Off by default, because a
 /// routine written without one grabs whatever is in front of the jaws and a
 /// preload that was not asked for changes what that is.
@@ -403,6 +408,9 @@ void sim_reset(float x, float y, float thetaDeg) {
         sim::sched().kill(gRouteTask);
         gRouteTask = sim::kInvalidTask;
     }
+    // A killed fiber never runs runMirrored's restore.
+    chad::chassis.setMirror(chad::FieldMirror::None);
+    pros::sim_input::competitionStatus() = 0;
     chad::chassis.ekf().stopTracking();
     chad::chassis.mcl().stopTracking();
     chad::chassis.rcl().stopTracking();
@@ -425,13 +433,14 @@ void sim_reset(float x, float y, float thetaDeg) {
     sim::world().resetTo(p);
 
     // Re-baseline odometry against the freshly reset hardware BEFORE setting
-    // the pose. setPose() deliberately leaves mPrevHeadingRad alone (so an MCL
-    // sync cannot fake a rotation), which means the first tick after a reset
-    // would otherwise measure dTheta against the previous run's final heading.
-    // reset() is the call that re-reads the IMU and drops the stale delta.
+    // the pose: reset() re-reads the encoders and IMU and drops whatever delta
+    // the previous run left, so the first tick measures from here.
     applyOdomPods();
     chad::chassis.odom().reset();
     chad::chassis.setPose(p);
+    // Seeded immediately before its own resample, so the starting cloud does
+    // not depend on whether anything else drew from the generator first.
+    chad::chassis.mcl().setSeed(gSeed);
     chad::chassis.mcl().setPose(p);
     chad::chassis.ekf().setPose(p);
 
@@ -565,6 +574,7 @@ const char* sim_auton_symbol(int i) {
 void beginRun() {
     if (gRouteTask != sim::kInvalidTask) sim::sched().kill(gRouteTask);
     gRouteTask = sim::kInvalidTask;
+    chad::chassis.setMirror(chad::FieldMirror::None);
     gManualActive = false;
     sim::resetClock();
     sim::sched().resyncSleepers();
@@ -598,8 +608,56 @@ void sim_stop_auton() {
         gRouteTask = sim::kInvalidTask;
     }
     chad::chassis.cancelMotion();
+    chad::chassis.setMirror(chad::FieldMirror::None);
     gManualActive = true;
     gManualLeft = gManualRight = gManualLift = 0.0f;
+}
+
+/// Competition status bits as PROS reports them: disabled 1, autonomous 2,
+/// connected 4.
+EMSCRIPTEN_KEEPALIVE
+void sim_set_competition(int status) {
+    pros::sim_input::competitionStatus() = static_cast<std::uint8_t>(status);
+}
+
+/// One master-controller stick, -127..127, in PROS channel order.
+EMSCRIPTEN_KEEPALIVE
+void sim_set_analog(int channel, int value) {
+    if (channel < 0 || channel > 3) return;
+    pros::sim_input::state(0).analog[channel] = value;
+}
+
+/// Field control switching to driver: what opcontrol() in src/main.cpp does
+/// on entry (main.cpp is not compiled here), then driverControl() on its own
+/// fiber, as PROS runs it.
+EMSCRIPTEN_KEEPALIVE
+void sim_enter_driver() {
+    if (gRouteTask != sim::kInvalidTask) sim::sched().kill(gRouteTask);
+    gRouteTask = sim::kInvalidTask;
+    gManualActive = false;
+
+    chad::chassis.cancelMotion();
+    liftCancel();
+    chad::chassis.setMirror(chad::FieldMirror::None);
+    chad::clearAutonDisableLine();
+    gRouteTask = sim::sched().spawn([]() { chad::driverControl(); }, "driver");
+}
+
+EMSCRIPTEN_KEEPALIVE
+void sim_abort_motion() { chad::chassis.abortMotion(); }
+
+/// Hold the motion task inside its next telemetry callback for `ms`.
+EMSCRIPTEN_KEEPALIVE
+void sim_stall_motion_task(int ms) {
+    gMotionStallMs = static_cast<std::uint32_t>(ms > 0 ? ms : 0);
+    if (gMotionStallHooked) return;
+    gMotionStallHooked = true;
+    chad::chassis.setTelemetry([](const chad::ChassisSample&) {
+        if (gMotionStallMs == 0) return;
+        const std::uint32_t ms = gMotionStallMs;
+        gMotionStallMs = 0;
+        pros::delay(ms);
+    });
 }
 
 EMSCRIPTEN_KEEPALIVE

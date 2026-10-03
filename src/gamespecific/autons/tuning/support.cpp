@@ -328,7 +328,7 @@ int readBeams(BeamRead* out, float robotThetaRad) {
         out[i].alongY = tuning::mountAlongAxis(m.x, m.y, robotThetaRad, false);
 
         const int mm = distSensors[i]->get();
-        if (mm <= static_cast<int>(cfg.minSensorRange) || mm > 9000) continue;
+        if (mm < static_cast<int>(cfg.minSensorRange) || mm > 9000) continue;
         if (distSensors[i]->get_confidence() < cfg.confidenceThreshold) continue;
         const float inches = static_cast<float>(mm) / 25.4f;
         if (inches > cfg.maxSensorRange) continue;

@@ -1,9 +1,12 @@
 #include "chad/tracking/odom_tracking.hpp"
 
 #include <cmath>
+#include <cstdint>
 #include <mutex>
+#include <utility>
 
 #include "chad/drivetrain.hpp"
+#include "pros/error.h"
 #include "pros/rtos.hpp"
 
 namespace chad {
@@ -31,25 +34,26 @@ TrackingWheel::TrackingWheel(pros::Rotation& rot,
       mOffsetIn(offsetIn),
       mGearRatio(gearRatio) {}
 
-float TrackingWheel::distanceIn() const {
-    float circumference = mWheelDiamIn * PI;
-
+float TrackingWheel::readDistanceIn() const {
     constexpr int32_t kProsErr = INT32_MAX;
+    const float circumference = mWheelDiamIn * PI;
 
     if (mType == SensorType::ADI && mAdi != nullptr) {
-        int32_t rawTicks = mAdi->get_value();
-        if (rawTicks == kProsErr) return mLastGoodDistIn;
-        float revolutions = static_cast<float>(rawTicks) / (ADI_TICKS_PER_REV * mGearRatio);
-        mLastGoodDistIn = revolutions * circumference;
-        return mLastGoodDistIn;
+        const int32_t rawTicks = mAdi->get_value();
+        if (rawTicks == kProsErr) return NAN;
+        return static_cast<float>(rawTicks) / (ADI_TICKS_PER_REV * mGearRatio) * circumference;
     } else if (mType == SensorType::Rotation && mRot != nullptr) {
-        int32_t rawCentideg = mRot->get_position();
-        if (rawCentideg == kProsErr) return mLastGoodDistIn;
-        float revolutions = static_cast<float>(rawCentideg) / (ROTATION_UNITS_PER_REV * mGearRatio);
-        mLastGoodDistIn = revolutions * circumference;
-        return mLastGoodDistIn;
+        const int32_t rawCentideg = mRot->get_position();
+        if (rawCentideg == kProsErr) return NAN;
+        return static_cast<float>(rawCentideg) / (ROTATION_UNITS_PER_REV * mGearRatio) * circumference;
     }
     return 0.0f;
+}
+
+float TrackingWheel::distanceIn() const {
+    const float d = readDistanceIn();
+    if (std::isfinite(d)) mLastGoodDistIn = d;
+    return mLastGoodDistIn;
 }
 
 float TrackingWheel::rawTicks() const {
@@ -76,16 +80,18 @@ void TrackingWheel::reset() {
 
 OdomTracking::OdomTracking()
     : mPose() {
-    mPrevVertDist   = currentVertDistance();
-    mPrevHorizDist  = currentHorizDistance();
-    mPrevHeadingRad = currentHeadingRad();
+    Sample s;
+    readSample(mDevices, s);
+    mHeading.seed(s.rawHeadingRad);
+    rebase(s);
 }
 
 OdomTracking::OdomTracking(const OdomSensors& sensors)
-    : mSensors(sensors), mPose() {
-    mPrevVertDist   = currentVertDistance();
-    mPrevHorizDist  = currentHorizDistance();
-    mPrevHeadingRad = currentHeadingRad();
+    : mSensors(sensors), mPose(), mDevices(devicesOf(sensors)) {
+    Sample s;
+    readSample(mDevices, s);
+    mHeading.seed(s.rawHeadingRad);
+    rebase(s);
 }
 
 OdomTracking::~OdomTracking() {
@@ -93,57 +99,89 @@ OdomTracking::~OdomTracking() {
 }
 
 void OdomTracking::setSensors(const OdomSensors& sensors) {
+    OdomSensors next = sensors;
+    Devices dev = devicesOf(next);
+    Sample s;
+    readSample(dev, s);
+
     std::lock_guard<pros::Mutex> lock(mMutex);
-    mSensors = sensors;
-    mPrevVertDist  = currentVertDistance();
-    mPrevHorizDist = currentHorizDistance();
-    mPrevHeadingRad = currentHeadingRad();
+    std::swap(mSensors, next);
+    dev.gen = mDevices.gen + 1;
+    mDevices = dev;
+    mHeading.anchor(s.rawHeadingRad, mHeading.headingRad);
+    rebase(s);
 }
 
-float OdomTracking::currentVertDistance() const {
-    if (!mSensors.vertWheelCollection.empty()) {
-        return averageDistance(mSensors.vertWheelCollection);
+OdomTracking::Devices OdomTracking::devicesOf(const OdomSensors& sensors) {
+    Devices d;
+    for (auto* w : sensors.vertWheelCollection) {
+        if (d.nVert == EncoderDeltaMean::kMaxEncoders) break;
+        d.vert[d.nVert++] = w;
     }
-
-    if (mSensors.drivetrain != nullptr) {
-        float avgDeg = mSensors.drivetrain->averagePositionDeg();
-        float motorRevolutions = avgDeg / 360.0f;
-
-        float wheelRevolutions = motorRevolutions *
-            mSensors.drivetrain->externalGearRatio();
-        return wheelRevolutions * mSensors.drivetrain->wheelDiameter * PI;
+    for (auto* w : sensors.horizWheelCollection) {
+        if (d.nHoriz == EncoderDeltaMean::kMaxEncoders) break;
+        d.horiz[d.nHoriz++] = w;
     }
-
-    return 0.0f;
+    d.imu = sensors.imuCollection.empty() ? nullptr : sensors.imuCollection[0];
+    d.drivetrain = sensors.drivetrain;
+    return d;
 }
 
-float OdomTracking::currentHorizDistance() const {
-    if (!mSensors.horizWheelCollection.empty()) {
-        return averageDistance(mSensors.horizWheelCollection);
-    }
-
-    return 0.0f;
+OdomTracking::Devices OdomTracking::devices() const {
+    std::lock_guard<pros::Mutex> lock(mMutex);
+    return mDevices;
 }
 
-float OdomTracking::rawHeadingRad() const {
-    if (!mSensors.imuCollection.empty() && mSensors.imuCollection[0] != nullptr) {
-        float rawHeading = mSensors.imuCollection[0]->get_heading();
+void OdomTracking::readSample(const Devices& dev, Sample& out) const {
+    out.us = pros::micros();
+    out.rawHeadingRad = rawHeadingRad(dev);
+
+    out.nVert = readWheels(dev.vert, dev.nVert, out.vert);
+    out.nHoriz = readWheels(dev.horiz, dev.nHoriz, out.horiz);
+    if (out.nVert == 0 && dev.drivetrain != nullptr) {
+        const Drivetrain& d = *dev.drivetrain;
+        out.inPerMotorDeg = d.externalGearRatio() / 360.0f * d.wheelDiameter * PI;
+        out.nLeft = Drivetrain::readPositionsDeg(d.leftSense(), out.left,
+                                                 EncoderDeltaMean::kMaxEncoders);
+        out.nRight = Drivetrain::readPositionsDeg(d.rightSense(), out.right,
+                                                  EncoderDeltaMean::kMaxEncoders);
+    }
+}
+
+void OdomTracking::rebase(const Sample& s) {
+    mVertWheels.rebase(s.vert, s.nVert);
+    mHorizWheels.rebase(s.horiz, s.nHoriz);
+    mLeftDrive.rebase(s.left, s.nLeft);
+    mRightDrive.rebase(s.right, s.nRight);
+    mLastSampleUs = s.us;
+}
+
+float OdomTracking::rawHeadingRad(const Devices& dev) const {
+    if (dev.imu != nullptr) {
+        const float rawHeading = dev.imu->get_heading();
 
         if (!std::isfinite(rawHeading)) {
             ++mImuFaults;
             return NAN;
         }
-
-        float scaledHeading = rawHeading * mSensors.imuScaleFactor;
-        return vexToStdRad(scaledHeading);
+        return vexToStdRad(rawHeading);
     }
     return 0.0f;
 }
 
 float OdomTracking::currentHeadingRad() const {
-    const float raw = rawHeadingRad();
-    if (!std::isfinite(raw)) return mPrevHeadingRad;
-    return wrapRad(raw + mHeadingOffsetRad);
+    std::lock_guard<pros::Mutex> lock(mMutex);
+    return mHeading.headingRad;
+}
+
+float OdomTracking::driveTravelIn(const Sample& s, float dtSec, float dThetaRad) {
+    const double maxStep = EncoderDeltaMean::maxStepDeg(dtSec);
+    const double left  = mLeftDrive.update(s.left, s.nLeft, maxStep);
+    const double right = mRightDrive.update(s.right, s.nRight, maxStep);
+    const double arc = 0.5 * mDevices.drivetrain->trackWidth * dThetaRad;
+    return static_cast<float>(differentialCentreTravel(
+        left * s.inPerMotorDeg, mLeftDrive.contributing() > 0,
+        right * s.inPerMotorDeg, mRightDrive.contributing() > 0, arc));
 }
 
 void OdomTracking::update(bool force) {
@@ -151,37 +189,44 @@ void OdomTracking::update(bool force) {
         return;
     }
 
+    const Devices dev = devices();
+    Sample s;
+    readSample(dev, s);
     std::lock_guard<pros::Mutex> lock(mMutex);
-    float headingRad = currentHeadingRad();
-    float vertDist   = currentVertDistance();
-    float horizDist  = currentHorizDistance();
+    if (dev.gen == mDevices.gen) integrate(s);
+}
 
-    float dThetaRad = headingRad - mPrevHeadingRad;
-    dThetaRad = wrapRad(dThetaRad);
+void OdomTracking::integrate(const Sample& s) {
+    // Zero, not negative, when two updaters read in one order and lock in
+    // the other: the guards then allow only a sample period's worth of change.
+    const float dtSec = (s.us > mLastSampleUs)
+        ? static_cast<float>(s.us - mLastSampleUs) * 1e-6f : 0.0f;
+    mLastSampleUs = s.us;
 
-    float dVert  = vertDist  - mPrevVertDist;
-    float dHoriz = horizDist - mPrevHorizDist;
-
-    float midHeadingRad = mPrevHeadingRad + dThetaRad * 0.5f;
-
-    float dX = 0.0f;
-    float dY = 0.0f;
-
-    if (std::fabs(dThetaRad) < 1e-6f) {
-        dX = dVert * std::cos(mPrevHeadingRad) - dHoriz * std::sin(mPrevHeadingRad);
-        dY = dVert * std::sin(mPrevHeadingRad) + dHoriz * std::cos(mPrevHeadingRad);
-    } else {
-        dX = dVert * std::cos(midHeadingRad) - dHoriz * std::sin(midHeadingRad);
-        dY = dVert * std::sin(midHeadingRad) + dHoriz * std::cos(midHeadingRad);
+    const float prevHeadingRad = mHeading.headingRad;
+    if (!mHeading.update(s.rawHeadingRad, dtSec) && std::isfinite(s.rawHeadingRad)) {
+        ++mImuFaults;
     }
+    const float headingRad = mHeading.headingRad;
+    const float dThetaRad = wrapRad(headingRad - prevHeadingRad);
 
-    mPose.x += dX;
-    mPose.y += dY;
+    const double maxWheelStep = EncoderDeltaMean::maxStepIn(dtSec);
+    float dVert = 0.0f;
+    if (s.nVert > 0) {
+        dVert = static_cast<float>(mVertWheels.update(s.vert, s.nVert, maxWheelStep));
+    } else if (mDevices.drivetrain != nullptr) {
+        dVert = driveTravelIn(s, dtSec, dThetaRad);
+    }
+    const float dHoriz =
+        static_cast<float>(mHorizWheels.update(s.horiz, s.nHoriz, maxWheelStep));
+
+    const float midHeadingRad = prevHeadingRad + dThetaRad * 0.5f;
+    const float c = std::cos(midHeadingRad);
+    const float sn = std::sin(midHeadingRad);
+
+    mPose.x += dVert * c - dHoriz * sn;
+    mPose.y += dVert * sn + dHoriz * c;
     mPose.theta = headingRad;
-
-    mPrevVertDist   = vertDist;
-    mPrevHorizDist  = horizDist;
-    mPrevHeadingRad = headingRad;
 
     mLastDelta = {dVert, dHoriz, dThetaRad};
 
@@ -214,9 +259,13 @@ void OdomTracking::startBackgroundOdom() {
         return;
     }
 
+    // Above the default so the filters and motion loop that consume the pose
+    // never read one a tick stale. run() sleeps every period.
+    constexpr std::uint32_t kOdomTaskPriority = 8 + 2;   // TASK_PRIORITY_DEFAULT + 2
+
     mBackgroundUpdatesEnabled = true;
     mRunning = true;
-    mTask = new pros::Task([this]() { run(); });
+    mTask = new pros::Task([this]() { run(); }, kOdomTaskPriority);
 }
 
 void OdomTracking::stopBackgroundOdom() {
@@ -252,32 +301,45 @@ void OdomTracking::taskLoop(void* param) {
 }
 
 void OdomTracking::run() {
+    constexpr std::uint32_t kPeriodMs = 10;
+    std::uint32_t wake = pros::millis();
     while (mRunning) {
         if (mBackgroundUpdatesEnabled) {
             update(false);
         }
-        pros::delay(10);
+        // After an overrun sleep a full period instead of skipping the sleep
+        // to catch up: this task outranks the ones it feeds.
+        const std::uint32_t now = pros::millis();
+        if (now - wake >= kPeriodMs) wake = now;
+        pros::Task::delay_until(&wake, kPeriodMs);
     }
 }
 
 void OdomTracking::setPose(const Pose& pose) {
-    std::lock_guard<pros::Mutex> lock(mMutex);
-    mPose = pose;
+    if (!std::isfinite(pose.x) || !std::isfinite(pose.y) || !std::isfinite(pose.theta)) return;
 
-    // The IMU cannot be told where north is, so carry the difference here
-    // instead. Without it update() overwrites theta from the boot frame on
-    // the next tick and the heading asked for is gone.
-    const float raw = rawHeadingRad();
-    if (std::isfinite(raw)) mHeadingOffsetRad = wrapRad(pose.theta - raw);
+    for (;;) {
+        const Devices dev = devices();
+        Sample s;
+        readSample(dev, s);
 
-    // Rebase, or the next tick reads the offset jump as a real rotation.
-    mPrevHeadingRad = currentHeadingRad();
+        std::lock_guard<pros::Mutex> lock(mMutex);
+        if (dev.gen != mDevices.gen) continue;
+        mPose = pose;
 
-    mPrevVertDist  = currentVertDistance();
-    mPrevHorizDist = currentHorizDistance();
+        // The IMU cannot be told where north is, so the guard carries the
+        // difference. Without it update() overwrites theta from the boot frame on
+        // the next tick and the heading asked for is gone.
+        mHeading.anchor(s.rawHeadingRad, pose.theta);
+
+        // Rebase, or the next tick reads the jump as travel.
+        rebase(s);
+        return;
+    }
 }
 
 void OdomTracking::syncPose(const Pose& pose) {
+    if (!std::isfinite(pose.x) || !std::isfinite(pose.y)) return;
     std::lock_guard<pros::Mutex> lock(mMutex);
     mPose.x = pose.x;
     mPose.y = pose.y;
@@ -293,31 +355,42 @@ Pose OdomTracking::getPose() const {
 }
 
 void OdomTracking::reset() {
-    std::lock_guard<pros::Mutex> lock(mMutex);
+    for (;;) {
+        const Devices dev = devices();
+        for (int i = 0; i < dev.nVert; ++i) {
+            if (dev.vert[i] != nullptr) dev.vert[i]->reset();
+        }
+        for (int i = 0; i < dev.nHoriz; ++i) {
+            if (dev.horiz[i] != nullptr) dev.horiz[i]->reset();
+        }
+        Sample s;
+        readSample(dev, s);
 
-    for (auto* wheel : mSensors.vertWheelCollection) {
-        if (wheel != nullptr) wheel->reset();
+        std::lock_guard<pros::Mutex> lock(mMutex);
+        if (dev.gen != mDevices.gen) continue;
+        mPose = Pose{};
+        mHeading = ImuHeadingGuard{};
+        mHeading.seed(s.rawHeadingRad);
+        rebase(s);
+        mPose.theta = mHeading.headingRad;
+
+        mLastDelta = {};
+        for (auto& acc : mAccumDelta) acc = {};
+        return;
     }
-    for (auto* wheel : mSensors.horizWheelCollection) {
-        if (wheel != nullptr) wheel->reset();
-    }
-    mPose = Pose{};
-    mHeadingOffsetRad = 0.0f;
-
-    mPrevVertDist   = currentVertDistance();
-    mPrevHorizDist  = currentHorizDistance();
-
-    mPrevHeadingRad = currentHeadingRad();
-    mPose.theta     = mPrevHeadingRad;
-
-    mLastDelta = {};
-    for (auto& acc : mAccumDelta) acc = {};
 }
 
 void OdomTracking::calibrate() {
     for (auto* imu : mSensors.imuCollection) {
         if (imu != nullptr) {
-            imu->reset(true);
+            // PROS bounds a blocking reset at 3 s; a failed one leaves the
+            // IMU uncalibrated for the whole match.
+            for (int attempt = 0; attempt < 3; attempt++) {
+                if (imu->reset(true) != PROS_ERR) break;
+            }
+            // 5 ms is the fastest the IMU streams; at the 10 ms default a
+            // tick can read a sample a whole period old.
+            imu->set_data_rate(5);
         }
     }
     reset();
@@ -331,18 +404,11 @@ float OdomTracking::imuHeadingRad() const {
     return vexToStdRad(imuHeadingDeg());
 }
 
-float OdomTracking::averageDistance(const std::vector<TrackingWheel*>& wheels) {
-    if (wheels.empty()) return 0.0f;
-
-    float sum = 0.0f;
-    int count = 0;
-    for (const auto* wheel : wheels) {
-        if (wheel != nullptr) {
-            sum += wheel->distanceIn();
-            ++count;
-        }
+int OdomTracking::readWheels(TrackingWheel* const* wheels, int n, double* out) {
+    for (int i = 0; i < n; ++i) {
+        out[i] = (wheels[i] != nullptr) ? wheels[i]->readDistanceIn() : NAN;
     }
-    return (count > 0) ? (sum / static_cast<float>(count)) : 0.0f;
+    return n;
 }
 
 float OdomTracking::averageOffset(const std::vector<TrackingWheel*>& wheels) {

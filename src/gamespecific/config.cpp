@@ -53,9 +53,9 @@ void clearFieldObstacles() {
     chassis.ekf().setObstacles(&gMclCircleObstacles);
 }
 
-// Call this AFTER setPose. The half it keeps is the half the robot is standing
-// in when it runs, which is what makes it work for either alliance without
-// being told which -- but it can only read that off a pose that has been set.
+// The half it keeps is the half the robot is standing in, which is what makes
+// it work for either alliance without being told which. See config.hpp for
+// the call order.
 void registerAutonDisableLine(float lifetimeMs) {
     chassis.rcl().setFarSideGateFromLine(Field::FIELD_HALF, -Field::FIELD_HALF,
                                          -Field::FIELD_HALF,  Field::FIELD_HALF,
@@ -164,7 +164,7 @@ ChassisConfig chassisConfig = {
         .thetaSyncProp = 0.001f,
         .updatePeriodMs = 25.0f,
         .confidenceThreshold = 10,
-        .minSensorRange = 1.0f,
+        .minSensorRange = 20.0f,
         .rangeSigmaCloseIn = 0.0872f,
         .rangeSigmaProp = 0.020f,
         .maxRandomFrac = 0.25f,

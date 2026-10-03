@@ -14,6 +14,10 @@
 #include "../sim_sched.hpp"
 
 #define TIMEOUT_MAX ((std::uint32_t)0xffffffffUL)
+// Macros, as in PROS's rtos.h, so code written against the real header
+// (unqualified, usable in arithmetic) compiles here unchanged.
+#define TASK_PRIORITY_DEFAULT 8
+#define TASK_STACK_DEPTH_DEFAULT 0x2000
 
 namespace pros {
 
@@ -28,8 +32,6 @@ enum task_state_e_t {
     E_TASK_STATE_INVALID
 };
 
-constexpr std::uint32_t TASK_PRIORITY_DEFAULT = 8;
-constexpr std::uint16_t TASK_STACK_DEPTH_DEFAULT = 0x2000;
 
 std::uint32_t millis();
 std::uint64_t micros();

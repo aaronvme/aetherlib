@@ -25,20 +25,26 @@ void initialize() {
     selector.registerAuton("Skills", autonSkills);
     selector.registerAuton("UNc", autonTemp);
     selector.init();
+}
 
-    pros::delay(250);
-
-    liftToPinAbove(0, 50, 500);
+// PROS deletes the previous mode's task without unwinding it, so a motion or
+// lift move it started is still running, and its guards never ran.
+static void stopLeftovers() {
+    chassis.cancelMotion();
+    liftCancel();
 }
 
 void disabled() {
-
+    stopLeftovers();
 }
 
 void competition_initialize() {}
 
 void autonomous() {
-    
+    stopLeftovers();
+    chassis.startTracking();
+    liftToPinAbove(0, 50, 500, 100, true);
+
     clawSetAutoGrab(false);
     chassis.setMirror(FieldMirror::None);
     // autonSkills();
@@ -48,6 +54,9 @@ void autonomous() {
 }
 
 void opcontrol() {
+    stopLeftovers();
+    chassis.setMirror(FieldMirror::None);
+    clearAutonDisableLine();
     chassis.startTracking();
     // chassis.setPose({-55, 0, vexToStdRad(270)});
     clawSetAutoGrab(false);

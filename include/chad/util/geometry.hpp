@@ -18,8 +18,9 @@ constexpr float DEG_TO_RAD = M_PI / 180.0f;
 inline constexpr float degToRad(float deg) { return deg * DEG_TO_RAD; }
 inline constexpr float radToDeg(float rad) { return rad * RAD_TO_DEG; }
 
+// Non-finite in, NaN out: a dead sensor must stay visible to isfinite guards.
 inline float wrapRad(float rad) {
-    if (!std::isfinite(rad)) return 0.0f;
+    if (!std::isfinite(rad)) return NAN;
     return std::remainder(rad, TWO_PI);
 }
 

@@ -58,6 +58,9 @@ public:
 
     virtual bool is_calibrating() const { return sim::bus().imus[mPort].calibrating; }
 
+    // The sim samples the IMU fresh on every read, so the rate changes nothing.
+    virtual std::int32_t set_data_rate(std::uint32_t) const { return 1; }
+
     virtual std::int32_t tare_rotation() const {
         sim::bus().imus[mPort].rotationDeg = 0.0;
         return 1;

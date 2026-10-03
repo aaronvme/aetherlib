@@ -59,6 +59,13 @@ echo "--- RCL ---"
 node sim/test/rcl.mjs || fail=1
 echo "--- localization under disturbance ---"
 node sim/test/disturbance.mjs || fail=1
+# Mode changes: a motion the autonomous task left running must not keep the
+# drive from the driver, and cancelling must not swallow the next motion.
+echo "--- competition modes ---"
+node sim/test/competition.mjs || fail=1
+# A chained move that passes beside its target must still hand off promptly.
+echo "--- chained motions ---"
+node sim/test/chaining.mjs || fail=1
 echo "--- routing accuracy ---"
 node sim/test/accuracy.mjs --gate || fail=1
 

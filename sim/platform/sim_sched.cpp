@@ -180,7 +180,9 @@ std::uint32_t Scheduler::notify(TaskId id) {
     Task* t = mTasks[id];
     if (t == nullptr) return 0;
     t->notifyCount++;
-    unblock(id);
+    // Only a task waiting in notify_take wakes, as in FreeRTOS. Waking one out
+    // of pros::delay() too would cut short a sleep the real brain honours.
+    if (t->state == TaskState::Blocked) unblock(id);
     return t->notifyCount;
 }
 
