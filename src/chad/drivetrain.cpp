@@ -1,7 +1,8 @@
 #include "chad/drivetrain.hpp"
 
 #include <cmath>
-#include <vector>
+#include <cstdint>
+#include <initializer_list>
 
 namespace chad {
 Drivetrain::Drivetrain(pros::MotorGroup* leftMotors, pros::MotorGroup* rightMotors,
@@ -43,22 +44,43 @@ void Drivetrain::setBrakeMode(pros::motor_brake_mode_e mode) {
     if (rightMotors != nullptr) rightMotors->set_brake_mode(mode);
 }
 
+namespace {
+bool readable(double v) { return std::isfinite(v) && std::fabs(v) < 2147483647.0; }
+
+void accumulatePositions(const pros::MotorGroup* g, double& sum, int& count) {
+    if (g == nullptr) return;
+    const int n = g->size();
+    for (int i = 0; i < n; i++) {
+        const double pos = g->get_position(static_cast<std::uint8_t>(i));
+        if (!readable(pos)) continue;
+        sum += pos;
+        count++;
+    }
+}
+}  // namespace
+
+int Drivetrain::readPositionsDeg(const pros::MotorGroup* g, double* out, int max) {
+    if (g == nullptr) return 0;
+    int n = g->size();
+    if (n > max) n = max;
+    for (int i = 0; i < n; i++) out[i] = g->get_position(static_cast<std::uint8_t>(i));
+    return (n > 0) ? n : 0;
+}
+
 float Drivetrain::groupVelocityInPerSec(const pros::MotorGroup* a,
                                        const pros::MotorGroup* b) const {
-    if (a == nullptr && b == nullptr) return 0.0f;
-
-    auto accumulate = [](const std::vector<double>& rpms, double& sum, int& count) {
-        for (double rpm : rpms) {
-            if (!std::isfinite(rpm) || std::fabs(rpm) >= 2147483647.0) continue;
+    double sum = 0.0;
+    int count = 0;
+    for (const pros::MotorGroup* g : {a, b}) {
+        if (g == nullptr) continue;
+        const int n = g->size();
+        for (int i = 0; i < n; i++) {
+            const double rpm = g->get_actual_velocity(static_cast<std::uint8_t>(i));
+            if (!readable(rpm)) continue;
             sum += rpm;
             count++;
         }
-    };
-
-    double sum = 0.0;
-    int count = 0;
-    if (a != nullptr) accumulate(a->get_actual_velocity_all(), sum, count);
-    if (b != nullptr) accumulate(b->get_actual_velocity_all(), sum, count);
+    }
     if (count == 0) return 0.0f;
 
     const double motorRpm = sum / count;
@@ -78,33 +100,17 @@ float Drivetrain::rightVelocityInPerSec() const {
 }
 
 float Drivetrain::averagePositionDeg() const {
-    if (leftSense() == nullptr && rightSense() == nullptr) return 0.0f;
-
-    auto accumulate = [](const std::vector<double>& positions,
-                         double& sum, int& count) {
-        for (double pos : positions) {
-            if (!std::isfinite(pos) || std::fabs(pos) >= 2147483647.0) continue;
-            sum += pos;
-            count++;
-        }
-    };
-
     double sum = 0.0;
     int count = 0;
-    if (leftSense() != nullptr)  accumulate(leftSense()->get_position_all(),  sum, count);
-    if (rightSense() != nullptr) accumulate(rightSense()->get_position_all(), sum, count);
+    accumulatePositions(leftSense(), sum, count);
+    accumulatePositions(rightSense(), sum, count);
     return (count > 0) ? static_cast<float>(sum / count) : 0.0f;
 }
 
 float Drivetrain::groupPositionDeg(const pros::MotorGroup* g) const {
-    if (g == nullptr) return 0.0f;
     double sum = 0.0;
     int count = 0;
-    for (double pos : g->get_position_all()) {
-        if (!std::isfinite(pos) || std::fabs(pos) >= 2147483647.0) continue;
-        sum += pos;
-        count++;
-    }
+    accumulatePositions(g, sum, count);
     return (count > 0) ? static_cast<float>(sum / count) : 0.0f;
 }
 

@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <cmath>
 #include <mutex>
+#include <tuple>
+
+#include "pros/error.h"
 
 namespace chad {
 namespace {
@@ -11,6 +14,17 @@ float medianOf(float* v, int n) {
     if (n <= 0) return 0.0f;
     std::sort(v, v + n);
     return (n & 1) ? v[n / 2] : 0.5f * (v[n / 2 - 1] + v[n / 2]);
+}
+
+/// Absolute expiry for a lifetime; 0 = never.
+std::uint32_t expiryFor(float lifetimeMs) {
+    if (lifetimeMs <= 0.0f) return 0;
+    const std::uint32_t t = pros::millis() + static_cast<std::uint32_t>(lifetimeMs);
+    return t != 0 ? t : 1;
+}
+
+bool expired(std::uint32_t expiresAtMs, std::uint32_t nowMs) {
+    return expiresAtMs != 0 && static_cast<std::int32_t>(nowMs - expiresAtMs) >= 0;
 }
 }  // namespace
 
@@ -109,6 +123,9 @@ void RclTracking::setSensor(int index, pros::Distance* sensor, const Pose& mount
     mSensors[index].enabled = true;
     mSensors[index].rawMm = -1;
     mSensors[index].heldMs = 0.0f;
+    mSensors[index].faulted = false;
+    mFaultedMask &= ~(1u << index);
+    mSampleGen++;
 }
 
 void RclTracking::configureSensors(const std::array<pros::Distance*, MAX_DISTANCE_SENSORS>& sensors,
@@ -119,20 +136,22 @@ void RclTracking::configureSensors(const std::array<pros::Distance*, MAX_DISTANC
         mSensors[i].rawMm = -1;
         mSensors[i].heldMs = 0.0f;
         mSensors[i].fresh = false;
+        mSensors[i].faulted = false;
         mSensors[i].cls = ReadingClass::Invalid;
+        mDisableUntilMs[i] = 0;
         if (sensors[i] != nullptr) {
             mSensors[i].sensor       = sensors[i];
             mSensors[i].mountOffset  = mounts[i];
             mSensors[i].enabled      = true;
-            mDisableTimers[i]        = 0.0f;
             activeCount++;
         } else {
             mSensors[i].sensor       = nullptr;
             mSensors[i].mountOffset  = {};
             mSensors[i].enabled      = false;
-            mDisableTimers[i]        = 0.0f;
         }
     }
+    mFaultedMask = 0;
+    mSampleGen++;
 
     // A count, not a loop bound. Every walk below covers all the slots and
     // skips the empty ones, so a config that leaves a hole -- ports 0, 1, 2 and
@@ -145,29 +164,37 @@ void RclTracking::enableSensor(int index) {
     if (index < 0 || index >= MAX_DISTANCE_SENSORS) return;
     std::lock_guard<pros::Mutex> lock(mMutex);
     mSensors[index].enabled = true;
+    mDisableUntilMs[index] = 0;
 }
 
 void RclTracking::disableSensor(int index) {
     if (index < 0 || index >= MAX_DISTANCE_SENSORS) return;
     std::lock_guard<pros::Mutex> lock(mMutex);
     mSensors[index].enabled = false;
+    mDisableUntilMs[index] = 0;
 }
 
 void RclTracking::disableSensorFor(int index, float durationMs) {
     if (index < 0 || index >= MAX_DISTANCE_SENSORS) return;
     std::lock_guard<pros::Mutex> lock(mMutex);
     mSensors[index].enabled = false;
-    mDisableTimers[index] = durationMs;
+    if (durationMs <= 0.0f) {           // until enableSensor()
+        mDisableUntilMs[index] = 0;
+        return;
+    }
+    // 0 marks no deadline, hence the nudge on wraparound.
+    const std::uint32_t until = pros::millis() + static_cast<std::uint32_t>(durationMs);
+    mDisableUntilMs[index] = until != 0 ? until : 1;
 }
 
 void RclTracking::addLineObstacle(float x1, float y1, float x2, float y2, float lifetimeMs) {
     std::lock_guard<pros::Mutex> lock(mMutex);
-    mLineObstacles.push_back({x1, y1, x2, y2, lifetimeMs});
+    mLineObstacles.push_back({x1, y1, x2, y2, lifetimeMs, expiryFor(lifetimeMs)});
 }
 
 void RclTracking::addCircleObstacle(float x, float y, float radius, float lifetimeMs) {
     std::lock_guard<pros::Mutex> lock(mMutex);
-    mCircleObstacles.push_back({x, y, radius, lifetimeMs});
+    mCircleObstacles.push_back({x, y, radius, lifetimeMs, expiryFor(lifetimeMs)});
 }
 
 void RclTracking::clearObstacles() {
@@ -183,12 +210,47 @@ void RclTracking::armFarSideLocked(float nx, float ny, float d, float lifetimeMs
     mConfig.farSideNy = ny / len;
     mConfig.farSideD = d / len;
     mConfig.farSideGate = true;
-    mFarSideTimer = lifetimeMs;
+    mFarSideOrientPending = false;
+    mFarSideClearRequested = false;
+    mFarSideArmedMs = pros::millis();
+    mFarSideTimed = lifetimeMs > 0.0f;
+    mFarSideDeadlineMs =
+        mFarSideTimed ? mFarSideArmedMs + static_cast<std::uint32_t>(lifetimeMs) : 0;
 }
 
 void RclTracking::clearFarSideLocked() {
     mConfig.farSideGate = false;
-    mFarSideTimer = 0.0f;
+    mFarSideTimed = false;
+    mFarSideOrientPending = false;
+    mFarSideDeadlineMs = 0;
+}
+
+void RclTracking::expireFarSideLocked(std::uint32_t nowMs) {
+    if (mFarSideClearRequested.exchange(false) ||
+        (mConfig.farSideGate && mFarSideTimed &&
+         static_cast<std::int32_t>(nowMs - mFarSideDeadlineMs) >= 0)) {
+        clearFarSideLocked();
+    }
+}
+
+void RclTracking::orientFarSideLocked(const Pose& p) {
+    if (mConfig.farSideNx * p.x + mConfig.farSideNy * p.y > mConfig.farSideD) {
+        mConfig.farSideNx = -mConfig.farSideNx;
+        mConfig.farSideNy = -mConfig.farSideNy;
+        mConfig.farSideD = -mConfig.farSideD;
+    }
+}
+
+bool RclTracking::farSideGateActive() const {
+    return mConfig.farSideGate && !mFarSideClearRequested &&
+           !(mFarSideTimed &&
+             static_cast<std::int32_t>(pros::millis() - mFarSideDeadlineMs) >= 0);
+}
+
+float RclTracking::farSideGateRemainingMs() const {
+    if (!mConfig.farSideGate || mFarSideClearRequested || !mFarSideTimed) return 0.0f;
+    const std::int32_t left = static_cast<std::int32_t>(mFarSideDeadlineMs - pros::millis());
+    return left > 0 ? static_cast<float>(left) : 0.0f;
 }
 
 void RclTracking::setFarSideGate(float nx, float ny, float d, float lifetimeMs) {
@@ -205,20 +267,26 @@ void RclTracking::setFarSideGateFromLine(float x1, float y1, float x2, float y2,
     if (len < 1e-6f) return;
     nx /= len;
     ny /= len;
-    const float d = nx * x1 + ny * y1;
 
-    // Point it away from wherever the robot is now, so the half it keeps is the
-    // half it is standing in. Nothing here needs to know the alliance.
+    // Keep the half the robot stands in; see the header for the re-pick rule.
     const Pose p = mOdom.getPose();
-    if (nx * p.x + ny * p.y > d) { nx = -nx; ny = -ny; }
-
     std::lock_guard<pros::Mutex> lock(mMutex);
     armFarSideLocked(nx, ny, nx * x1 + ny * y1, lifetimeMs);
+    orientFarSideLocked(p);
+    const std::int32_t sincePose =
+        static_cast<std::int32_t>(mFarSideArmedMs - mLastHardResetMs);
+    mFarSideOrientPending = !(mHaveHardReset && sincePose >= 0 &&
+                              sincePose <= static_cast<std::int32_t>(kFarSideOrientWindowMs));
 }
 
 void RclTracking::clearFarSideGate() {
-    std::lock_guard<pros::Mutex> lock(mMutex);
-    clearFarSideLocked();
+    // Called from opcontrol; the mutex may be orphaned by a deleted auton task.
+    if (mMutex.take(20)) {
+        clearFarSideLocked();
+        mMutex.give();
+    } else {
+        mFarSideClearRequested = true;
+    }
 }
 
 void RclTracking::setConfig(const Config& config) {
@@ -246,17 +314,59 @@ void RclTracking::setAutoSync(bool enabled) {
     mConfig.autoSync = enabled;
 }
 
-bool RclTracking::readDevices() {
+void RclTracking::pollDevices(RawSamples& out) {
+    {
+        std::lock_guard<pros::Mutex> lock(mMutex);
+        expireDisableTimersLocked(pros::millis());
+        out.gen = mSampleGen;
+        for (int i = 0; i < MAX_DISTANCE_SENSORS; i++) {
+            const auto& s = mSensors[i];
+            out.s[i].dev = s.enabled ? s.sensor : nullptr;
+        }
+    }
+    for (auto& r : out.s) {
+        if (r.dev == nullptr) continue;
+        r.mm = r.dev->get();
+        r.conf = r.mm == PROS_ERR ? PROS_ERR : r.dev->get_confidence();
+    }
+}
+
+bool RclTracking::ingestSamples(const RawSamples& raw) {
     bool anyFresh = false;
+    const bool current = raw.gen == mSampleGen;
 
     for (int i = 0; i < MAX_DISTANCE_SENSORS; i++) {
         auto& s = mSensors[i];
-        if (s.sensor == nullptr || !s.enabled) {
+        // A slot swapped, re-enabled or reset since the poll has no sample.
+        if (!current || s.sensor == nullptr || !s.enabled || raw.s[i].dev != s.sensor) {
             s.fresh = false;
             continue;
         }
 
-        const int readingMm = s.sensor->get();
+        const std::int32_t readingMm = raw.s[i].mm;
+        const std::int32_t conf = raw.s[i].conf;
+
+        // PROS_ERR (ENODEV unplugged or wrong device, EAGAIN still booting) is
+        // not a reading. Taken as one it lands past 2000 mm, which near a wall
+        // is Impossible -- displacement evidence every cycle, from a cable --
+        // and being constant the stale hold would keep re-admitting it. The
+        // verdict is cleared here because classifyAll() keeps the last one for
+        // a sensor with nothing new, and the evidence count reads it.
+        if (readingMm == PROS_ERR || conf == PROS_ERR) {
+            s.faulted = true;
+            s.fresh = false;
+            s.valid = false;
+            s.pairVerified = false;
+            s.outlier = false;
+            s.cls = ReadingClass::Invalid;
+            s.innovationIn = 0.0f;
+            s.rawMm = -1;               // the first sample back counts as new
+            s.heldMs = 0.0f;
+            mFaultedMask |= 1u << i;
+            continue;
+        }
+        s.faulted = false;
+        mFaultedMask &= ~(1u << i);
 
         // The device holds its last value between its own refreshes -- about
         // every 30 ms against this loop's 10 -- so an unchanged raw reading is
@@ -273,7 +383,7 @@ bool RclTracking::readDevices() {
             s.fresh = true;
             s.heldMs = 0.0f;
         } else {
-            s.heldMs += mConfig.updatePeriodMs;
+            s.heldMs += mDtMs;
             if (mConfig.staleHoldMs > 0.0f && s.heldMs >= mConfig.staleHoldMs) {
                 s.fresh = true;
                 s.heldMs = 0.0f;
@@ -283,7 +393,7 @@ bool RclTracking::readDevices() {
         }
         s.rawMm = readingMm;
         s.readingInch = readingMm * MM_TO_INCH;
-        s.confidence = s.sensor->get_confidence();
+        s.confidence = conf;
         if (s.fresh) anyFresh = true;
     }
 
@@ -303,8 +413,10 @@ void RclTracking::updateSensorPoses(const Pose& robotPose) {
             continue;
         }
 
-        s.worldX = robotPose.x + (s.mountOffset.x * rCos - s.mountOffset.y * rSin);
-        s.worldY = robotPose.y + (s.mountOffset.x * rSin + s.mountOffset.y * rCos);
+        s.mountWorldX = s.mountOffset.x * rCos - s.mountOffset.y * rSin;
+        s.mountWorldY = s.mountOffset.x * rSin + s.mountOffset.y * rCos;
+        s.worldX = robotPose.x + s.mountWorldX;
+        s.worldY = robotPose.y + s.mountWorldY;
 
         float sensorWorldAngle = robotPose.theta + s.mountOffset.theta;
         s.worldHeading = sensorWorldAngle;
@@ -334,7 +446,8 @@ RclTracking::ReadingClass RclTracking::classifyReading(int index, float& wallDis
     if (!s.fresh) return ReadingClass::Stale;
 
     float readingInch = s.readingInch;
-    if (readingInch < 1.0f * MM_TO_INCH) return ReadingClass::Invalid;
+    // The V5 sensor's rated minimum is 20 mm; anything under it is not a range.
+    if (readingInch < 20.0f * MM_TO_INCH) return ReadingClass::Invalid;
 
     if (readingInch > 2000.0f * MM_TO_INCH) {
         auto [w, range] = nearestWall(s);
@@ -546,16 +659,10 @@ std::pair<CoordType, float> RclTracking::getBotCoordFromSensor(int index) const 
     }
 
     // Back out the mount offset in the SAME frame the geometry above was built
-    // in. updateSensorPoses ran against the pose at sample time, so the heading
-    // used here has to be that one too, not whatever the IMU says now.
-    float robotHeading = s.worldHeading - s.mountOffset.theta;
-    float rCos = std::cos(robotHeading);
-    float rSin = std::sin(robotHeading);
-    float offX = s.mountOffset.x * rCos - s.mountOffset.y * rSin;
-    float offY = s.mountOffset.x * rSin + s.mountOffset.y * rCos;
-
-    if (type == CoordType::X) result -= offX;
-    else                      result -= offY;
+    // in: the one updateSensorPoses rotated at sample time, not whatever the
+    // IMU says now.
+    if (type == CoordType::X) result -= s.mountWorldX;
+    else                      result -= s.mountWorldY;
 
     return {type, result};
 }
@@ -670,26 +777,49 @@ std::pair<Pose, int> RclTracking::computePose() const {
     };
 }
 
-void RclTracking::update() {
-    std::lock_guard<pros::Mutex> lock(mMutex);
-
+void RclTracking::expireDisableTimersLocked(std::uint32_t nowMs) {
     for (int i = 0; i < MAX_DISTANCE_SENSORS; i++) {
-        if (mDisableTimers[i] > 0.0f) {
-            mDisableTimers[i] -= mConfig.updatePeriodMs;
-            if (mDisableTimers[i] <= 0.0f) {
-                mSensors[i].enabled = true;
-                mDisableTimers[i] = 0.0f;
-            }
+        if (mDisableUntilMs[i] != 0 &&
+            static_cast<std::int32_t>(nowMs - mDisableUntilMs[i]) >= 0) {
+            mSensors[i].enabled = true;
+            mDisableUntilMs[i] = 0;
         }
     }
+}
 
-    if (mConfig.farSideGate && mFarSideTimer > 0.0f) {
-        mFarSideTimer -= mConfig.updatePeriodMs;
-        if (mFarSideTimer <= 0.0f) clearFarSideLocked();
-    }
+void RclTracking::expireObstaclesLocked(std::uint32_t nowMs) {
+    mLineObstacles.erase(
+        std::remove_if(mLineObstacles.begin(), mLineObstacles.end(),
+                       [nowMs](const LineObstacle& o) { return expired(o.expiresAtMs, nowMs); }),
+        mLineObstacles.end());
+    mCircleObstacles.erase(
+        std::remove_if(mCircleObstacles.begin(), mCircleObstacles.end(),
+                       [nowMs](const CircleObstacle& o) { return expired(o.expiresAtMs, nowMs); }),
+        mCircleObstacles.end());
+}
+
+void RclTracking::update() {
+    RawSamples raw;
+    pollDevices(raw);
+    std::lock_guard<pros::Mutex> lock(mMutex);
+
+    // Measured, not nominal: the loop can overrun, and velocity, the stale
+    // hold and the sync rate limit are all per-second quantities. A stall past
+    // 10 periods, or a clock that went backwards, is a gap: no velocity is
+    // differenced across it.
+    const std::uint32_t now = pros::millis();
+    const std::int32_t elapsed = static_cast<std::int32_t>(now - mLastUpdateMs);
+    const bool gap = !mHaveLastUpdate || elapsed < 0 ||
+                     elapsed > static_cast<std::int32_t>(10.0f * mConfig.updatePeriodMs);
+    mDtMs = gap ? mConfig.updatePeriodMs : std::fmax(static_cast<float>(elapsed), 1.0f);
+    mLastUpdateMs = now;
+    mHaveLastUpdate = true;
+
+    expireFarSideLocked(now);
+    expireObstaclesLocked(now);
 
     const Pose currentPose = mOdom.getPose();
-    const float dtSec = mConfig.updatePeriodMs / 1000.0f;
+    const float dtSec = mDtMs / 1000.0f;
 
     // Motion, from successive poses, MINUS whatever the last sync put there.
     // Odometry moves for two reasons -- the robot drove, and this filter
@@ -700,7 +830,7 @@ void RclTracking::update() {
     //
     // Low-passed hard on top of that: a 10 ms difference of a pose quantised to
     // encoder ticks is mostly quantisation.
-    if (mHavePrevPose && dtSec > 1e-6f) {
+    if (mHavePrevPose && !gap) {
         const float k = 0.25f;
         const float dxDriven = (currentPose.x - mPrevPose.x) - mAppliedDx;
         const float dyDriven = (currentPose.y - mPrevPose.y) - mAppliedDy;
@@ -726,7 +856,7 @@ void RclTracking::update() {
     mLagShiftX = currentPose.x - samplePose.x;
     mLagShiftY = currentPose.y - samplePose.y;
 
-    if (!readDevices()) {
+    if (!ingestSamples(raw)) {
         // Nothing new arrived. Every reported number below -- the classes, the
         // vote count, the spread -- belongs to the last cycle that had real
         // data, and recomputing them from a held sample would say the same
@@ -860,28 +990,6 @@ void RclTracking::update() {
         if (est.yCount < mConfig.recoveryMinVotes && !est.yPaired) mYMeasured = false;
     }
 
-    for (auto& o : mLineObstacles) {
-        if (o.lifetimeMs > 0.0f) {
-            o.lifetimeMs -= mConfig.updatePeriodMs;
-            if (o.lifetimeMs <= 0.0f) o.lifetimeMs = -1.0f;
-        }
-    }
-    for (auto& o : mCircleObstacles) {
-        if (o.lifetimeMs > 0.0f) {
-            o.lifetimeMs -= mConfig.updatePeriodMs;
-            if (o.lifetimeMs <= 0.0f) o.lifetimeMs = -1.0f;
-        }
-    }
-
-    mLineObstacles.erase(
-        std::remove_if(mLineObstacles.begin(), mLineObstacles.end(),
-                       [](const LineObstacle& o) { return o.lifetimeMs < 0.0f; }),
-        mLineObstacles.end());
-    mCircleObstacles.erase(
-        std::remove_if(mCircleObstacles.begin(), mCircleObstacles.end(),
-                       [](const CircleObstacle& o) { return o.lifetimeMs < 0.0f; }),
-        mCircleObstacles.end());
-
     if (mConfig.autoSync && (mXMeasured || mYMeasured)) {
         syncUpdateLocked();
     } else {
@@ -902,7 +1010,7 @@ void RclTracking::syncUpdateLocked() {
     const float prop = mConfig.hardSync ? 1.0f
                      : (mDisplaced ? mConfig.recoverySyncProp : mConfig.syncProp);
 
-    const float rateStep = mConfig.maxSyncRate * (mConfig.updatePeriodMs / 1000.0f);
+    const float rateStep = mConfig.maxSyncRate * (mDtMs / 1000.0f);
     // Recovery is fast but not instant. maxSyncDist per reading crosses the
     // whole field in well under a second, which is quick enough inside a 15 s
     // routine, while a single wrong reading can only move the pose that far
@@ -929,8 +1037,8 @@ void RclTracking::syncUpdateLocked() {
     mLastSyncStep = dist;
     // Remembered so the next cycle can tell this correction apart from the
     // robot actually moving.
-    mAppliedDx = dx;
-    mAppliedDy = dy;
+    mAppliedDx += dx;
+    mAppliedDy += dy;
 
     mOdom.syncPose({
         odomPose.x + dx,
@@ -940,44 +1048,56 @@ void RclTracking::syncUpdateLocked() {
 }
 
 bool RclTracking::updateBotPoseFromBestSensor() {
-    std::lock_guard<pros::Mutex> lock(mMutex);
+    // Called from a routine's task, which PROS deletes on a mode change, so
+    // nothing here may hold mMutex across a device read or another lock: a
+    // task deleted mid-section leaves the mutex taken and the loop dead.
+    RawSamples raw;
+    pollDevices(raw);
+    const Pose odomPose = mOdom.getPose();
 
-    // A one-shot outside the loop, so it has to poll the devices itself --
-    // updateSensorPoses only lays out the geometry now.
-    readDevices();
-    // Whatever the device last reported is the best that is available to a
-    // caller asking for a fix right now; refusing it for being the same value
-    // as last cycle would make this return false for a stationary robot, which
-    // is the one case it is most often called in.
-    for (auto& s : mSensors) if (s.sensor != nullptr && s.enabled) s.fresh = true;
-    updateSensorPoses(mOdom.getPose());
+    CoordType type = CoordType::INVALID;
+    float coord = 0.0f;
+    {
+        std::lock_guard<pros::Mutex> lock(mMutex);
+        expireFarSideLocked(pros::millis());
+        ingestSamples(raw);
+        // Whatever the device last reported is the best that is available to
+        // a caller asking for a fix right now; refusing it for being the same
+        // value as last cycle would make this return false for a stationary
+        // robot, which is the one case it is most often called in.
+        const bool current = raw.gen == mSampleGen;
+        for (int i = 0; i < MAX_DISTANCE_SENSORS; i++) {
+            auto& s = mSensors[i];
+            s.fresh = current && s.sensor != nullptr && s.enabled && !s.faulted &&
+                      raw.s[i].dev == s.sensor;
+        }
+        updateSensorPoses(odomPose);
 
-    int bestIndex = -1;
-    float bestDist = 999.0f;
-
-    for (int i = 0; i < MAX_DISTANCE_SENSORS; i++) {
-        if (mSensors[i].sensor == nullptr) continue;
-        if (isValidReading(i)) {
-            float dist = mSensors[i].readingInch;
-            if (dist < bestDist) {
-                bestDist = dist;
+        int bestIndex = -1;
+        float bestDist = 999.0f;
+        for (int i = 0; i < MAX_DISTANCE_SENSORS; i++) {
+            if (mSensors[i].sensor == nullptr) continue;
+            if (isValidReading(i) && mSensors[i].readingInch < bestDist) {
+                bestDist = mSensors[i].readingInch;
                 bestIndex = i;
             }
         }
+        if (bestIndex < 0) return false;
+
+        std::tie(type, coord) = getBotCoordFromSensor(bestIndex);
+        if (type == CoordType::INVALID) return false;
     }
 
-    if (bestIndex < 0) return false;
-
-    auto [type, coord] = getBotCoordFromSensor(bestIndex);
-    if (type == CoordType::INVALID) return false;
-
-    Pose odomPose = mOdom.getPose();
-    if (type == CoordType::X) {
-        mOdom.syncPose({coord, odomPose.y, odomPose.theta});
-    } else {
-        mOdom.syncPose({odomPose.x, coord, odomPose.theta});
-    }
-    mLatestEstimate = mOdom.getPose();
+    // Re-read so motion since the solve survives on the axis not measured.
+    const Pose now = mOdom.getPose();
+    const Pose fixed = type == CoordType::X ? Pose{coord, now.y, now.theta}
+                                            : Pose{now.x, coord, now.theta};
+    mOdom.syncPose(fixed);
+    std::lock_guard<pros::Mutex> lock(mMutex);
+    mLatestEstimate = fixed;
+    // Not motion: keep it out of the next cycle's velocity.
+    mAppliedDx += fixed.x - now.x;
+    mAppliedDy += fixed.y - now.y;
     return true;
 }
 
@@ -985,6 +1105,18 @@ void RclTracking::hardReset(const Pose& pose) {
     std::lock_guard<pros::Mutex> lock(mMutex);
 
     mLatestEstimate = pose;
+
+    const std::uint32_t now = pros::millis();
+    if (mConfig.farSideGate && mFarSideOrientPending) {
+        const std::int32_t sinceArm = static_cast<std::int32_t>(now - mFarSideArmedMs);
+        if (sinceArm >= 0 && sinceArm <= static_cast<std::int32_t>(kFarSideOrientWindowMs)) {
+            orientFarSideLocked(pose);
+        }
+    }
+    mFarSideOrientPending = false;
+    mLastHardResetMs = now;
+    mHaveHardReset = true;
+    mSampleGen++;
 
     mResidualX = mResidualY = 0.0f;
     mLastResidualX = mLastResidualY = 0.0f;
@@ -1034,6 +1166,7 @@ void RclTracking::startTracking() {
         mLatestEstimate = mOdom.getPose();
         mPrevPose = mLatestEstimate;
         mHavePrevPose = true;
+        mHaveLastUpdate = false;
         mTask = new pros::Task([this]() { run(); });
     }
 }

@@ -6,6 +6,7 @@
 
 #include "chad/movement_control/spline.hpp"
 #include "chad/util/fasttrig.hpp"
+#include "pros/misc.hpp"
 #include "pros/motors.hpp"
 
 namespace chad {
@@ -38,10 +39,9 @@ Chassis::Chassis(Drivetrain& drivetrain, const OdomSensors& sensors,
 }
 
 Chassis::~Chassis() {
-    mMotionCancelled = true;
     mTaskShouldStop = true;
+    abortMotion();
     if (mMotionTask != nullptr) {
-        mMotionTask->notify();
         for (int i = 0; i < 100 && mMotionRunning; ++i) pros::delay(5);
         mMotionTask->remove();
         delete mMotionTask;
@@ -126,11 +126,21 @@ void Chassis::setPoseFieldFrame(const Pose& pose) {
         mDryRunPath.push_back(pose);
         return;
     }
-    mOdom.setPose(pose);
+    resetPose(pose);
+}
 
-    mMcl.setPose(pose);
+void Chassis::resetPose(const Pose& pose) {
+    // An RCL cycle that lands between the odom write and its reset measures
+    // against the old pose and syncs odom back toward it. Resetting on both
+    // sides discards whatever such a cycle held.
     mRcl.hardReset(pose);
-    mEkf.setPose(pose);
+    mOdom.setPose(pose);
+    mRcl.hardReset(pose);
+
+    // A particle resample is milliseconds on the Brain; skip filters that are
+    // neither configured nor running.
+    if (mConfig.useMclTracking || mMcl.isTracking()) mMcl.setPose(pose);
+    if (mConfig.useEkfTracking || mEkf.isTracking()) mEkf.setPose(pose);
 }
 
 void Chassis::setPosition(float x, float y) {
@@ -142,12 +152,7 @@ void Chassis::setPosition(float x, float y) {
         return;
     }
     Pose current = mOdom.getPose();
-    Pose newPose{x, y, current.theta};
-    mOdom.setPose(newPose);
-
-    mMcl.setPose(newPose);
-    mRcl.hardReset(newPose);
-    mEkf.setPose(newPose);
+    resetPose({x, y, current.theta});
 }
 
 void Chassis::setHeading(float thetaDeg) {
@@ -158,12 +163,7 @@ void Chassis::setHeading(float thetaDeg) {
         return;
     }
     Pose current = mOdom.getPose();
-    Pose newPose{current.x, current.y, theta};
-    mOdom.setPose(newPose);
-
-    mMcl.setPose(newPose);
-    mRcl.hardReset(newPose);
-    mEkf.setPose(newPose);
+    resetPose({current.x, current.y, theta});
 }
 
 Pose Chassis::getPose() const {
@@ -246,11 +246,12 @@ void Chassis::startMotion() {
     mMotionRunning = true;
 }
 
-void Chassis::endMotion() {
-    mDrivetrain.setVoltage(0, 0);
+void Chassis::endMotion(uint32_t seq) {
+    // Released by a cancelMotion that stopped waiting: the drive is the
+    // caller's now, and a 0 V here would override it.
+    if (!mMotionSlot.completed(seq)) mDrivetrain.setVoltage(0, 0);
     mMotionRunning = false;
 
-    mMotionCancelled = false;
     mLateralPID.reset();
     mAngularPID.reset();
 }
@@ -261,29 +262,25 @@ void Chassis::runMotionTask() {
         if (mTaskShouldStop) break;
 
         while (true) {
-            MotionRequest req;
-            bool hasWork = false;
             mQueueMutex.lock();
-            if (!mMotionQueue.empty()) {
-                req = mMotionQueue.front();
-                mMotionQueue.pop();
-                hasWork = true;
-            }
+            const bool hasWork = mMotionSlot.pop(mCurrentMotion, mCurrentSeq);
             mQueueMutex.unlock();
 
             if (!hasWork) break;
 
-            if (!mMotionCancelled && !mTaskShouldStop) {
-                mCurrentMotion = req;
-                executeCurrentMotion();
-            }
-            mCompletedSeq.store(req.seq);
+            if (!mTaskShouldStop) executeCurrentMotion();
+
+            mQueueMutex.lock();
+            mMotionSlot.finish(mCurrentSeq);
+            mQueueMutex.unlock();
         }
     }
 }
 
 void Chassis::executeCurrentMotion() {
     auto& req = mCurrentMotion;
+    const uint32_t seq = mCurrentSeq;
+    if (mMotionSlot.cancelled(seq)) return;
 
     req.startTime = pros::millis();
 
@@ -376,7 +373,6 @@ void Chassis::executeCurrentMotion() {
         }
     }
 
-    mMotionCancelled = false;
     startMotion();
 
     uint32_t dryRunSteps = 0;
@@ -387,11 +383,20 @@ void Chassis::executeCurrentMotion() {
     bool bearingHeld = false;
     float heldBearing = 0.0f;
 
+    bool approachSet = false;
+    float approachX = 0.0f, approachY = 0.0f;
+
     float prevLateralOut = 0.0f;
 
     uint32_t prevTick = pros::millis();
+    uint32_t wakeTick = prevTick;
+    // PROS deletes the competition task on a mode change without unwinding,
+    // so whoever issued this motion may no longer exist to cancel it.
+    const uint8_t compStatus = pros::competition::get_status();
 
-    while (mMotionRunning && !mMotionCancelled) {
+    while (mMotionRunning && !mMotionSlot.cancelled(seq)) {
+        if (pros::competition::get_status() != compStatus) break;
+
         const uint32_t nowTick = pros::millis();
         const uint32_t tickMs = nowTick - prevTick;
         float tickDt = tickMs / 1000.0f;
@@ -459,6 +464,20 @@ void Chassis::executeCurrentMotion() {
             angularOut = mAngularPID.update(angleDiffRad(pose.theta, steerBearing));
             remainingErr = distErr;
             settled = distErr < req.movePointParams.targetTolerance;
+
+            // A chained move that passes beside its target never enters the
+            // early-exit radius; it exits on crossing the line through the
+            // target square to the approach instead.
+            const float toX = req.targetX - pose.x;
+            const float toY = req.targetY - pose.y;
+            if (!approachSet && distErr > req.movePointParams.targetTolerance) {
+                approachX = toX;
+                approachY = toY;
+                approachSet = true;
+            }
+            if (latFloor != 0.0f && toX * approachX + toY * approachY < 0.0f) {
+                exitNow = true;
+            }
             break;
         }
         case MotionType::Heading: {
@@ -530,8 +549,15 @@ void Chassis::executeCurrentMotion() {
             float clampedLead = lead * distToTarget;
             if (clampedLead > 24.0f) clampedLead = 24.0f;
 
-            float carrotX = req.targetX - clampedLead * std::cos(req.targetHeadingRad);
-            float carrotY = req.targetY - clampedLead * std::sin(req.targetHeadingRad);
+            // Backing in, the robot travels opposite the heading it ends on,
+            // so the carrot leads along the travel direction and steering
+            // points the back at it. The final heading is the same either way.
+            const bool forwards = req.boomerangParams.forwards;
+            const float travelRad = forwards ? req.targetHeadingRad
+                                             : wrapRad(req.targetHeadingRad + PI);
+
+            float carrotX = req.targetX - clampedLead * std::cos(travelRad);
+            float carrotY = req.targetY - clampedLead * std::sin(travelRad);
 
             float t = (lead > 1e-6f)
                       ? std::min(distToTarget / (lead * 12.0f), 1.0f)
@@ -554,7 +580,8 @@ void Chassis::executeCurrentMotion() {
                 heldBearing = carrotBearingRad;
                 bearingHeld = true;
             }
-            float headingToCarrotRad = angleDiffRad(pose.theta, carrotBearingRad);
+            float headingToCarrotRad = angleDiffRad(
+                pose.theta, forwards ? carrotBearingRad : wrapRad(carrotBearingRad + PI));
             float headingToFinalRad  = angleDiffRad(pose.theta, req.targetHeadingRad);
 
             float headingWeight = std::min(distToTarget / 12.0f, 1.0f);
@@ -748,6 +775,8 @@ void Chassis::executeCurrentMotion() {
         }
 
         if (!mDryRun) {
+            // The cancel may have landed during this tick's computation.
+            if (mMotionSlot.cancelled(seq)) break;
             mDrivetrain.setVoltage(left, right);
         } else {
             float leftFrac  = left / 127.0f;
@@ -820,11 +849,14 @@ void Chassis::executeCurrentMotion() {
         if (mDryRun) {
             if (++dryRunSteps > 6000u) break;
         } else {
-            pros::delay(10);
+            // After an overrun, restart the period rather than running the
+            // missed ticks back to back with no time between them.
+            if (pros::millis() - wakeTick >= 10) wakeTick = pros::millis();
+            pros::Task::delay_until(&wakeTick, 10);
         }
     }
 
-    endMotion();
+    endMotion(seq);
 }
 
 namespace {
@@ -845,7 +877,7 @@ void Chassis::moveDistance(float target, float timeout, const MoveDistanceParams
     req.targetDistance = target;
     req.timeout = timeout;
 
-    enqueueMotion(req, async);
+    enqueueMotion(std::move(req), async);
 }
 
 void Chassis::moveToPoint(float x, float y, float timeout, const MoveToPointParams& params, bool async) {
@@ -860,7 +892,7 @@ void Chassis::moveToPoint(float x, float y, float timeout, const MoveToPointPara
         orConfig(params.bearingHoldDist, mConfig.bearingHoldDist);
     req.timeout = timeout;
 
-    enqueueMotion(req, async);
+    enqueueMotion(std::move(req), async);
 }
 
 void Chassis::turnToHeading(float thetaDeg, float timeout, const TurntoHeadingParams& params, bool async) {
@@ -872,7 +904,7 @@ void Chassis::turnToHeading(float thetaDeg, float timeout, const TurntoHeadingPa
         orConfig(params.targetTolerance, mConfig.targetToleranceDeg);
     req.timeout = timeout;
 
-    enqueueMotion(req, async);
+    enqueueMotion(std::move(req), async);
 }
 
 void Chassis::turnToPoint(float x, float y, float timeout, const TurnToPointParams& params, bool async) {
@@ -885,7 +917,7 @@ void Chassis::turnToPoint(float x, float y, float timeout, const TurnToPointPara
         orConfig(params.targetTolerance, mConfig.targetToleranceDeg);
     req.timeout = timeout;
 
-    enqueueMotion(req, async);
+    enqueueMotion(std::move(req), async);
 }
 
 void Chassis::moveArc(float x, float y, float radius, float timeout, const ArcParams& params, bool async) {
@@ -899,7 +931,7 @@ void Chassis::moveArc(float x, float y, float radius, float timeout, const ArcPa
         orConfig(params.targetTolerance, mConfig.targetToleranceIn);
     req.timeout = timeout;
 
-    enqueueMotion(req, async);
+    enqueueMotion(std::move(req), async);
 }
 
 void Chassis::moveBoomerang(float x, float y, float thetaDeg, float timeout, const BoomerangParams& params, bool async) {
@@ -913,7 +945,7 @@ void Chassis::moveBoomerang(float x, float y, float thetaDeg, float timeout, con
         orConfig(params.targetTolerance, mConfig.targetToleranceIn);
     req.timeout = timeout;
 
-    enqueueMotion(req, async);
+    enqueueMotion(std::move(req), async);
 }
 
 void Chassis::moveRAMSETE(const std::vector<Pose>& path, float timeout, const RAMSETEParams& params, bool async) {
@@ -934,7 +966,7 @@ void Chassis::moveRAMSETE(const std::vector<Pose>& path, float timeout, const RA
         orConfig(params.targetTolerance, mConfig.targetToleranceIn);
     req.timeout = timeout;
 
-    enqueueMotion(req, async);
+    enqueueMotion(std::move(req), async);
 }
 
 void Chassis::swingToHeading(float thetaDeg, SwingSide side, float timeout, const SwingParams& params, bool async) {
@@ -947,43 +979,39 @@ void Chassis::swingToHeading(float thetaDeg, SwingSide side, float timeout, cons
         orConfig(params.targetTolerance, mConfig.targetToleranceDeg);
     req.timeout = timeout;
 
-    enqueueMotion(req, async);
+    enqueueMotion(std::move(req), async);
 }
 
-void Chassis::enqueueMotion(MotionRequest& req, bool async) {
+void Chassis::enqueueMotion(MotionRequest&& req, bool async) {
     applyMirror(req);
     ensureMotionTask();
 
+    // The lock is only ever held for a copy in or out: a competition task
+    // deleted while holding it would leave it locked for good.
+    const uint32_t cancelMark = mMotionSlot.cancelledThrough();
     mQueueMutex.lock();
-    while (!mMotionQueue.empty()) {
+    while (mMotionSlot.hasPending()) {
         mQueueMutex.unlock();
-        if (mMotionCancelled) return;
+        if (mMotionSlot.cancelledThrough() != cancelMark) return;
         pros::delay(5);
         mQueueMutex.lock();
     }
-    req.seq = ++mMotionSeqCounter;
-    mMotionQueue.push(req);
+    const uint32_t seq = mMotionSlot.push(std::move(req));
     mQueueMutex.unlock();
     mMotionTask->notify();
 
     if (!async) {
-        uint32_t mySeq = req.seq;
-        while (static_cast<int32_t>(mCompletedSeq.load() - mySeq) < 0) {
-            if (mMotionCancelled) break;
-            pros::delay(5);
-        }
+        while (!mMotionSlot.done(seq)) pros::delay(5);
     }
 }
 
 bool Chassis::isSettled() const {
-    return static_cast<int32_t>(mCompletedSeq.load() - mMotionSeqCounter.load()) >= 0;
+    return mMotionSlot.settled();
 }
 
 void Chassis::abortMotion() {
-    mMotionCancelled = true;
-
     mQueueMutex.lock();
-    while (!mMotionQueue.empty()) mMotionQueue.pop();
+    mMotionSlot.cancelAll();
     mQueueMutex.unlock();
 
     if (mMotionTask != nullptr) {
@@ -992,21 +1020,31 @@ void Chassis::abortMotion() {
 }
 
 void Chassis::cancelMotion() {
-    abortMotion();
+    // A competition task deleted mid-enqueue leaves the lock held for good.
+    // The cancel still lands through the atomics, and the motion task drops
+    // the pending request itself.
+    uint32_t through;
+    if (mQueueMutex.take(20)) {
+        through = mMotionSlot.cancelAll();
+        mQueueMutex.give();
+    } else {
+        through = mMotionSlot.markCancelled();
+    }
+    if (mMotionTask != nullptr) mMotionTask->notify();
 
-    while (mMotionRunning) {
+    // The loop sees the cancel within a tick. The bound is for a motion task
+    // that cannot get there, and for the documented misuse of calling this
+    // from the motion task itself.
+    for (int i = 0; i < 20 && mMotionSlot.runningThrough(through); ++i) {
         pros::delay(5);
     }
-
-    mCompletedSeq.store(mMotionSeqCounter.load());
-
-    mMotionCancelled = false;
+    mMotionSlot.release(through);
 
     mDrivetrain.setVoltage(0, 0);
 }
 
 void Chassis::waitUntilSettled() {
-    while (static_cast<int32_t>(mCompletedSeq.load() - mMotionSeqCounter.load()) < 0) {
+    while (!mMotionSlot.settled()) {
         pros::delay(10);
     }
 }

@@ -2,9 +2,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <mutex>
 
 #include "chad/drivetrain.hpp"
+#include "pros/error.h"
 
 namespace chad {
 namespace {
@@ -111,6 +113,7 @@ void EkfTracking::setPose(const Pose& pose) {
 }
 
 void EkfTracking::setPose(const Pose& pose, float posSigma, float thetaSigma) {
+    if (!std::isfinite(pose.x) || !std::isfinite(pose.y) || !std::isfinite(pose.theta)) return;
     std::lock_guard<pros::Mutex> lock(mMutex);
     mOdom.consumeDelta(OdomTracking::CHANNEL_EKF);
 
@@ -152,6 +155,8 @@ void EkfTracking::setDistanceSensors(
 }
 
 void EkfTracking::predict(const OdomDelta& delta) {
+    if (!std::isfinite(delta.dVert) || !std::isfinite(delta.dHoriz) ||
+        !std::isfinite(delta.dTheta)) return;
     const float theta = mState[2];
     const float mid = theta + delta.dTheta * 0.5f;
     const float c = std::cos(mid), s = std::sin(mid);
@@ -218,6 +223,8 @@ bool EkfTracking::applyScalarUpdate(const float H[3], float innovation, float R,
     }
     const float S = H[0] * PHt[0] + H[1] * PHt[1] + H[2] * PHt[2] + R;
     if (!(S > 1e-12f)) return false;
+    // NaN fails every gate comparison, so it has to be turned away here.
+    if (!std::isfinite(innovation)) return false;
 
     if (gateChi2 > 0.0f && (innovation * innovation) / S > gateChi2) return false;
 
@@ -321,8 +328,15 @@ void EkfTracking::updateRanges() {
             continue;
         }
 
-        const float mm = static_cast<float>(mDistanceSensors[i]->get());
-        const int conf = mDistanceSensors[i]->get_confidence();
+        // PROS_ERR is an unplugged or still-booting sensor, not a reading.
+        const std::int32_t rawMm = mDistanceSensors[i]->get();
+        const std::int32_t conf =
+            (rawMm == PROS_ERR) ? PROS_ERR : mDistanceSensors[i]->get_confidence();
+        if (rawMm == PROS_ERR || conf == PROS_ERR) {
+            mBeamStates[i] = BeamState::Absent;
+            continue;
+        }
+        const float mm = static_cast<float>(rawMm);
         // Past maxRangeIn the sensor is reporting its own ceiling rather than
         // a wall, and castWalls is capped there too, so it can only ever be
         // matched against a pose that is wrong.
@@ -422,6 +436,7 @@ void EkfTracking::updateMcl() {
 
     const float vx = est.pose.x - mState[0];
     const float vy = est.pose.y - mState[1];
+    if (!std::isfinite(vx) || !std::isfinite(vy)) return;
     const float mahal = vx * (Si00 * vx + Si01 * vy) + vy * (Si01 * vx + Si11 * vy);
 
     if (mahal > mConfig.mclGateChi2) {

@@ -6,6 +6,7 @@
 
 #include "chad/drivetrain.hpp"
 #include "chad/util/fasttrig.hpp"
+#include "pros/error.h"
 #include "pros/llemu.hpp"
 
 namespace chad {
@@ -97,10 +98,11 @@ void MclTracking::buildGaussianLUT() {
 
 float MclTracking::logLikelihood(float sigmas) const {
     const float t = (sigmas + LUT_SIGMA_SPAN) / (2.0f * LUT_SIGMA_SPAN);
-    int idx = static_cast<int>(t * GAUSSIAN_LUT_SIZE);
-    if (idx < 0) idx = 0;
-    if (idx >= GAUSSIAN_LUT_SIZE) idx = GAUSSIAN_LUT_SIZE - 1;
-    return mGaussianLUT[idx];
+    // Clamp before the cast: a NaN or huge t has no defined int value, and a
+    // NaN lands in the tail like any hypothesis the reading cannot support.
+    if (!(t > 0.0f)) return mGaussianLUT[0];
+    if (!(t < 1.0f)) return mGaussianLUT[GAUSSIAN_LUT_SIZE - 1];
+    return mGaussianLUT[static_cast<int>(t * GAUSSIAN_LUT_SIZE)];
 }
 
 MclTracking::MclTracking(OdomTracking& odom,
@@ -195,6 +197,7 @@ void MclTracking::run() {
 }
 
 void MclTracking::setPose(const Pose& pose) {
+    if (!std::isfinite(pose.x) || !std::isfinite(pose.y) || !std::isfinite(pose.theta)) return;
     mLastImuHeading = mOdom.imuHeadingRad();
 
     mOdom.consumeDelta();
@@ -249,6 +252,8 @@ float MclTracking::reachLimit() const {
 
 void MclTracking::predict() {
     OdomDelta delta = mOdom.consumeDelta();
+    if (!std::isfinite(delta.dVert) || !std::isfinite(delta.dHoriz) ||
+        !std::isfinite(delta.dTheta)) delta = {};
 
     float currentImuHeadingRad = mOdom.imuHeadingRad();
     float dThetaRad = delta.dTheta;
@@ -338,8 +343,11 @@ void MclTracking::updateWeights() {
 
         mSensorReadingsMm[i] = mDistanceSensors[i]->get();
         mSensorReadingsInch[i] = mSensorReadingsMm[i] * MM_TO_INCH;
-        mSensorConfs[i] = mDistanceSensors[i]->get_confidence();
-        mValidSensors[i] = true;
+        mSensorConfs[i] = (mSensorReadingsMm[i] == PROS_ERR)
+            ? PROS_ERR : mDistanceSensors[i]->get_confidence();
+        // PROS_ERR is an unplugged or still-booting sensor, not a reading.
+        mValidSensors[i] = mSensorReadingsMm[i] != PROS_ERR && mSensorConfs[i] != PROS_ERR;
+        if (!mValidSensors[i]) continue;
 
         float sx = mRawEstimate.x + (mSensorMounts[i].x * currCos - mSensorMounts[i].y * currSin);
         float sy = mRawEstimate.y + (mSensorMounts[i].x * currSin + mSensorMounts[i].y * currCos);
@@ -349,7 +357,10 @@ void MclTracking::updateWeights() {
 
         if (mDisabledSensors[i]) { mValidSensors[i] = false; continue; }
         if (mSensorReadingsMm[i] > 9000) { mValidSensors[i] = false; continue; }
-        if (mSensorReadingsMm[i] < mConfig.minSensorRange) { mValidSensors[i] = false; continue; }
+        if (mSensorReadingsMm[i] < std::max(mConfig.minSensorRange, kMinV5RangeMm)) {
+            mValidSensors[i] = false;
+            continue;
+        }
 
         if (mSensorReadingsMm[i] > 200 && mSensorConfs[i] < mConfig.confidenceThreshold) {
             mValidSensors[i] = false; continue;
@@ -492,7 +503,8 @@ void MclTracking::updateWeights() {
 
             logWeight += logLikelihood((mSensorReadingsInch[j] - pDist) * invSigmas[j]);
         }
-        p.logWeight = std::max(logWeight, kLogFloor);
+        // Written so a NaN takes the floor; std::max would keep it.
+        p.logWeight = (logWeight > kLogFloor) ? logWeight : kLogFloor;
     }
 
     float maxLog = kLogFloor;

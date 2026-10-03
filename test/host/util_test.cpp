@@ -54,13 +54,17 @@ CHAD_TEST(util, wrapReducesInOneStepNotByRepeatedSubtraction) {
     CHECK_EQ(botHeadingToTrig(kNan), 0.0f);
 }
 
-CHAD_TEST(util, wrapRadRejectsNonFinite) {
-    CHECK_EQ(wrapRad(kInf), 0.0f);
-    CHECK_EQ(wrapRad(-kInf), 0.0f);
-    CHECK_EQ(wrapRad(kNan), 0.0f);
+// A non-finite angle stays NaN so the caller's isfinite guard sees it; a zero
+// here reads as a valid heading and hides the fault.
+CHAD_TEST(util, wrapRadPropagatesNonFinite) {
+    CHECK(std::isnan(wrapRad(kInf)));
+    CHECK(std::isnan(wrapRad(-kInf)));
+    CHECK(std::isnan(wrapRad(kNan)));
+    CHECK(std::isnan(angleDiffRad(0.0f, kInf)));
+    CHECK(std::isnan(angleDiffRad(kNan, 0.0f)));
+    CHECK(std::isnan(vexToStdRad(kInf)));
     CHECK_EQ(wrapRadPositive(kInf), 0.0f);
     CHECK_EQ(wrapDeg(kInf), 0.0f);
-    CHECK_EQ(angleDiffRad(0.0f, kInf), 0.0f);
 }
 
 CHAD_TEST(util, angleDiffIsShortestSigned) {

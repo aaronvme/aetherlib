@@ -2,6 +2,7 @@
 
 #include <array>
 #include <atomic>
+#include <cstdint>
 #include <utility>
 #include <vector>
 
@@ -22,7 +23,7 @@ public:
     /// the reason is the only way to tell a sensor that is broken from one that
     /// is being asked to look at a robot.
     enum class ReadingClass {
-        Invalid,        // no device, or outside what the device can report
+        Invalid,        // no device, a faulted one, or outside what it can report
         WallHit,        // used
 
         Stale,          // the device has not produced a new sample yet
@@ -59,16 +60,26 @@ public:
         bool  pairVerified{false};
         /// Dropped by the axis median, having passed everything else.
         bool  outlier{false};
+        /// The device answered PROS_ERR: unplugged, or the port holds something
+        /// else. Never fresh, never evidence. Distinct from a working sensor's
+        /// 9999, which is a measurement.
+        bool  faulted{false};
+        /// Mount offset rotated into the field at sample time: world - robot.
+        float mountWorldX{0.0f}, mountWorldY{0.0f};
     };
 
+    /// lifetimeMs 0 = permanent. Expiry is a pros::millis() deadline set
+    /// when the obstacle is added.
     struct LineObstacle {
         float x1, y1, x2, y2;
         float lifetimeMs = 0.0f;
+        std::uint32_t expiresAtMs = 0;
     };
 
     struct CircleObstacle {
         float x, y, radius;
         float lifetimeMs = 0.0f;
+        std::uint32_t expiresAtMs = 0;
     };
 
     struct Config {
@@ -168,6 +179,8 @@ public:
 
     void enableSensor(int index);
     void disableSensor(int index);
+    /// durationMs <= 0 disables until enableSensor(). A deadline, so it runs
+    /// out whether or not the task is running.
     void disableSensorFor(int index, float durationMs);
 
     void addLineObstacle(float x1, float y1, float x2, float y2, float lifetimeMs = 0.0f);
@@ -178,15 +191,24 @@ public:
     /// normalised. Points satisfying n.p > d are ignored.
     void setFarSideGate(float nx, float ny, float d, float lifetimeMs = 0.0f);
 
-    /// Arm it from a line through two points, choosing the side the robot is
-    /// currently on as the side to keep. Alliance-agnostic: whichever half the
-    /// robot starts in is the half it trusts.
+    /// Arm it from a line through two points, keeping the half the robot is
+    /// standing in. Alliance-agnostic. The side is taken from the pose now.
+    /// If no pose was declared in the kFarSideOrientWindowMs before arming,
+    /// the first hardReset() -- i.e. setPose -- inside that window after
+    /// arming picks the side again, so a routine that arms before declaring
+    /// its start pose still keeps its own half. Later resets never flip it.
     void setFarSideGateFromLine(float x1, float y1, float x2, float y2,
                                 float lifetimeMs = 0.0f);
+    static constexpr std::uint32_t kFarSideOrientWindowMs = 500;
 
+    /// Disarm, including any pending side choice and deadline. Takes the lock
+    /// with a timeout; if it is held (a task deleted inside it), the clear is
+    /// flagged and the tracking task applies it on its next cycle.
     void clearFarSideGate();
-    bool farSideGateActive() const { return mConfig.farSideGate; }
-    float farSideGateRemainingMs() const { return mFarSideTimer; }
+    /// A lifetime is a wall-clock deadline, so it runs out whether or not the
+    /// tracking task is running.
+    bool farSideGateActive() const;
+    float farSideGateRemainingMs() const;
 
     void update();
 
@@ -230,9 +252,6 @@ public:
     /// pose it just replaced.
     void hardReset(const Pose& pose);
 
-    /// Kept for callers that only want the estimate seeded. Prefer hardReset.
-    void setRclPose(const Pose& pose) { mLatestEstimate = pose; }
-
     const Config& config() const { return mConfig; }
 
     /// Replaces the tuning wholesale, keeping the sensor count and whatever
@@ -260,6 +279,10 @@ public:
     float residualY() const { return mLastResidualY; }
     bool  turnGateHeld() const { return mTurnHeld; }
     float turnRateRadS() const { return mTurnRate; }
+    /// Bit i set: slot i last answered PROS_ERR.
+    std::uint32_t faultedMask() const { return mFaultedMask; }
+    /// Measured period of the last update(), ms.
+    float lastDtMs() const { return mDtMs; }
 
 private:
 
@@ -276,12 +299,35 @@ private:
     /// inside its own critical section, and pros::Mutex is not recursive.
     void armFarSideLocked(float nx, float ny, float d, float lifetimeMs);
     void clearFarSideLocked();
+    void expireFarSideLocked(std::uint32_t nowMs);
+    /// Flip the armed gate, if needed, so `p` is on the kept side.
+    void orientFarSideLocked(const Pose& p);
+    void expireDisableTimersLocked(std::uint32_t nowMs);
+    void expireObstaclesLocked(std::uint32_t nowMs);
 
-    /// Poll every device and decide which readings are new. Returns true when
-    /// at least one sensor produced a sample this loop has not already seen;
-    /// false means there is nothing to recompute and the previous cycle's
-    /// verdicts still stand.
-    bool readDevices();
+    struct RawSample {
+        pros::Distance* dev{nullptr};   // null = not polled
+        std::int32_t mm{0};
+        std::int32_t conf{0};
+    };
+    /// One poll. `gen` is mSampleGen at poll time: a reset or reconfigure in
+    /// between invalidates the whole batch.
+    struct RawSamples {
+        std::array<RawSample, MAX_DISTANCE_SENSORS> s{};
+        std::uint32_t gen{0};
+    };
+
+    /// Decide which polled readings are new. Returns true when at least one
+    /// sensor produced a sample this loop has not already seen; false means
+    /// there is nothing to recompute and the previous cycle's verdicts still
+    /// stand.
+    bool ingestSamples(const RawSamples& raw);
+
+    /// Read every enabled device, holding mMutex only to expire disable
+    /// timers and copy the pointers. A device read under it would leave the
+    /// mutex taken for good if the calling task were deleted mid-read, which
+    /// PROS does on a mode change.
+    void pollDevices(RawSamples& out);
 
     /// Classify every populated slot and record the result on the sensor.
     void classifyAll();
@@ -335,9 +381,28 @@ private:
     int mDisplaceCycles{0};
     int mCleanCycles{0};
 
-    std::array<float, MAX_DISTANCE_SENSORS> mDisableTimers{};
+    /// Absolute pros::millis() re-enable times; 0 = none.
+    std::array<std::uint32_t, MAX_DISTANCE_SENSORS> mDisableUntilMs{};
 
-    float mFarSideTimer{0.0f};
+    /// Absolute expiry; meaningful only while mFarSideTimed.
+    std::uint32_t mFarSideDeadlineMs{0};
+    bool mFarSideTimed{false};
+    /// Armed from a line with no recent pose: the first hardReset() within
+    /// kFarSideOrientWindowMs of mFarSideArmedMs re-picks the kept side.
+    bool mFarSideOrientPending{false};
+    std::uint32_t mFarSideArmedMs{0};
+    std::uint32_t mLastHardResetMs{0};
+    bool mHaveHardReset{false};
+    std::atomic<bool> mFarSideClearRequested{false};
+
+    /// Bumped by anything that invalidates an in-flight poll.
+    std::uint32_t mSampleGen{0};
+
+    std::uint32_t mFaultedMask{0};
+
+    std::uint32_t mLastUpdateMs{0};
+    bool  mHaveLastUpdate{false};
+    float mDtMs{10.0f};
 
     // Motion state, tracked from successive odom poses rather than a delta
     // channel -- there are only two of those and they belong to MCL and the

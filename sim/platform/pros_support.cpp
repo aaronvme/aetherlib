@@ -9,6 +9,11 @@ ControllerInput& state(int id) {
     static ControllerInput controllers[2];
     return controllers[(id == 0) ? 0 : 1];
 }
+
+std::uint8_t& competitionStatus() {
+    static std::uint8_t status = 0;
+    return status;
+}
 }  // namespace sim_input
 
 namespace lcd {

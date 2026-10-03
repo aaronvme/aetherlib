@@ -16,6 +16,8 @@
 namespace chad {
 class MclTracking {
 public:
+    // The V5 distance sensor's floor; anything shorter is not a range.
+    static constexpr float kMinV5RangeMm = 20.0f;
 
     struct Config {
         int particleCount = 1024;
@@ -37,7 +39,7 @@ public:
         float thetaSyncProp = 0.001f;
         float updatePeriodMs = 25.0f;
         int confidenceThreshold = 10;
-        float minSensorRange = 1.0f;
+        float minSensorRange = 1.0f;   // mm; readings under kMinV5RangeMm are always dropped
 
         float obstacleConeFrac = 0.22f;
         float obstacleRangeTol = 8.0f;

@@ -5,11 +5,21 @@
 // post, not the wall behind it.
 #pragma once
 
+#include <cerrno>
 #include <cstdint>
 #include <vector>
 
 #include "error.h"
 #include "../sim_runtime.hpp"
+
+namespace sim {
+/// Per-port fault injection: a faulted port answers PROS_ERR with errno ENODEV,
+/// which is what a real brain reports for an unplugged sensor.
+inline bool& distanceFaulted(std::uint8_t port) {
+    static bool faulted[kMaxSmartPorts]{};
+    return faulted[port < kMaxSmartPorts ? port : 0];
+}
+}  // namespace sim
 
 namespace pros {
 inline namespace v5 {
@@ -23,13 +33,22 @@ public:
     virtual ~Distance() = default;
 
     /// Distance to the nearest object, millimetres. 9999 when nothing is in range.
-    virtual std::int32_t get() { return sim::bus().distances[mPort].distanceMm; }
+    virtual std::int32_t get() {
+        if (sim::distanceFaulted(mPort)) { errno = ENODEV; return PROS_ERR; }
+        return sim::bus().distances[mPort].distanceMm;
+    }
     virtual std::int32_t get_distance() { return get(); }
 
     /// 0-63. Falls off with range and with glancing incidence.
-    virtual std::int32_t get_confidence() { return sim::bus().distances[mPort].confidence; }
+    virtual std::int32_t get_confidence() {
+        if (sim::distanceFaulted(mPort)) { errno = ENODEV; return PROS_ERR; }
+        return sim::bus().distances[mPort].confidence;
+    }
 
-    virtual std::int32_t get_object_size() { return sim::bus().distances[mPort].objectSize; }
+    virtual std::int32_t get_object_size() {
+        if (sim::distanceFaulted(mPort)) { errno = ENODEV; return PROS_ERR; }
+        return sim::bus().distances[mPort].objectSize;
+    }
     virtual double get_object_velocity() { return 0.0; }
 
     std::int32_t is_installed() const { return sim::bus().distances[mPort].present ? 1 : 0; }

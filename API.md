@@ -109,8 +109,14 @@ void waitUntilDist(float dist);   // inches travelled
 ```
 
 `cancelMotion` returns once the motion has stopped and the drive is off, so it
-cannot be called from the motion task. `setTelemetry`'s callback runs on that
-task; use `abortMotion` there, which stops the motion and returns immediately.
+cannot be called from the motion task. It waits at most about 100 ms for the
+loop to see the cancel, then cuts the drive regardless. `setTelemetry`'s
+callback runs on that task; use `abortMotion` there, which stops the motion
+and returns immediately.
+
+A motion also ends by itself when the competition status changes. PROS
+deletes the autonomous or driver task on a mode change without unwinding it,
+so the task that queued the motion may no longer exist to cancel it.
 
 ### Tracking access
 
@@ -249,7 +255,11 @@ magnitude of the output, applied after `maxSpeed` and before the lateral slew,
 and only while the motion is outside its tolerance -- held through the
 tolerance band it would stop the motion settling at all. `earlyExitRange` ends
 the motion as soon as the remaining error is inside it, so the next queued
-motion takes over while the robot is still carrying speed. Both were declared
+motion takes over while the robot is still carrying speed. A chained
+`moveToPoint` (`minSpeed` not 0) also ends once the robot crosses the line
+through the target square to the direction it started from, so one that passes
+beside its target hands off there instead of turning back until it times out.
+Motions that reach the radius first, and unchained ones, are unaffected. Both were declared
 but unread until they were wired up; an auton tuned against the old behaviour
 will move faster and hand off sooner.
 
@@ -274,8 +284,8 @@ the same `-1.0` fallback as everything else. The default is unchanged for a
 caller that leaves `ChassisConfig` alone, since that is 1.0 too.
 
 struct RAMSETEParams {
-    float b{48.0};                    // aggressiveness, b > 0
-    float zeta{0.85};                 // damping, 0 < zeta < 1
+    float b{24.0};                    // aggressiveness, b > 0
+    float zeta{2.10};                 // damping; tuned on the robot, see below
     float smoothSpacingIn{2.0};      // resample the path; 0 = take as given
     float maxSpeed{127}, minSpeed{0};
     float targetTolerance{-1.0};     // inches, negative = ChassisConfig
@@ -286,8 +296,9 @@ struct RAMSETEParams {
 };
 ```
 
-`b` and `zeta` use the conventional metre-based RAMSETE parameterization; the
-controller rescales to inches internally, so the textbook defaults work as-is.
+`b` and `zeta` feed the standard RAMSETE gain, with `b` scaled by
+`INCH_TO_METER` squared before use. The defaults were measured on the robot
+(retuned from 48 / 0.85); `zeta` above 1 is deliberately overdamped.
 
 **The path you pass is control points, not the trajectory.** `moveRAMSETE`
 resamples it along a Catmull-Rom spline every `smoothSpacingIn` inches before
@@ -479,6 +490,10 @@ void  setVoltage(float left, float right);
 void  setBrakeMode(pros::motor_brake_mode_e);
 float averagePositionDeg() const;  // ignores PROS_ERR from dead motors
 float externalGearRatio() const;   // wheel revs per motor rev; 1.0 until resolved
+
+// Per-motor positions into out[0..max); PROS_ERR_F left for an unreadable
+// motor. Returns the count written. No allocation.
+static int readPositionsDeg(const pros::MotorGroup*, double* out, int max);
 ```
 
 Public fields: `leftMotors`, `rightMotors`, `trackWidth`, `wheelDiameter`,
@@ -527,12 +542,11 @@ struct OdomSensors {
     std::vector<TrackingWheel*> horizWheelCollection;
     std::vector<pros::Imu*>     imuCollection;   // first is primary
     Drivetrain* drivetrain{nullptr};             // fallback when no dead wheels
-    float imuScaleFactor{1.0f};
 };
 ```
 
-Use **either** `imuScaleFactor` **or** [`ScaledIMU`](#scaledimu) — never both on
-the same IMU.
+IMU scale correction is [`ScaledIMU`](#scaledimu)'s job alone; odometry takes
+the heading as the IMU object reports it.
 
 ### OdomTracking
 
@@ -557,12 +571,22 @@ void reset();
 void calibrate();
 
 const OdomSensors& sensors() const;
-float imuHeadingDeg() const;      // VEX degrees
-float imuHeadingRad() const;      // standard math radians
+float imuHeadingDeg() const;      // VEX degrees, guarded heading as of the last tick
+float imuHeadingRad() const;      // standard math radians, same source
+uint32_t imuFaults() const;       // unreadable reads + re-anchors after a gap or step
 ```
 
 Prefer `consumeDelta()` when more than one task drives `update()` — the
 background odom task does.
+
+The heading getters return the guarded heading as of the last `update()`,
+`setPose()` or `reset()`, not a fresh IMU read, so they cost no device access
+and agree with the pose's theta.
+
+`setSensors()` is safe while the background task runs: it re-baselines against
+the new set, and a tick that was already reading the old one is discarded. No
+lock is held across a device read, so a task deleted mid-`setPose()` on a mode
+change cannot leave odometry blocked.
 
 ### RclTracking
 
@@ -576,7 +600,7 @@ void setSensor(int index, pros::Distance*, const Pose& mountOffset);
 void configureSensors(const std::array<pros::Distance*, MAX_DISTANCE_SENSORS>&,
                       const std::array<Pose, MAX_DISTANCE_SENSORS>&);
 void enableSensor(int), disableSensor(int);
-void disableSensorFor(int index, float durationMs);
+void disableSensorFor(int index, float durationMs);  // <= 0: until enableSensor
 
 void addLineObstacle(float x1, float y1, float x2, float y2, float lifetimeMs = 0);
 void addCircleObstacle(float x, float y, float radius, float lifetimeMs = 0);
@@ -593,12 +617,43 @@ bool isTracking() const;
 
 void syncUpdate();                           // blend estimate into odometry
 bool updateBotPoseFromBestSensor();
-void setRclPose(const Pose&);
+void hardReset(const Pose&);                 // drop residual, recovery, samples
+
+void setFarSideGate(float nx, float ny, float d, float lifetimeMs = 0);
+void setFarSideGateFromLine(float x1, float y1, float x2, float y2,
+                            float lifetimeMs = 0);
+void clearFarSideGate();
+bool  farSideGateActive() const;
+float farSideGateRemainingMs() const;
 
 const std::array<RclSensor, MAX_DISTANCE_SENSORS>& sensors() const;
 Pose latestEstimate() const;
 int  activeSensorCount() const;
+std::uint32_t faultedMask() const;           // bit i: slot i answered PROS_ERR
+float lastDtMs() const;                      // measured period of the last update
 ```
+
+The far-side gate drops any return that lands beyond a half-plane (the auton
+line). `setFarSideGateFromLine` keeps the half the robot is standing in, read
+from the pose when it is called. If no pose was declared in the 500 ms before
+arming, the first `hardReset()` (a `setPose`) within 500 ms after arming picks
+the side again, so a routine may arm it just before its start `setPose`; later
+resets and beam solves never flip it. A lifetime is a `pros::millis()`
+deadline: it runs out whether or not the tracking task is running.
+`clearFarSideGate()` removes it outright; if the mutex cannot be taken within
+20 ms (a task deleted holding it) the clear is flagged and the tracking task
+applies it. Obstacle lifetimes are deadlines too.
+
+A device answering `PROS_ERR` (unplugged, the wrong device on the port, still
+booting) is faulted: never fresh, classed `Invalid`, no displacement evidence,
+and flagged in `faultedMask()` and `RclSensor::faulted`. Only a working sensor's
+9999 "no object" counts as a missing return. Readings under the V5's 20 mm
+minimum are `Invalid` too.
+
+`update()` measures its own period rather than trusting `updatePeriodMs`, which
+only sets the loop's target; velocity, the stale hold and the `maxSyncRate`
+step use the measured value. A cycle more than 10 x `updatePeriodMs` after the
+last is treated as a gap and differences no velocity.
 
 `enum class CoordType { X, Y, INVALID }` — a single distance sensor constrains
 one axis only.
@@ -607,10 +662,12 @@ one axis only.
 |---|---|---|
 | `sensorCount` | `MAX_DISTANCE_SENSORS` | |
 | `maxSyncDist` | `5.0` | Max inches to sync per update |
+| `syncProp` | `0.15` | Fraction of the residual applied per sync. `config.cpp` ships `0.25` for RCL: gated sampling leaves about one cycle in three with a new reading. |
+| `maxSyncRate` | `8.0` | Caps one healthy sync step at this × that cycle's dt. Only cycles with a new sample sync (about one in three), so the sustained rate is about a third of it. `config.cpp` ships `12.0`. |
 | `accumulationAlpha` | `0.3` | EMA factor |
-| `updatePeriodMs` | `10.0` | |
+| `updatePeriodMs` | `10.0` | Loop target; timing uses the measured period |
 | `angleTolerance` | `10.0` | Ray must be within this of a wall axis |
-| `confidenceThreshold` | `30` | Min V5 sensor confidence (0–63) |
+| `confidenceThreshold` | `30` | Min V5 sensor confidence (0–63). `config.cpp` ships `20`. |
 | `autoSync` | `true` | |
 | `useAccumulation` | `false` | |
 
@@ -672,7 +729,7 @@ void setDistSyncProp(float);
 | `distSyncProp` / `thetaSyncProp` | `0.06` / `0.001` | Lerp toward chassis; inert when the EKF is on |
 | `updatePeriodMs` | `25.0` | |
 | `confidenceThreshold` | `10` | |
-| `minSensorRange` | `1.0` | mm; raise for recessed sensors |
+| `minSensorRange` | `1.0` | mm; raise for recessed sensors. Readings under 20 mm, the V5 sensor's floor, are dropped whatever it is set to. `config.cpp` ships `20`. |
 | `maxRandomFrac` | `0.0` | Cap on the injected fraction when the weights collapse. `config.cpp` ships `0.25`. |
 | `injectResampleFloor` | `0.03` | Injection below this is ignored. `config.cpp` ships `0.20`. |
 | `injectRadiusIn` | `0.0` | inches around the current estimate to place injected candidates; `0` searches the whole field. `config.cpp` ships `25`. |
@@ -1872,13 +1929,17 @@ pneumatics (`matchLoadGate`, `lift`, `leftDescoreArm`, `trapDoor`, `intakeLift`)
 ```cpp
 void registerFieldObstacles();
 void registerAutonDisableLine(float lifetimeMs = 16000.0f);
+void clearAutonDisableLine();
 ```
 
 `registerFieldObstacles()` feeds the alliance studs and neutral goals to both RCL
 and MCL, and `initialize()` calls it, so the map is live for every run.
 `fieldCircleObstacles()` hands the same list to the tuning autons, which solve
-wall truth against it. `registerAutonDisableLine()` marks the diagonal auton
-line as a temporary obstacle so readings across it aren't mistaken for walls.
+wall truth against it. `registerAutonDisableLine()` arms RCL's far-side gate on
+the diagonal auton line, so returns from the half where the opponents are moving
+are not taken for walls. It keeps the half the robot starts in, whichever side
+of the routine's `setPose` it is called on, and expires 16 s after arming on the
+wall clock; `clearAutonDisableLine()` drops it at once.
 
 ### autons.hpp / controls.hpp
 

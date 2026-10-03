@@ -97,11 +97,17 @@ namespace usd {
 inline std::int32_t is_installed() { return 1; }
 }  // namespace usd
 
+// Bits as in PROS: disabled 1, autonomous 2, connected 4. The bridge sets it
+// to stage a field-control mode change.
+namespace sim_input {
+std::uint8_t& competitionStatus();
+}  // namespace sim_input
+
 namespace competition {
-inline std::uint8_t get_status() { return 0; }
-inline bool is_autonomous() { return false; }
-inline bool is_connected() { return false; }
-inline bool is_disabled() { return false; }
+inline std::uint8_t get_status() { return sim_input::competitionStatus(); }
+inline bool is_autonomous() { return (get_status() & 2) != 0; }
+inline bool is_connected() { return (get_status() & 4) != 0; }
+inline bool is_disabled() { return (get_status() & 1) != 0; }
 }  // namespace competition
 
 // The C API alongside the C++ class. Routines reach for pros::c::* for the
@@ -126,9 +132,9 @@ inline std::int32_t controller_print(controller_id_e_t, std::uint8_t,
                                      std::uint8_t, const char*, ...) { return 1; }
 }  // namespace c
 
-inline std::uint8_t competition_get_status() { return 0; }
-inline bool competition_is_autonomous() { return false; }
-inline bool competition_is_connected() { return false; }
-inline bool competition_is_disabled() { return false; }
+inline std::uint8_t competition_get_status() { return competition::get_status(); }
+inline bool competition_is_autonomous() { return competition::is_autonomous(); }
+inline bool competition_is_connected() { return competition::is_connected(); }
+inline bool competition_is_disabled() { return competition::is_disabled(); }
 
 }  // namespace pros

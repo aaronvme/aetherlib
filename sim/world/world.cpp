@@ -662,3 +662,14 @@ void World::updateDistanceSensors() {
 }
 
 }  // namespace sim
+
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+
+/// Unplug (1) or reconnect (0) the distance sensor in RCL slot `slot`.
+extern "C" EMSCRIPTEN_KEEPALIVE void sim_distance_fault(int slot, int faulted) {
+    if (slot < 0 || slot >= chad::MAX_DISTANCE_SENSORS) return;
+    const pros::Distance* dev = chad::distSensors[slot];
+    if (dev != nullptr) sim::distanceFaulted(dev->get_port()) = (faulted != 0);
+}
+#endif

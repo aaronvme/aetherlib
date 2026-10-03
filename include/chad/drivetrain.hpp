@@ -34,7 +34,13 @@ public:
     float leftPositionIn() const;
     float rightPositionIn() const;
 
+    // Mean of the absolute positions. Differencing it is only safe while the
+    // same motors stay readable; odometry integrates per-motor deltas instead.
     float averagePositionDeg() const;
+
+    // Per-motor positions into out[0..max), PROS_ERR_F left in place for a
+    // motor that cannot be read. Returns the count written. No allocation.
+    static int readPositionsDeg(const pros::MotorGroup* g, double* out, int max);
 
     float externalGearRatio() const;
 

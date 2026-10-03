@@ -63,8 +63,10 @@ api.setDrive(110, 110); run(2500);
 // Loose on purpose. 2.5 s of stall piles up ~100 in of odometry that never
 // happened, and the pose settles wherever the beams pulling back balance it
 // piling on. What matters is that the beams are still winning: unbounded,
-// this rides the phantom travel out the far side of the field.
-report('the estimate holds while the post holds the robot', 15.0);
+// this rides the phantom travel out the far side of the field. Where it
+// settles depends on the particle draw: over seeds 1-20 it spans 3-26 in
+// (median 10), so 15 only ever passed on a lucky draw.
+report('the estimate holds while the post holds the robot', 30.0);
 api.setDrive(-90, -90); run(600);
 api.setDrive(80, -80); run(500);
 api.setDrive(90, 90); run(1200);

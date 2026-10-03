@@ -38,7 +38,15 @@ const api = {
   runAuton: c('sim_run_auton', null, ['number']),
   stopAuton: c('sim_stop_auton', null, []),
   routeRunning: c('sim_route_running', 'number', []),
+  autonName: c('sim_auton_name', 'string', ['number']),
+  distFault: c('sim_distance_fault', null, ['number', 'number']),
+  routeClear: c('sim_route_clear', null, []),
+  routePush: c('sim_route_push', null, ['number', 'number', 'number', 'number', 'number']),
+  routeRun: c('sim_route_run', null, []),
 };
+
+// Route opcodes, from sim/bridge/bridge.cpp.
+const OP_SET_POSE = 0, OP_DELAY = 8;
 
 const st = () => JSON.parse(api.stateJson());
 const run = (ms) => { for (let i = 0; i < ms; i += 5) api.step(5); };
@@ -65,6 +73,7 @@ const check = (label, cond, detail = '') => {
 /// that has stopped measuring what it names. sim/test/_pieceprobe covers the
 /// pieces themselves.
 const begin = (x, y, h, pods = 0) => {
+  for (let i = 0; i < 8; i++) api.distFault(i, 0);
   api.actorClear();
   api.setFar(0, 0);
   api.setPods(pods);
@@ -220,6 +229,103 @@ check('and the pose holds either way -- the gate is the second line, not the fir
       `worst error ${gateOff.worst.toFixed(2)} in off, ${gateOn.worst.toFixed(2)} in on`);
 
 // ---------------------------------------------------------------------------
+console.log('\n== the gate picks its side from the pose the routine declares ==');
+// Driven through the route VM so setPose happens mid-run without sim_reset,
+// which would clear the gate. The route's clock starts at 0 with its first
+// setPose; the gate is armed by hand partway through.
+const gateAcrossSetPose = (first, second, delayMs, armAtMs) => {
+  begin(first[0], first[1], 0);
+  api.routeClear();
+  api.routePush(OP_SET_POSE, first[0], first[1], 0, 0);
+  api.routePush(OP_DELAY, delayMs, 0, 0, 0);
+  api.routePush(OP_SET_POSE, second[0], second[1], 0, 0);
+  api.routePush(OP_DELAY, 3000, 0, 0, 0);
+  api.routeRun();
+  run(armAtMs);
+  api.setFar(1, 0);
+  const armed = st().rcl2;
+  run(delayMs - armAtMs + 200);
+  const after = st().rcl2;
+  api.stopAuton();
+  api.setFar(0, 0);
+  const sgn = g => `(${Math.sign(g.gnx)},${Math.sign(g.gny)})`;
+  return { armed: sgn(armed), after: sgn(after) };
+};
+{
+  // Armed long after the last pose, then the start pose arrives: re-picked.
+  const r = gateAcrossSetPose([40, 40], [-40, -40], 1000, 700);
+  check('armed with no recent pose, the next setPose picks the side',
+        r.armed === '(-1,-1)' && r.after === '(1,1)', `${r.armed} -> ${r.after}`);
+}
+{
+  // Armed right after a declared pose: that pose decides, later resets do not.
+  const r = gateAcrossSetPose([-40, -40], [40, 40], 1000, 100);
+  check('armed after setPose, a later reset across the line does not flip it',
+        r.armed === '(1,1)' && r.after === '(1,1)', `${r.armed} -> ${r.after}`);
+}
+{
+  // Pending, but the next reset comes after the window: no flip.
+  const r = gateAcrossSetPose([40, 40], [-40, -40], 1500, 700);
+  check('a reset after the pick window does not flip it',
+        r.armed === '(-1,-1)' && r.after === '(-1,-1)', `${r.armed} -> ${r.after}`);
+}
+
+// ---------------------------------------------------------------------------
+console.log('\n== the gate expires on the clock, not on RCL cycles ==');
+// With RCL stopped nothing counts a cycle down, so a 16 s gate armed in
+// autonomous and timed in cycles would stay up well into driver control.
+begin(30, -50, 90);
+api.setLoc(0);
+api.setFar(1, 500);
+check('armed with RCL stopped', st().rcl2.gate === true);
+run(700);
+check('and gone once its lifetime has passed', st().rcl2.gate === false,
+      `${st().rcl2.gms.toFixed(0)} ms reported left`);
+api.setFar(0, 0);
+
+// ---------------------------------------------------------------------------
+console.log('\n== an unplugged sensor is not a measurement ==');
+// A disconnected V5 distance sensor answers PROS_ERR (INT32_MAX). Read as a
+// range it is past 2000 mm, which with a wall 20 in away is "no return where
+// there must be one" -- displacement evidence every cycle, from a cable. Both
+// near-wall beams at (-48,-48) facing east are pulled, so the old reading
+// would put two Impossible votes up every cycle.
+begin(-48, -48, 90);
+{
+  const before = st().err.dist;
+  api.distFault(2, 1);
+  api.distFault(3, 1);
+  let displaced = false, fresh = false, worst = 0;
+  for (let i = 0; i < 300; i++) {
+    api.step(5);
+    const s = st();
+    displaced = displaced || s.rcl2.displaced;
+    // The first frames can still show the last cycle before the pull.
+    if (i >= 4) fresh = fresh || sensor(s, 2).fresh || sensor(s, 3).fresh;
+    worst = Math.max(worst, s.err.dist);
+  }
+  const s = st();
+  check('no displacement is declared', !displaced);
+  check('the faulted slots are never fresh, even held constant', !fresh);
+  check('and read as no device, not as silence',
+        sensor(s, 2).cls === CLS.invalid && sensor(s, 3).cls === CLS.invalid,
+        `classes ${sensor(s, 2).cls}, ${sensor(s, 3).cls}`);
+  check('the pose does not move', worst < before + 1.0,
+        `${before.toFixed(2)} in -> worst ${worst.toFixed(2)} in`);
+
+  api.distFault(2, 0);
+  api.distFault(3, 0);
+  let back2 = false, back3 = false;
+  for (let i = 0; i < 40 && !(back2 && back3); i++) {
+    api.step(5);
+    const t = st();
+    back2 = back2 || sensor(t, 2).rclValid;
+    back3 = back3 || sensor(t, 3).rclValid;
+  }
+  check('plugged back in, both vote again', back2 && back3);
+}
+
+// ---------------------------------------------------------------------------
 console.log('\n== a robot parked where a beam was ranging ==');
 // The failure this filter exists to survive. An alliance partner flat against
 // the west wall shortens one beam from 19 in to 3.5; believing it relocates the
@@ -300,6 +406,40 @@ check('a patrolling robot drives its path', movedX > startX + 5,
 api.actorClear();
 run(200);
 check('clearing them empties the field', JSON.parse(api.actorsJson()).length === 0);
+
+// ---------------------------------------------------------------------------
+console.log('\n== the gate keeps the half each routine starts in ==');
+// registerAutonDisableLine() reads the kept half off the pose. Called before
+// the routine's setPose, that pose is whatever came before -- the origin, which
+// is on the diagonal, or the other alliance's half -- and a gate kept from it
+// would lock out the robot's own half for the whole period.
+//
+// Red starts where x + y < 0, so its gate normal points to +x+y; blue's the
+// other way. Last in the file, and the mirrored routines last of all: stopping
+// a routine kills its fiber without unwinding it, so runMirrored() never puts
+// the mirror back and every later setPose would be reflected.
+{
+  const order = ['Red 3 Pin', 'UNc', 'Red 3 Pin Far', 'Blue 3 Pin', 'Blue 3 Pin Far'];
+  const index = {};
+  for (let i = 0; i < api.autonCount(); i++) index[api.autonName(i)] = i;
+  const starts = [[0, 0], [40, 40], [-40, -40]];
+  for (const name of order) {
+    if (!(name in index)) { check(`${name} is in the sim's auton list`, false); continue; }
+    const sign = name.startsWith('Blue') ? -1 : 1;
+    const bad = [];
+    for (const [sx, sy] of starts) {
+      begin(sx, sy, 0);
+      api.runAuton(index[name]);
+      run(60);
+      const g = st().rcl2;
+      if (!g.gate || g.gnx * sign < 0.5 || g.gny * sign < 0.5) {
+        bad.push(`from (${sx},${sy}): gate ${g.gate}, n (${g.gnx.toFixed(2)}, ${g.gny.toFixed(2)})`);
+      }
+      api.stopAuton();
+    }
+    check(`${name}: armed, keeping its own half`, bad.length === 0, bad.join('; '));
+  }
+}
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

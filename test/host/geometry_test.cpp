@@ -50,6 +50,13 @@ CHAD_TEST(rotation, fromVectorHandlesDegenerateInput) {
     CHECK_NEAR(unit.sin, 0.8f, 1e-6);
 }
 
+CHAD_TEST(geometry, wrapRadPropagatesNonFinite) {
+    CHECK(std::isnan(wrapRad(kInf)));
+    CHECK(std::isnan(wrapRad(std::numeric_limits<float>::quiet_NaN())));
+    CHECK(std::isnan(angleDiffRad(0.0f, kInf)));
+    CHECK_NEAR(std::fabs(wrapRad(3.0f * PI)), PI, 1e-5);
+}
+
 CHAD_TEST(rotation, rejectsNonFinite) {
     CHECK_EQ(Rotation2d::fromRadians(kInf).cos, 1.0f);
     CHECK_EQ(Rotation2d::fromRadians(kInf).sin, 0.0f);
