@@ -83,6 +83,7 @@ void driverControl() {
     liftMotor.set_brake_mode(pros::E_MOTOR_BRAKE_HOLD);
 
     bool gripHeld = false;
+    bool autoGrabToggled = clawAutoGrab();
 
     while (true) {
         if (chassis.isSettled()) {
@@ -124,9 +125,12 @@ void driverControl() {
         gripHeld = gripNow;
 
         if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_R2)) {
-            clawSetAutoGrab(!clawAutoGrab());
-            master.rumble(clawAutoGrab() ? ".." : ".");
+            autoGrabToggled = !autoGrabToggled;
+            master.rumble(autoGrabToggled ? ".." : ".");
         }
+        // Holding A turns auto-grab on; letting go returns to R2's setting.
+        clawSetAutoGrab(autoGrabToggled ||
+                        master.get_digital(pros::E_CONTROLLER_DIGITAL_A));
 
         pros::delay(20);
     }

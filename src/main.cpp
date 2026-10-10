@@ -15,7 +15,7 @@ void initialize() {
     startPoseTelemetry();
     startClawWatch();
     liftMotor.tare_position();
-    claw.set_value(true);
+    clawClose();
     startTempWarning(master, {&leftMotors, &rightMotors});
 
     

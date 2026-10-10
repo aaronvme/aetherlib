@@ -1,14 +1,20 @@
 #pragma once
 
-// The claw grips extended and opens retracted. Everything here says open or
+// The claw grips retracted and opens extended. Everything here says open or
 // closed so the polarity lives in one place.
 
 // How close something has to get before auto-grab bites.
-constexpr double kClawGrabRangeIn = 4.5;
+constexpr double kClawGrabRangeIn = 3.0;
 
 // How much clear space it has to see afterwards before it is allowed to bite
 // again. Without this, releasing an object would just clamp back onto it.
 constexpr double kClawClearRangeIn = 4.5;
+
+// How far ahead auto-grab closes on something the robot is backing into:
+// distance-sensor latency plus the time the jaws take to shut. Raise it if
+// the claw still shuts behind the pin at speed, lower it if it shuts in
+// front of the pin.
+constexpr double kClawLeadMs = 50.0;
 
 // inches to whatever the claw sensor sees, NaN when there is no return
 double clawDistance();

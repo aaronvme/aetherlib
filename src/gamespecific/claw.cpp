@@ -1,6 +1,7 @@
 #include <atomic>
 #include <cmath>
 
+#include "chad/util/grab_trigger.hpp"
 #include "gamespecific/claw.hpp"
 #include "gamespecific/config.hpp"
 #include "pros/rtos.hpp"
@@ -8,13 +9,9 @@
 using namespace chad;
 
 namespace {
-// The distance sensor does not refresh every few ms, so polling faster
-// than this just reads the same physical sample twice and the streak
-// below stops meaning anything.
-constexpr int kPollMs = 20;
-
-// Two reads in a row before closing, so one bad sample cannot fire the claw.
-constexpr int kGrabSamples = 2;
+// The sensor refreshes about every 33 ms; GrabTrigger counts each physical
+// sample once, so polling faster only shortens how long a new one goes unseen.
+constexpr int kPollMs = 5;
 
 // what the v5 distance sensor reports when nothing came back
 constexpr int kNoReturnMm = 9999;
@@ -27,6 +24,23 @@ constexpr int kTooCloseMm = 20;
 std::atomic<bool> gAutoGrab{false};
 std::atomic<bool> gArmed{true};
 pros::Task* gWatch = nullptr;
+
+GrabTrigger::Config triggerConfig() {
+    GrabTrigger::Config c;
+    c.grabRangeIn = static_cast<float>(kClawGrabRangeIn);
+    c.leadMs = static_cast<float>(kClawLeadMs);
+    return c;
+}
+
+// The claw is on the back, so backing up closes on what it sees.
+float closingInPerSec() {
+    return -drivetrain.averageVelocityInPerSec();
+}
+
+bool triggerUpdate(GrabTrigger& trigger) {
+    return trigger.update(pros::millis(), static_cast<float>(clawDistance()),
+                          closingInPerSec());
+}
 }
 
 double clawDistance() {
@@ -43,15 +57,15 @@ bool clawSees() {
 }
 
 bool clawClosed() {
-    return claw.is_extended();
+    return !claw.is_extended();
 }
 
 void clawClose() {
-    claw.extend();
+    claw.retract();
 }
 
 void clawOpen() {
-    claw.retract();
+    claw.extend();
     gArmed = false;
 }
 
@@ -77,15 +91,11 @@ bool clawGrabWhenClose(double timeoutMs) {
     const uint32_t limit =
         (std::isfinite(timeoutMs) && timeoutMs > 0.0)
             ? static_cast<uint32_t>(timeoutMs) : 0u;
-    int streak = 0;
+    GrabTrigger trigger(triggerConfig());
     while (pros::millis() - start < limit) {
-        if (clawSees()) {
-            if (++streak >= kGrabSamples) {
-                clawClose();
-                return true;
-            }
-        } else {
-            streak = 0;
+        if (triggerUpdate(trigger)) {
+            clawClose();
+            return true;
         }
         pros::delay(kPollMs);
     }
@@ -95,32 +105,27 @@ bool clawGrabWhenClose(double timeoutMs) {
 void startClawWatch() {
     if (gWatch != nullptr) return;
     gWatch = new pros::Task([] {
+        GrabTrigger trigger(triggerConfig());
         bool wasClosed = clawClosed();
-        int streak = 0;
         while (true) {
             const bool closed = clawClosed();
             // Whatever opened the claw, it has to clear the jaws before
             // auto-grab is allowed to bite again.
             if (wasClosed && !closed) {
                 gArmed = false;
-                streak = 0;
+                trigger.reset();
             }
             wasClosed = closed;
 
-            const double in = clawDistance();
-            const bool clear = !std::isfinite(in) || in >= kClawClearRangeIn;
+            // Fed every pass so a track is already confirmed when auto-grab
+            // turns on with something approaching.
+            const bool fire = triggerUpdate(trigger);
 
             if (!gArmed.load()) {
-                if (clear) gArmed = true;
-            } else if (gAutoGrab.load() && !closed) {
-                if (std::isfinite(in) && in <= kClawGrabRangeIn) {
-                    if (++streak >= kGrabSamples) {
-                        clawClose();
-                        streak = 0;
-                    }
-                } else {
-                    streak = 0;
-                }
+                const double in = clawDistance();
+                if (!std::isfinite(in) || in >= kClawClearRangeIn) gArmed = true;
+            } else if (gAutoGrab.load() && !closed && fire) {
+                clawClose();
             }
             pros::delay(kPollMs);
         }

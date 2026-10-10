@@ -53,9 +53,6 @@ void clearFieldObstacles() {
     chassis.ekf().setObstacles(&gMclCircleObstacles);
 }
 
-// The half it keeps is the half the robot is standing in, which is what makes
-// it work for either alliance without being told which. See config.hpp for
-// the call order.
 void registerAutonDisableLine(float lifetimeMs) {
     chassis.rcl().setFarSideGateFromLine(Field::FIELD_HALF, -Field::FIELD_HALF,
                                          -Field::FIELD_HALF,  Field::FIELD_HALF,
@@ -103,9 +100,19 @@ Drivetrain drivetrain(&leftMotors, &rightMotors,
                       &leftBlueMotors,
                       &rightBlueMotors);
 
+// Negate a port to reverse that sensor: the vertical wheel must count up
+// driving forward, the horizontal one up when the robot moves to its left.
+pros::Rotation vertRot(-9);
+pros::Rotation horizRot(-10);
+
+// TODO measure: wheel diameter, then offset from the turning centre
+// (+right for the vertical wheel, +forward for the horizontal one).
+TrackingWheel vertWheel(vertRot, 2.125f, 0.75f);
+TrackingWheel horizWheel(horizRot, 2.75f, 4.75f);
+
 OdomSensors odomSensors = {
-    .vertWheelCollection = {},
-    .horizWheelCollection = {},
+    .vertWheelCollection = { &vertWheel },
+    .horizWheelCollection = { &horizWheel },
     .imuCollection = { &imu },
     .drivetrain = &drivetrain,
 };
@@ -145,7 +152,7 @@ ChassisConfig chassisConfig = {
     .sensorMounts = sensorMounts,
     .settleTimeMs = 110,
     .useMclTracking = false,
-    .useRclTracking = true,
+    .useRclTracking = false,
     .useEkfTracking = false,
 
     .mclConfig = {
