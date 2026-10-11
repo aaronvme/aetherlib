@@ -13,8 +13,16 @@ namespace chad {
 using namespace autons;
 
 namespace {
-constexpr float kSensorSpanXIn = 2.0f;   // front sensor face -> back face
-constexpr float kSensorSpanYIn = 9.5f;   // left sensor face -> right face
+constexpr float kSensorSpanXIn = 1.75f;   // front sensor face -> back face
+constexpr float kSensorSpanYIn = 11.25f;   // left sensor face -> right face
+
+// The robot starts with its front bumper flat on the wall and backs off this
+// far before sweeping.
+constexpr float kBackOffIn = 15.0f;
+// Turning centre to the face of the front bumper that touches the wall, along
+// the robot. With it, the wall distance comes from the back-off itself and the
+// spans above are only a cross-check; 0 leaves it to the spans.
+constexpr float kFrontToCentreIn = 0.0f;
 
 constexpr int kFront = 0, kLeft = 1, kBack = 2, kRight = 3;
 
@@ -34,11 +42,20 @@ void autonCalibrateMounts() {
     Report out;
     out("mounts: sensor y offsets");
     if (!headingOk(out)) return;
-    waitForStart(out, "square to a wall, 20-40 in");
-    out("it turns a full circle");
+    waitForStart(out, "front bumper flat on a wall");
+    out("backs off %.0f in, turns a full circle", kBackOffIn);
     setFilters(false);
 
-    const float base = stdRadToVexDeg(chassis.getPose().theta);
+    // Flush on the wall the robot is square to it by construction, so this
+    // heading is the wall's normal and every sweep is measured from it --
+    // not from wherever the back-off happens to leave the heading.
+    const Pose atWall = chassis.getPose();
+    const float base = stdRadToVexDeg(atWall.theta);
+    chassis.moveDistance(-kBackOffIn, 3000, {.maxSpeed = 50.0f});
+    pros::delay(300);
+    const Pose offWall = chassis.getPose();
+    const float backedIn = distance(atWall.x, atWall.y, offWall.x, offWall.y);
+    out("backed off %.2f in", backedIn);
 
     std::vector<CalibrationConfig> cfgs;
     std::vector<int> slots;
@@ -65,6 +82,8 @@ void autonCalibrateMounts() {
     // was not a wall.
     scfg.turnTimeoutMs = 2500.0f;
     scfg.maxValidReadingMm = 2600.0f;
+    // waitUntilStill() covers the settling this delay used to guess at.
+    scfg.postTurnDelayMs = 200;
     scfg.verbose = false;
     SensorCalibrator cal(chassis, scfg);
 
@@ -77,16 +96,22 @@ void autonCalibrateMounts() {
     CalibrationResult bySlot[MAX_DISTANCE_SENSORS];
     for (size_t k = 0; k < results.size(); ++k) bySlot[slots[k]] = results[k];
 
-    float wallDist = 0.0f;
-    bool haveDist = solveWallDistance(bySlot, kFront, kBack, kSensorSpanXIn,
-                                      wallDist);
+    float wallDistX = 0.0f;
+    const bool haveX = solveWallDistance(bySlot, kFront, kBack, kSensorSpanXIn,
+                                         wallDistX);
     float wallDistY = 0.0f;
     const bool haveY = solveWallDistance(bySlot, kLeft, kRight, kSensorSpanYIn,
                                          wallDistY);
-    if (!haveDist && haveY) {
-        wallDist = wallDistY;
-        haveDist = true;
-    }
+
+    // Bumper on the wall plus a measured back-off is a tape measurement the
+    // robot took itself, so it wins over the spans when it is set up.
+    const bool haveDrive = kFrontToCentreIn > 0.0f;
+    float wallDist = 0.0f;
+    bool haveDist = true;
+    if (haveDrive)  wallDist = kFrontToCentreIn + backedIn;
+    else if (haveX) wallDist = wallDistX;
+    else if (haveY) wallDist = wallDistY;
+    else            haveDist = false;
 
     int applied = 0;
     for (size_t k = 0; k < results.size(); ++k) {
@@ -118,11 +143,17 @@ void autonCalibrateMounts() {
     }
     if (!haveDist) {
         out.result("along NOT measured: set");
-        out.result("kSensorSpanXIn, rerun");
+        out.result("kFrontToCentreIn, rerun");
     } else {
-        out.result("wall %.2f in from centre", wallDist);
-        if (haveY && kSensorSpanXIn > 0.0f) {
-            out.result("x/y spans disagree %+.2f", wallDist - wallDistY);
+        out.result("wall %.2f in from centre (%s)", wallDist,
+                   haveDrive ? "back-off" : "spans");
+        // Each check is against whatever wallDist came from, so a big number
+        // points at that span (or kFrontToCentreIn) being mismeasured.
+        if (haveX && (haveDrive || haveY)) {
+            out.result("front/back span %+.2f", wallDistX - wallDist);
+        }
+        if (haveY && (haveDrive || haveX)) {
+            out.result("left/right span %+.2f", wallDistY - wallDist);
         }
     }
     out.result("copy BOTH x and y into");

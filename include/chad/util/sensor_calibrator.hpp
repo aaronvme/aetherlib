@@ -44,6 +44,14 @@ struct SensorCalibratorConfig {
     uint32_t settleDelayMs{500};
     uint32_t postTurnDelayMs{600};
 
+    // At each angle, once the heading stops moving, this many readings are
+    // taken and the median distance kept. One reading carries the sensor's
+    // full noise into the fit.
+    int samplesPerAngle{10};
+    uint32_t sampleSpacingMs{35};   // a V5 distance sensor refreshes every ~33 ms
+    float stillDegPerSec{1.0f};
+    uint32_t stillTimeoutMs{1500};
+
     float maxValidReadingMm{9990.0f};
 
     bool verbose{true};
@@ -70,6 +78,8 @@ private:
                                                const std::vector<float>& distIn);
 
     void turnTo(float headingDeg);
+
+    void waitUntilStill() const;
 
     float currentHeadingDeg() const;
 

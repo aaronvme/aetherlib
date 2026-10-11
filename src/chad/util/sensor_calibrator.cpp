@@ -1,5 +1,6 @@
 #include "chad/util/sensor_calibrator.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 
@@ -39,6 +40,21 @@ void SensorCalibrator::turnTo(float headingDeg) {
     params.maxSpeed = mConfig.turnMaxSpeed;
 
     mChassis.turnToHeading(headingDeg, mConfig.turnTimeoutMs, params, false);
+}
+
+// A turn that settles inside its tolerance can still be rocking, and a
+// reading taken mid-rock pairs a distance with the wrong heading.
+void SensorCalibrator::waitUntilStill() const {
+    constexpr uint32_t kStepMs = 100;
+    const float maxStepDeg = mConfig.stillDegPerSec * (kStepMs / 1000.0f);
+    const uint32_t t0 = pros::millis();
+    float prev = currentHeadingDeg();
+    while (pros::millis() - t0 < mConfig.stillTimeoutMs) {
+        pros::delay(kStepMs);
+        const float now = currentHeadingDeg();
+        if (std::fabs(signedHeadingDelta(now, prev)) <= maxStepDeg) return;
+        prev = now;
+    }
 }
 
 CalibrationResult SensorCalibrator::solveLeastSquares(const std::string& name,
@@ -123,21 +139,45 @@ CalibrationResult SensorCalibrator::calibrate(const CalibrationConfig& config) {
         turnTo(wrapDeg(config.baseHeadingDeg + relAngleDeg));
 
         pros::delay(mConfig.postTurnDelayMs);
+        waitUntilStill();
 
-        const float measuredDiffDeg = signedHeadingDelta(currentHeadingDeg(), config.baseHeadingDeg);
+        // The heading is read with each distance, so the pair always belongs
+        // to the same instant even if the robot creeps between them.
+        const int samples = std::max(1, mConfig.samplesPerAngle);
+        std::vector<float> dists;
+        dists.reserve(samples);
+        double sumDiffDeg = 0.0;
+        for (int k = 0; k < samples; ++k) {
+            if (k > 0) pros::delay(mConfig.sampleSpacingMs);
+            const float diffDeg =
+                signedHeadingDelta(currentHeadingDeg(), config.baseHeadingDeg);
+            const std::int32_t readingMm = config.sensor->get();
+            if (readingMm <= 0 ||
+                static_cast<float>(readingMm) > mConfig.maxValidReadingMm) {
+                continue;
+            }
+            dists.push_back(mmToInch(static_cast<float>(readingMm)));
+            sumDiffDeg += diffDeg;
+        }
 
-        const std::int32_t readingMm = config.sensor->get();
-
-        if (readingMm <= 0 || static_cast<float>(readingMm) > mConfig.maxValidReadingMm) {
+        // Fewer than half usable means the beam is not reliably on the wall.
+        if (dists.empty() || static_cast<int>(dists.size()) * 2 < samples) {
             if (mConfig.verbose) {
-                printf("  [ERR] %s: bad reading (%ld mm) at %.1f deg — skipped\n",
-                       config.name.c_str(), static_cast<long>(readingMm),
-                       static_cast<double>(measuredDiffDeg));
+                printf("  [ERR] %s: %u/%d good readings at %+.0f deg — skipped\n",
+                       config.name.c_str(), static_cast<unsigned>(dists.size()),
+                       samples, static_cast<double>(relAngleDeg));
             }
             continue;
         }
 
-        const float distIn = mmToInch(static_cast<float>(readingMm));
+        const float measuredDiffDeg =
+            static_cast<float>(sumDiffDeg / static_cast<double>(dists.size()));
+        // The median, so one stray return cannot drag the point.
+        std::sort(dists.begin(), dists.end());
+        const std::size_t mid = dists.size() / 2;
+        const float distIn = (dists.size() % 2 == 1)
+                                 ? dists[mid]
+                                 : 0.5f * (dists[mid - 1] + dists[mid]);
         recordedThetas.push_back(degToRad(measuredDiffDeg));
         recordedDists.push_back(distIn);
 

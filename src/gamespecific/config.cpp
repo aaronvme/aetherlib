@@ -118,8 +118,8 @@ OdomSensors odomSensors = {
 };
 
 pros::Distance front_dist(1);
-pros::Distance left_dist(4);
-pros::Distance back_dist(3);
+pros::Distance left_dist(3);
+pros::Distance back_dist(4);
 pros::Distance right_dist(2);
 pros::Distance claw_dist(5);
 
@@ -130,10 +130,10 @@ std::array<pros::Distance*, MAX_DISTANCE_SENSORS> distSensors = {
 
 
 std::array<Pose, MAX_DISTANCE_SENSORS> sensorMounts = {{
-    {  -1.00f,  -3.75f,  0.0f        },
-    {  -0.50f,  4.50f,  HALF_PI    },
-    { -3.00f,  5.50f,  PI         },
-    {  -0.50f, -4.75f,  3.0f * HALF_PI }
+    {  0.25f,  -3.75f,  0.0f        }, //done
+    {  1.75f,  5.75f,  HALF_PI    }, //done
+    { -1.50f,  5.25f,  PI         }, // done
+    {  2.00f, -5.75f,  3.0f * HALF_PI } // done
 }};
 
 ChassisConfig chassisConfig = {
