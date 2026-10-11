@@ -102,16 +102,19 @@ void tickPeriod(double dtMs);
 
 // --- optional dead wheels ---------------------------------------------------
 //
-// The robot in gamespecific/config.cpp has no tracking wheels, so the library
-// falls back to the drive motor encoders. These let the sim show the other
-// configuration without changing the robot's own config: the pods live here, and
-// swapping them in goes through the same OdomTracking::setSensors() a real robot
-// would use. World publishes their travel on ports 11 and 12 either way.
+// The robot's own tracking wheels come from gamespecific/config.cpp, and World
+// publishes their travel on their own ports with their own offsets. These are a
+// second, centred pair for comparing against without changing the robot's
+// config: swapping them in goes through the same OdomTracking::setSensors() a
+// real robot would use. World publishes their travel on ports 11 and 12 either
+// way.
 pros::Rotation gVertPod(11);
 pros::Rotation gHorizPod(12);
 chad::TrackingWheel gVertWheel(gVertPod, 2.75f, 0.0f);
 chad::TrackingWheel gHorizWheel(gHorizPod, 2.75f, 0.0f);
-bool gOdomPods = false;
+// 0 = the robot's own sensors from config.cpp, 1 = the centred pair above,
+// 2 = no tracking wheels: drive motor encoders and the IMU only.
+int gOdomPods = 0;
 
 std::string gStateJson;
 std::vector<float> gParticleBuf(chad::MclTracking::PARTICLE_MAX * 4);
@@ -171,9 +174,12 @@ constexpr int kAutonCount = static_cast<int>(sizeof(kAutons) / sizeof(kAutons[0]
 /// Rebuild the odometry sensor set with or without the dead wheels.
 void applyOdomPods() {
     chad::OdomSensors sensors = chad::odomSensors;
-    if (gOdomPods) {
+    if (gOdomPods == 1) {
         sensors.vertWheelCollection = { &gVertWheel };
         sensors.horizWheelCollection = { &gHorizWheel };
+    } else if (gOdomPods == 2) {
+        sensors.vertWheelCollection.clear();
+        sensors.horizWheelCollection.clear();
     }
     // reset() re-baselines against whichever sensors are now live -- required,
     // or the first tick measures a delta against the other sensor set -- but it
@@ -2069,17 +2075,18 @@ int sim_auto_far_side() { return gAutoFarSide ? 1 : 0; }
 // Field editing
 // ============================================================================
 
-/// Swap the dead wheels in or out. 0 = motor encoders and IMU only.
+/// Choose what odometry reads. 0 = the robot's own config, 1 = the sim's
+/// centred dead wheels, 2 = motor encoders and IMU only.
 EMSCRIPTEN_KEEPALIVE
-void sim_set_odom_pods(int on) {
-    const bool want = (on != 0);
+void sim_set_odom_pods(int mode) {
+    const int want = (mode < 0 || mode > 2) ? 0 : mode;
     if (want == gOdomPods) return;
     gOdomPods = want;
     applyOdomPods();
 }
 
 EMSCRIPTEN_KEEPALIVE
-int sim_odom_pods() { return gOdomPods ? 1 : 0; }
+int sim_odom_pods() { return gOdomPods; }
 
 EMSCRIPTEN_KEEPALIVE
 void sim_field_clear() { sim::field().clear(); }

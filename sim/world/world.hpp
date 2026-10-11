@@ -25,6 +25,7 @@
 #pragma once
 
 #include <cstdint>
+#include <vector>
 
 #include "chad/util/util.hpp"
 
@@ -216,14 +217,27 @@ private:
     // offset; assigning the absolute used to paper over that.
     double mPubMotorDegLeft{0.0};
     double mPubMotorDegRight{0.0};
-    std::int32_t mPubPodVertCentideg{0};
-    std::int32_t mPubPodHorizCentideg{0};
     double mPubImuRotationDeg{0.0};
 
-    // Dead-wheel travel, published to the rotation-sensor slots so the sim can
-    // run with tracking wheels as well as without.
+    // Dead-wheel travel at the tracking centre, and the rotation the body
+    // actually made: a pod off the centre rolls offset * that on top.
     double mPodVertIn{0.0};
     double mPodHorizIn{0.0};
+    double mPodThetaRad{0.0};
+
+    // Every rotation-sensor pod published to the bus: the robot's own tracking
+    // wheels from gamespecific/config.cpp, then the bridge's optional pair.
+    struct Pod {
+        int port{0};
+        bool reversed{false};
+        bool horizontal{false};
+        double wheelDiamIn{2.75};
+        double gearRatio{1.0};
+        double offsetIn{0.0};       // +right for vertical, +forward for horizontal
+        std::int32_t publishedCentideg{0};
+    };
+    std::vector<Pod> mPods;
+    void addPod(const Pod& pod);
 
     double mLiftDeg{0.0};
     double mLiftVel{0.0};

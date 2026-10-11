@@ -42,6 +42,9 @@ public:
 
     SensorType sensorType() const { return mType; }
 
+    /// The rotation sensor behind a Rotation wheel, nullptr for ADI.
+    const pros::Rotation* rotation() const { return mRot; }
+
     void reset();
 
     float rawTicks() const;
@@ -139,6 +142,8 @@ private:
         TrackingWheel* horiz[EncoderDeltaMean::kMaxEncoders]{};
         int nVert{0};
         int nHoriz{0};
+        float vertOffsetIn{0.0f};
+        float horizOffsetIn{0.0f};
         pros::Imu* imu{nullptr};
         Drivetrain* drivetrain{nullptr};
         std::uint32_t gen{0};

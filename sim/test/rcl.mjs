@@ -360,7 +360,7 @@ api.setDrive(127, 127); run(1200); api.setDrive(0, 0); run(1200);
 check('with odom pods the pose survives it', st().err.dist < 3.0,
       `${wedgedPods.toFixed(2)} in wedged, ${st().err.dist.toFixed(2)} in after`);
 
-begin(-40, -23.5, 90, 0);
+begin(-40, -23.5, 90, 2);
 api.setDrive(-127, -127); run(2500);
 {
   const s = st();

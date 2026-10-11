@@ -122,6 +122,8 @@ OdomTracking::Devices OdomTracking::devicesOf(const OdomSensors& sensors) {
         if (d.nHoriz == EncoderDeltaMean::kMaxEncoders) break;
         d.horiz[d.nHoriz++] = w;
     }
+    d.vertOffsetIn = averageOffset(sensors.vertWheelCollection);
+    d.horizOffsetIn = averageOffset(sensors.horizWheelCollection);
     d.imu = sensors.imuCollection.empty() ? nullptr : sensors.imuCollection[0];
     d.drivetrain = sensors.drivetrain;
     return d;
@@ -211,14 +213,19 @@ void OdomTracking::integrate(const Sample& s) {
     const float dThetaRad = wrapRad(headingRad - prevHeadingRad);
 
     const double maxWheelStep = EncoderDeltaMean::maxStepIn(dtSec);
+    // A wheel off the turning centre also rolls offset * dTheta on a turn:
+    // one to the right moves forward as the robot turns left, one ahead of
+    // the centre moves left. Only the centre's travel is the robot moving.
     float dVert = 0.0f;
     if (s.nVert > 0) {
         dVert = static_cast<float>(mVertWheels.update(s.vert, s.nVert, maxWheelStep));
+        if (mVertWheels.contributing() > 0) dVert -= mDevices.vertOffsetIn * dThetaRad;
     } else if (mDevices.drivetrain != nullptr) {
         dVert = driveTravelIn(s, dtSec, dThetaRad);
     }
-    const float dHoriz =
+    float dHoriz =
         static_cast<float>(mHorizWheels.update(s.horiz, s.nHoriz, maxWheelStep));
+    if (mHorizWheels.contributing() > 0) dHoriz -= mDevices.horizOffsetIn * dThetaRad;
 
     const float midHeadingRad = prevHeadingRad + dThetaRad * 0.5f;
     const float c = std::cos(midHeadingRad);

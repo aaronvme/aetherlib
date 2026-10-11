@@ -525,10 +525,11 @@ TrackingWheel(pros::adi::Encoder&, float wheelDiamIn, float offsetIn, float gear
 TrackingWheel(pros::Rotation&,     float wheelDiamIn, float offsetIn, float gearRatio = 1);
 
 float distanceIn() const;      // holds last good value on sensor error
-float offsetIn() const;        // +right / +forward
+float offsetIn() const;        // +right / +forward; odom removes offset * dTheta
 float wheelDiamIn() const;
 float gearRatio() const;
 SensorType sensorType() const; // ADI | Rotation
+const pros::Rotation* rotation() const; // nullptr for ADI
 void  reset();
 float rawTicks() const;
 float rawDegrees() const;

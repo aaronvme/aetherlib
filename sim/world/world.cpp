@@ -25,6 +25,17 @@ double quantise(double v, double step) {
     return std::round(v / step) * step;
 }
 
+/// Inches of pod travel -> rotation-sensor centidegrees.
+std::int32_t podCentideg(double travelIn, double wheelDiamIn) {
+    const double circumference = chad::PI * wheelDiamIn;
+    if (circumference <= 0.0) return 0;
+    return static_cast<std::int32_t>(travelIn / circumference * 36000.0);
+}
+// The bridge's optional dead wheels, at the tracking centre.
+constexpr double kPodWheelDiamIn = 2.75;
+constexpr int kVertPodPort = 11;
+constexpr int kHorizPodPort = 12;
+
 }  // namespace
 
 World& world() {
@@ -55,8 +66,33 @@ void World::init() {
     const double scale = chad::imu.scaleFactor();
     if (scale > 0.0) mParams.imuUnderReport = static_cast<float>(1.0 / scale);
 
+    // And its tracking wheels: ports, diameters and offsets, so odometry reads
+    // the geometry it was configured with. ADI encoders have no sim device.
+    auto addWheels = [this](const std::vector<chad::TrackingWheel*>& wheels,
+                            bool horizontal) {
+        for (const chad::TrackingWheel* w : wheels) {
+            if (w == nullptr || w->rotation() == nullptr) continue;
+            addPod({w->rotation()->get_port(), w->rotation()->get_reversed() != 0,
+                    horizontal, w->wheelDiamIn(), w->gearRatio(), w->offsetIn()});
+        }
+    };
+    addWheels(chad::odomSensors.vertWheelCollection, false);
+    addWheels(chad::odomSensors.horizWheelCollection, true);
+    addPod({kVertPodPort, false, false, kPodWheelDiamIn, 1.0, 0.0});
+    addPod({kHorizPodPort, false, true, kPodWheelDiamIn, 1.0, 0.0});
+
     field().loadDefault();
     setPhysicsFn([this](double dtMs) { this->step(dtMs); });
+}
+
+void World::addPod(const Pod& pod) {
+    if (pod.port <= 0 || pod.port >= kMaxSmartPorts) return;
+    // The config's wheels go in first, so one sharing a port with the
+    // bridge's pair keeps its own geometry.
+    for (const Pod& p : mPods) {
+        if (p.port == pod.port) return;
+    }
+    mPods.push_back(pod);
 }
 
 void World::teleport(const chad::Pose& pose) {
@@ -79,7 +115,7 @@ void World::resetTo(const chad::Pose& pose) {
     mLiftDeg = mLiftVel = mPubLiftDeg = 0.0;
     mMotorDegLeft = mMotorDegRight = 0.0;
     mDistAccum = mImuAccum = mEncAccum = 0.0;
-    mPodVertIn = mPodHorizIn = 0.0;
+    mPodVertIn = mPodHorizIn = mPodThetaRad = 0.0;
 
     // The IMU reads a heading, not a pose, so seed it from the start heading in
     // VEX convention (0 = forward, clockwise positive).
@@ -100,7 +136,7 @@ void World::resetTo(const chad::Pose& pose) {
     // The bus was just zeroed, so the delta trackers have to agree with it or
     // the next tick republishes the previous run's travel as a real delta.
     mPubMotorDegLeft = mPubMotorDegRight = 0.0;
-    mPubPodVertCentideg = mPubPodHorizCentideg = 0;
+    for (Pod& p : mPods) p.publishedCentideg = 0;
 
     seedImu();
     // Pods must be on the bus before anything baselines against them. Left to
@@ -349,9 +385,10 @@ void World::updateDrive(double dtSec) {
 
     // Dead wheels are unpowered and roll on the floor, so they see real travel
     // rather than what the drive wheels claim: no encoderSlip term, and nothing
-    // at all while a wall is holding the robot still. Both pods sit at the
-    // tracking centre, so rotation contributes nothing.
+    // at all while a wall is holding the robot still. A pod off the tracking
+    // centre also rolls with the rotation; publishEncoders() adds that per pod.
     if (moved) mPodVertIn += dDist;
+    mPodThetaRad += appliedTheta;
 
     applyRearAligner(dtSec);
 }
@@ -435,27 +472,22 @@ void World::accumulateEncoders(double leftTravelIn, double rightTravelIn) {
     mMotorDegRight += (rightTravelIn * seen / circumference) / extRatio * 360.0;
 }
 
-namespace {
-/// Inches of pod travel -> rotation-sensor centidegrees.
-std::int32_t podCentideg(double travelIn, double wheelDiamIn) {
-    const double circumference = chad::PI * wheelDiamIn;
-    if (circumference <= 0.0) return 0;
-    return static_cast<std::int32_t>(travelIn / circumference * 36000.0);
-}
-constexpr double kPodWheelDiamIn = 2.75;
-constexpr int kVertPodPort = 11;
-constexpr int kHorizPodPort = 12;
-}  // namespace
-
 void World::publishEncoders() {
     // Always published, whether or not the library is configured to read them.
     // Enabling pods mid-run then has a live baseline instead of a jump.
-    const std::int32_t podVert = podCentideg(mPodVertIn, kPodWheelDiamIn);
-    const std::int32_t podHoriz = podCentideg(mPodHorizIn, kPodWheelDiamIn);
-    bus().rotations[kVertPodPort].positionCentideg += podVert - mPubPodVertCentideg;
-    bus().rotations[kHorizPodPort].positionCentideg += podHoriz - mPubPodHorizCentideg;
-    mPubPodVertCentideg = podVert;
-    mPubPodHorizCentideg = podHoriz;
+    for (Pod& p : mPods) {
+        // One to the right moves forward as the robot turns left; one ahead
+        // of the centre moves left.
+        const double travelIn = (p.horizontal ? mPodHorizIn : mPodVertIn) +
+                                p.offsetIn * mPodThetaRad;
+        const std::int32_t c = podCentideg(travelIn * p.gearRatio, p.wheelDiamIn);
+        // The bus holds the raw value and pros::Rotation applies the reversal
+        // on read, so a reversed sensor stands for one mounted the way its
+        // config says: it still reads up driving forward.
+        const std::int32_t d = c - p.publishedCentideg;
+        bus().rotations[p.port].positionCentideg += p.reversed ? -d : d;
+        p.publishedCentideg = c;
+    }
 
     const double circumference = chad::PI * mParams.wheelDiameterIn;
     const double extRatio = chad::drivetrain.externalGearRatio();

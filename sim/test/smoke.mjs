@@ -27,6 +27,7 @@ const api = {
   routeRunning:c('sim_route_running', 'number', []),
   stopAuton:   c('sim_stop_auton', null, []),
   setParam:    c('sim_set_param', null, ['string', 'number']),
+  setPods:     c('sim_set_odom_pods', null, ['number']),
   getParam:    c('sim_get_param', 'number', ['string']),
   fieldClear:  c('sim_field_clear', null, []),
   fieldDefault:c('sim_field_default', null, []),
@@ -89,6 +90,9 @@ check('heading held', Math.abs(s.err.heading) < 2.0,
       `heading err=${s.err.heading.toFixed(2)} deg`);
 
 console.log('\n== odometry drifts under encoder slip ==');
+// Off the drive encoders: the robot's own tracking wheels roll on the floor,
+// so slip in the drive never reaches them.
+api.setPods(2);
 api.reset(-48, -60, 90);
 api.setParam('encoderSlip', 0.10);
 api.setDrive(6, 6);
@@ -97,6 +101,16 @@ api.setDrive(0, 0);
 run(200);
 s = st();
 check('slip produced odometry error', s.err.dist > 1.0,
+      `err=${s.err.dist.toFixed(3)} in`);
+
+api.setPods(0);
+api.reset(-48, -60, 90);
+api.setDrive(6, 6);
+run(2000);
+api.setDrive(0, 0);
+run(200);
+s = st();
+check('the tracking wheels do not see it', s.err.dist < 1.0,
       `err=${s.err.dist.toFixed(3)} in`);
 
 console.log('\n== MCL runs and corrects ==');
