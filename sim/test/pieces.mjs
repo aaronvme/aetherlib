@@ -311,7 +311,7 @@ run(200);
 check('the pin starts clear of the goal',
       Math.hypot(-31 + 47, 0) > 5, '16.0 in away');
 
-api.setClaw(1);                 // the claw grips extended
+api.setClaw(1);                 // close (claw.cpp: grips retracted)
 run(200);
 check('it takes the pin in front of the jaws', pj().held === target,
       `holding ${pj().held}`);

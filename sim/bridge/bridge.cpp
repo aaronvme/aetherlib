@@ -245,7 +245,7 @@ void placePreload() {
     // A closed claw is already gripping it -- that is how the robot is put on
     // the field, and it has to arrive that way rather than being picked up a
     // tick later once the sensor notices something in front of the jaws.
-    if (chad::claw.is_extended()) {
+    if (::clawClosed()) {
         sim::pieces().hold(gPreloadId);
     } else if (sim::pieces().heldId() >= 0) {
         sim::pieces().release();
@@ -370,7 +370,7 @@ void sim_init() {
         // jaws is something the claw sensor can see.
         const auto& tr = sim::world().truth();
         const auto& rp = sim::world().params();
-        sim::pieces().step({tr.x, tr.y, tr.theta}, chad::claw.is_extended(),
+        sim::pieces().step({tr.x, tr.y, tr.theta}, ::clawClosed(),
                            liftNearestPin(liftPosition()),
                            0.5f * rp.robotLengthIn, 0.5f * rp.robotWidthIn,
                            dtMs);
@@ -1054,9 +1054,9 @@ void execRoute() {
                 break;
             case OP_CLAW: {
                 const int how = static_cast<int>(c.a);
-                if (how == 0) chad::claw.retract();
-                else if (how == 1) chad::claw.extend();
-                else chad::claw.toggle();
+                if (how == 0) ::clawOpen();
+                else if (how == 1) ::clawClose();
+                else ::clawToggle();
                 break;
             }
             case OP_FOLLOW_PATH: {
@@ -1906,15 +1906,15 @@ void sim_piece_set_pose(int id, float x, float y, float headingDeg) {
     }
 }
 
-/// Work the claw by hand: 0 opens, 1 closes, anything else toggles. The claw
-/// grips extended, which is why closing is the extend. Without this the only
+/// Work the claw by hand: 0 opens, 1 closes, anything else toggles. Polarity
+/// is gamespecific/claw.cpp's (it grips retracted). Without this the only
 /// way to pick anything up was to run a whole routine, which is no way to
 /// check whether a grab works.
 EMSCRIPTEN_KEEPALIVE
 void sim_set_claw(int how) {
-    if (how == 0) chad::claw.retract();
-    else if (how == 1) chad::claw.extend();
-    else chad::claw.toggle();
+    if (how == 0) ::clawOpen();
+    else if (how == 1) ::clawClose();
+    else ::clawToggle();
 }
 
 /// Colour, and which way up. Separate from the pose so a scenario can lay a
@@ -1947,7 +1947,7 @@ const char* sim_pieces_json() {
                   cx, cy, cdir * chad::RAD_TO_DEG,
                   cb.inRange ? cb.rangeIn : -1.0f,
                   cb.inRange ? "true" : "false",
-                  chad::claw.is_extended() ? "true" : "false",
+                  ::clawClosed() ? "true" : "false",
                   sim::pieces().heldId(),
                   liftPosition(), liftNearestPin(liftPosition()));
     out += head;
@@ -2220,7 +2220,7 @@ const char* sim_state_json() {
         t.colliding ? "true" : "false",
         sim_route_running() ? "true" : "false",
         chad::chassis.isSettled() ? "true" : "false",
-        chad::claw.is_extended() ? 1 : 0,
+        ::clawClosed() ? 1 : 0,
         gLocMode, sim::sched().liveTaskCount());
 
     bool first = true;
