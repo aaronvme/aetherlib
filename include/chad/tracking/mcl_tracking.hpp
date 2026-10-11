@@ -79,6 +79,12 @@ public:
         // wrong. Coast on odometry instead. Zero disables the gate.
         float maxTurnRateRadS = 0.0f;
 
+        // Radius of a circle that fits inside the robot's footprint (half the
+        // narrower side is safe). A particle whose body would overlap a mapped
+        // circle obstacle is not a pose the robot can be in and gets ~zero
+        // weight. Zero disables the test.
+        float bodyRadiusIn = 0.0f;
+
         bool autoSync = true;
     };
 

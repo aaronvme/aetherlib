@@ -179,6 +179,8 @@ ChassisConfig chassisConfig = {
         .injectRadiusIn = 25.0f,
         .minAxisObservability = 0.5f,
         .maxTurnRateRadS = 2.0f,
+        // Half of a 12 in body; the drive is 11.5 in wheel to wheel.
+        .bodyRadiusIn = 6.0f,
         .autoSync = true
     },
 

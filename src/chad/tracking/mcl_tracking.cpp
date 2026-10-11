@@ -5,6 +5,7 @@
 #include <mutex>
 
 #include "chad/drivetrain.hpp"
+#include "chad/util/body_clearance.hpp"
 #include "chad/util/fasttrig.hpp"
 #include "pros/error.h"
 #include "pros/llemu.hpp"
@@ -430,6 +431,7 @@ void MclTracking::updateWeights() {
     mDeadzoneHits.fill(0);
     const float logDeadzone = std::log(std::max(mConfig.deadzoneLikelihood, 1e-30f));
     static constexpr float kLogFloor = -80.0f;
+    int bodyBlocked = 0;
 
     for (int i = 0; i < mConfig.particleCount; i++) {
         float logWeight = 0.0f;
@@ -438,6 +440,15 @@ void MclTracking::updateWeights() {
         if (std::fabs(p.pose.x) > Field::FIELD_HALF_WALL ||
             std::fabs(p.pose.y) > Field::FIELD_HALF_WALL) {
             p.logWeight = kLogFloor;
+            continue;
+        }
+        // A body overlapping a goal post: a post-edge cone return can drag
+        // the cloud into one while the pods say the robot barely moved.
+        if (mCircleObstacles != nullptr &&
+            bodyOverlapsCircle(p.pose.x, p.pose.y, mConfig.bodyRadiusIn,
+                               *mCircleObstacles)) {
+            p.logWeight = kLogFloor;
+            bodyBlocked++;
             continue;
         }
 
@@ -517,9 +528,13 @@ void MclTracking::updateWeights() {
         sumRel += particles[i].weight;
     }
 
-    if (activeSensors > 0.0f && sumRel > 0.0f) {
+    // Body-blocked particles say nothing about how well the beams fit; counting
+    // them drags the slow average to the floor while a cloud sits against a
+    // post, and the collapse that follows a real displacement goes unseen.
+    const int possible = mConfig.particleCount - bodyBlocked;
+    if (activeSensors > 0.0f && sumRel > 0.0f && possible > 0) {
         const float logWAvg =
-            maxLog + std::log(sumRel / static_cast<float>(mConfig.particleCount));
+            maxLog + std::log(sumRel / static_cast<float>(possible));
         if (!mHaveLogAvg) {
             mLogWSlow = mLogWFast = logWAvg;
             mHaveLogAvg = true;
@@ -529,6 +544,9 @@ void MclTracking::updateWeights() {
         }
         const float ratio = std::exp(std::min(mLogWFast - mLogWSlow, 0.0f));
         mInjectFrac = clamp(1.0f - ratio, 0.0f, mConfig.maxRandomFrac);
+    } else if (activeSensors > 0.0f && possible == 0) {
+        // The whole cloud is inside a post: wrong by construction, so search.
+        mInjectFrac = mConfig.maxRandomFrac;
     } else {
         mInjectFrac = 0.0f;
     }

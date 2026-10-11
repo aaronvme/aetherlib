@@ -748,6 +748,7 @@ void setDistSyncProp(float);
 | `maxRandomFrac` | `0.0` | Cap on the injected fraction when the weights collapse. `config.cpp` ships `0.25`. |
 | `injectResampleFloor` | `0.03` | Injection below this is ignored. `config.cpp` ships `0.20`. |
 | `injectRadiusIn` | `0.0` | inches around the current estimate to place injected candidates; `0` searches the whole field. `config.cpp` ships `25`. |
+| `bodyRadiusIn` | `0.0` | Radius of a circle inside the robot's footprint. A particle whose body would overlap a registered circle obstacle (a goal post) gets the out-of-field weight, and is left out of the injection statistics; a cloud wholly inside one injects at `maxRandomFrac`. One squared distance per post per particle (`chad/util/body_clearance.hpp`). `0` disables. `config.cpp` ships `6` (half of a 12 in body; the drive is 11.5 in wheel to wheel). |
 | `autoSync` | `true` | |
 
 Injection is the augmented-MCL recovery for a filter whose weights have
