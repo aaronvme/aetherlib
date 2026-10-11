@@ -10,6 +10,7 @@
 #include "pros/rtos.hpp"
 
 #include "chad/tracking/odom_tracking.hpp"
+#include "chad/util/correction_limiter.hpp"
 #include "chad/util/util.hpp"
 
 namespace chad {
@@ -155,6 +156,19 @@ public:
         /// is not. The step is bounded to maxSyncDist per reading instead,
         /// which is what keeps a single wrong one survivable.
         int recoveryMinVotes = 1;
+
+        // --- pose-jump guard ----------------------------------------------
+        /// Every automatic correction (normal and recovery) passes a token
+        /// bucket: over any T seconds the pose is moved at most
+        /// maxCorrectionBurst + maxCorrectionRate * T. Normal syncs are capped
+        /// by maxSyncRate already and never reach it; a recovery, which would
+        /// otherwise step maxSyncDist per reading (~150 in/s), glides instead of
+        /// teleporting, so a run of bad readings that trips recovery can only
+        /// drag the pose this fast. hardSync, hardReset/setPose and
+        /// updateBotPoseFromBestSensor are deliberate and bypass it. Either <= 0
+        /// disables the guard.
+        float maxCorrectionRate = 30.0f;    // in/s
+        float maxCorrectionBurst = 2.0f;    // in
 
         // --- far-side gate ------------------------------------------------
         /// Ignore returns from beyond a half-plane -- the auton line. During
@@ -414,6 +428,9 @@ private:
     /// What the last syncUpdate added to the odometry pose, so the next cycle
     /// can subtract it back out before calling the remainder velocity.
     float mAppliedDx{0.0f}, mAppliedDy{0.0f};
+    /// Bounds automatic corrections over wall-clock time; see
+    /// Config::maxCorrectionRate.
+    CorrectionLimiter mCorrLimiter;
     float mTurnRate{0.0f};
     bool  mTurnHeld{false};
 

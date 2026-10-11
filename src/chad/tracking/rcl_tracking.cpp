@@ -26,6 +26,10 @@ std::uint32_t expiryFor(float lifetimeMs) {
 bool expired(std::uint32_t expiresAtMs, std::uint32_t nowMs) {
     return expiresAtMs != 0 && static_cast<std::int32_t>(nowMs - expiresAtMs) >= 0;
 }
+
+CorrectionLimiter::Config limiterConfig(const RclTracking::Config& c) {
+    return {c.maxCorrectionRate, c.maxCorrectionBurst};
+}
 }  // namespace
 
 float RclTracking::intersectLineSegment(float rx, float ry,
@@ -109,7 +113,7 @@ bool RclTracking::farSide(float px, float py) const {
 }
 
 RclTracking::RclTracking(OdomTracking& odom, const Config& config)
-    : mConfig(config), mOdom(odom) {}
+    : mConfig(config), mOdom(odom), mCorrLimiter(limiterConfig(config)) {}
 
 RclTracking::~RclTracking() {
     stopTracking();
@@ -307,6 +311,8 @@ void RclTracking::setConfig(const Config& config) {
     mConfig.farSideNx = gnx;
     mConfig.farSideNy = gny;
     mConfig.farSideD = gd;
+
+    mCorrLimiter.setConfig(limiterConfig(mConfig));
 }
 
 void RclTracking::setAutoSync(bool enabled) {
@@ -1034,6 +1040,10 @@ void RclTracking::syncUpdateLocked() {
         dy *= scale;
         dist = maxStep;
     }
+    // The per-reading caps bound one step, not a run of them: recovery at
+    // maxSyncDist per reading is ~150 in/s, which is a teleport. The bucket
+    // bounds the total over real time. hardSync is a deliberate snap.
+    if (!mConfig.hardSync) dist = mCorrLimiter.limit(pros::millis(), dx, dy);
     mLastSyncStep = dist;
     // Remembered so the next cycle can tell this correction apart from the
     // robot actually moving.
@@ -1139,6 +1149,7 @@ void RclTracking::hardReset(const Pose& pose) {
     mTurnRate = 0.0f;
     mTurnHeld = false;
     mLagShiftX = mLagShiftY = 0.0f;
+    mCorrLimiter.reset();
 
     // Every held sample was measured against the old pose. Letting them stand
     // would have the next cycle classify them against the new one and call the
