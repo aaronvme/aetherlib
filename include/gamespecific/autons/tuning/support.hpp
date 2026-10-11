@@ -98,17 +98,27 @@ inline bool fixVerified(int inliers) {
     return inliers == kBracketedFix || inliers >= tuning::MAP_VERIFIED_INLIERS;
 }
 
+// Beam resets refuse a heading further than this from a field axis: walls are
+// read through cos(off-axis) and the ~25 degree cones start reaching posts.
+constexpr float kBeamResetMaxOffAxisDeg = 10.0f;
+
+// Most the filter's own uncertainty may widen resetFromBeamsNear's gate.
+constexpr float kBeamResetMaxWidenIn = 4.0f;
+
+// Heading within kBeamResetMaxOffAxisDeg of a field axis.
+bool squareToField(float thetaRad);
+
 // Snap x and y to what the beams say, keeping the heading. Returns false and
-// changes nothing when the fix cannot be verified. Stop the robot first: a
-// fix taken while rolling is a fix of where it used to be.
+// changes nothing when the fix cannot be verified or the robot is not square
+// to the field. Stop the robot first: a fix taken while rolling is a fix of
+// where it used to be.
 bool resetFromBeams();
 
-// Same, but where only two beams reach a wall the solve is exactly determined
-// and fits any pair of readings perfectly, so nothing in it can catch a beam
-// that clipped something. The current estimate stands in for the missing
-// cross-check: a grazed beam throws the fix far, so one that lands near where
-// we already were is the good case. A fix that verifies on its own is taken
-// whatever the distance, and the window grows by 2 sigma of the filter's own
-// position uncertainty.
+// Same, gated on the current estimate. Returns false and changes nothing when
+// the robot is not square to the field, or the fix lands further than
+// maxJumpIn + min(2 sigma, kBeamResetMaxWidenIn) from the estimate without an
+// opposing pair bracketing both axes. A mapped fix -- even one with enough
+// inliers to call itself verified -- can be an alias on the post lattice, so
+// only a bracketed fix may move the pose past the gate.
 bool resetFromBeamsNear(float maxJumpIn = 4.0f);
 }

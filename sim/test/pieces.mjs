@@ -498,6 +498,7 @@ api.setLoc(2);
 api.runAuton(idx);
 
 let sawClosed = false, sawHeld = false, maxLift = 0, maxErr = 0;
+let maxJump = 0, prevOdom = st().odom;
 let guard = 0;
 while (api.routeRunning() === 1 && guard++ < 2500) {
   run(20);
@@ -505,8 +506,11 @@ while (api.routeRunning() === 1 && guard++ < 2500) {
   if (p.closed) sawClosed = true;
   if (p.held >= 0) sawHeld = true;
   if (p.liftDeg > maxLift) maxLift = p.liftDeg;
-  const e = st().err.dist;
-  if (e > maxErr) maxErr = e;
+  const s = st();
+  if (s.err.dist > maxErr) maxErr = s.err.dist;
+  const jump = Math.hypot(s.odom.x - prevOdom.x, s.odom.y - prevOdom.y);
+  if (jump > maxJump) maxJump = jump;
+  prevOdom = s.odom;
 }
 api.stopAuton();
 
@@ -516,15 +520,16 @@ check('the lift actually travels', maxLift > 100, `${maxLift.toFixed(0)}°`);
 check('it has hold of something while the claw is shut', sawHeld,
       `worst pose error during the run ${maxErr.toFixed(1)} in`);
 
-// The one below is RED, and the cause is not in this file. The routine's first
-// autons::resetFromBeamsNear() relocates the pose by about 89 in, and every
-// motion after it aims at the wrong place. Measured 2026-09-27; it reproduces
-// unchanged with the goals back at their old 2.0 in radius and with no pieces
-// on the field at all, so it predates the Override layout. solveMapped returns
-// an alias of the post lattice and reports it verified, which API.md already
-// describes; RclTracking::latestEstimate() also freezes at its last fix when a
-// cycle has no votes, so the jump gate that would otherwise catch it is
-// measuring against a stale prior.
+// This and the claw check above were red because the bridge treated an
+// extended claw as closed after claw.cpp moved to gripping retracted, so every
+// clawClose() in a routine opened the jaws. Fixed 2026-10-10; both score now.
+//
+// The second autons::resetFromBeamsNear() (heading 66) used to relocate the
+// pose 56.7 in onto a post-lattice alias that solveMapped reported verified.
+// Off-axis resets are now refused and only a bracketed fix may pass the gate;
+// sim/test/beam_reset.mjs has the cases.
+check('no beam reset throws the pose during the run', maxJump < 6.0,
+      `largest 20 ms pose step ${maxJump.toFixed(1)} in, worst error ${maxErr.toFixed(1)} in`);
 {
   const scored = pj().pieces.filter(q => q.goal >= 0 && q.level > 0);
   check('a pin ends up in a goal above the bottom level', scored.length > 0,

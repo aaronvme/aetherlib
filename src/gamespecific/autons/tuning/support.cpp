@@ -260,18 +260,28 @@ static Pose priorPose(float* posSigma) {
                             ? std::fmax(spread, 12.0f)
                             : spread;
         }
-        const Pose est = chassis.rcl().latestEstimate();
         const Pose odom = chassis.odom().getPose();
+        // With no votes last cycle latestEstimate() is frozen at the last fix,
+        // which can be far behind the pose the robot is driving on.
+        if (chassis.rcl().activeSensorCount() == 0) return odom;
+        const Pose est = chassis.rcl().latestEstimate();
         return {est.x, est.y, odom.theta};
     }
 
     return chassis.odom().getPose();
 }
 
+bool squareToField(float thetaRad) {
+    if (!std::isfinite(thetaRad)) return false;
+    const float off = std::fabs(std::remainder(thetaRad, HALF_PI));
+    return off <= kBeamResetMaxOffAxisDeg * DEG_TO_RAD;
+}
+
 bool resetFromBeams() {
     // The prior is the true field frame; chassis.getPose() is whatever frame
     // the running routine was written in.
     const float th = priorPose(nullptr).theta;
+    if (!squareToField(th)) return false;
     BeamRead beams[MAX_DISTANCE_SENSORS];
     readBeams(beams, th);
     BeamPair pairs[2];
@@ -288,6 +298,7 @@ bool resetFromBeams() {
 bool resetFromBeamsNear(float maxJumpIn) {
     float sigma = 0.0f;
     const Pose prior = priorPose(&sigma);
+    if (!squareToField(prior.theta)) return false;
 
     BeamRead beams[MAX_DISTANCE_SENSORS];
     readBeams(beams, prior.theta);
@@ -297,10 +308,14 @@ bool resetFromBeamsNear(float maxJumpIn) {
     float tx = 0.0f, ty = 0.0f, bracket = 0.0f;
     int inliers = 0;
     if (!solveTruth(beams, pairs, n, 3.0f, tx, ty, bracket, &inliers)) return false;
-    if (!fixVerified(inliers)) {
-        // Widen by what the filter admits it does not know, so the gate only
-        // stays tight while the filter is actually confident.
-        const float limit = maxJumpIn + 2.0f * sigma;
+    // Only an opposing pair that brackets the field span is independent of the
+    // prior. A mapped fix, verified or not, can be a post-lattice alias 20-100
+    // in away: the solve scores centre rays, the sensor reports the nearest
+    // thing in its cone.
+    if (inliers != kBracketedFix) {
+        // Widen by what the filter admits it does not know, capped so the gate
+        // never reaches the next alias (posts are 23.5 in apart).
+        const float limit = maxJumpIn + std::fmin(2.0f * sigma, kBeamResetMaxWidenIn);
         const float dx = tx - prior.x;
         const float dy = ty - prior.y;
         if (dx * dx + dy * dy > limit * limit) return false;

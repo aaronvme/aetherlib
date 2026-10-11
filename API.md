@@ -1093,6 +1093,15 @@ on unchecked truth says so on the results page instead of quietly biasing a
 fit. An opposing pair reports as `kBracketedFix` and is always verified: it
 detects blockage outright.
 
+A verified mapped fix can still be an alias. The solve scores centre rays; a
+V5 sensor reports the nearest thing in a ~25° cone, so near a post an alias
+20-100 in away can explain more beams than the truth. Scanning square-on poses
+in the sim, 36 of 242 still-standing fixes landed 20-108 in off with ≥ 3
+inliers; no bracketed one did. `autons::resetFromBeamsNear()` therefore lets
+only a `kBracketedFix` move the pose past its gate (`maxJumpIn` + min(2σ, 4 in)),
+and both beam resets refuse a heading more than 10° off a field axis
+(`kBeamResetMaxOffAxisDeg`). `sim/test/beam_reset.mjs` has the cases.
+
 The beam mixture is the one fit a bare field **cannot** do. Its short term
 describes an occluded reading; with nothing on the field there is no tail, EM
 drives `shortWeight` to nearly zero, and a filter with no occlusion allowance

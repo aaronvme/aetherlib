@@ -53,6 +53,10 @@ node sim/test/smoke.mjs || fail=1
 # routine unmodified and checks a pin ends up in a goal.
 echo "--- game pieces ---"
 node sim/test/pieces.mjs || fail=1
+# A beam reset off a field axis, or onto a post-lattice alias, must not move
+# the pose; a square-on one still corrects a real offset.
+echo "--- beam reset ---"
+node sim/test/beam_reset.mjs || fail=1
 # RCL owns the pose now. The two checks that matter are the rejections: a beam
 # ranging an alliance partner, and one ranging a post, must not move it.
 echo "--- RCL ---"

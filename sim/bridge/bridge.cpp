@@ -23,6 +23,7 @@
 #include "chad/movement_control/spline.hpp"
 
 #include "gamespecific/autons.hpp"
+#include "gamespecific/autons/tuning/support.hpp"
 #include "gamespecific/claw.hpp"
 #include "gamespecific/config.hpp"
 #include "gamespecific/controls.hpp"
@@ -478,6 +479,12 @@ void sim_teleport(float x, float y, float thetaDeg) {
     // Kidnapped-robot test: ground truth moves, the estimator is not told.
     breakTrails();
     sim::world().teleport({x, y, chad::vexToStdRad(thetaDeg)});
+}
+
+/// autons::resetFromBeamsNear() as a routine calls it. 1 = pose replaced.
+EMSCRIPTEN_KEEPALIVE
+int sim_beam_reset_near(float maxJumpIn) {
+    return chad::autons::resetFromBeamsNear(maxJumpIn) ? 1 : 0;
 }
 
 // ============================================================================
