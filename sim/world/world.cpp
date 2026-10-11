@@ -36,6 +36,106 @@ constexpr double kPodWheelDiamIn = 2.75;
 constexpr int kVertPodPort = 11;
 constexpr int kHorizPodPort = 12;
 
+// --- contact response -------------------------------------------------------
+/// Into-surface speed below which a hit does not rebound.
+constexpr double kBounceMinInS = 10.0;
+/// Square-up stops this close to flush.
+constexpr double kFlushTolRad = 0.05 * chad::DEG_TO_RAD;
+/// Square-up yaw-rate ceiling.
+constexpr double kSquareUpMaxRadS = 720.0 * chad::DEG_TO_RAD;
+/// Bisection depth for the free part of a slide, approach or push-out.
+constexpr int kBisect = 10;
+constexpr int kMaxContacts = 8;
+/// Gap an approach stops at, in.
+constexpr double kSkinIn = 1e-3;
+
+/// Closest approach of the body to one obstacle.
+struct Contact {
+    double gap{0.0};            // in
+    double nx{0.0}, ny{0.0};    // unit normal, body -> obstacle, world
+    double px{0.0}, py{0.0};    // body point nearest it, world
+    double bx{0.0}, by{0.0};    // same point, body frame
+    bool cornerOnFlat{false};   // a body corner against a segment's interior
+};
+
+/// Every wall, post and dynamic segment within reach of the body: exactly what
+/// Field::collidesBody() tests. Closest pairs of a box and a segment are a box
+/// corner on the segment or a segment endpoint on the box.
+int findContacts(const Field& f, double x, double y, double th, float halfLen,
+                 float halfWid, bool obstacles, double reach, Contact* out) {
+    const double c = std::cos(th), s = std::sin(th);
+    const double L = halfLen, W = halfWid;
+    int n = 0;
+    auto emit = [&](double gap, double nbx, double nby, double bx, double by, bool corner) {
+        if (gap >= reach || n >= kMaxContacts) return;
+        Contact& k = out[n++];
+        k.gap = gap;
+        k.nx = nbx * c - nby * s;
+        k.ny = nbx * s + nby * c;
+        k.bx = bx;
+        k.by = by;
+        k.px = x + bx * c - by * s;
+        k.py = y + bx * s + by * c;
+        k.cornerOnFlat = corner;
+    };
+    auto toBody = [&](double wx, double wy, double& lx, double& ly) {
+        const double dx = wx - x, dy = wy - y;
+        lx =  dx * c + dy * s;
+        ly = -dx * s + dy * c;
+    };
+    auto segment = [&](const Segment& sg) {
+        double ax, ay, bx, by;
+        toBody(sg.x1, sg.y1, ax, ay);
+        toBody(sg.x2, sg.y2, bx, by);
+        const double ex = bx - ax, ey = by - ay;
+        const double len2 = ex * ex + ey * ey;
+        double best = 1e30, bnx = 0, bny = 0, bpx = 0, bpy = 0;
+        bool corner = false;
+        if (len2 > 1e-12) {
+            const double len = std::sqrt(len2);
+            for (int i = 0; i < 4; i++) {
+                const double cx = (i & 1) ? L : -L, cy = (i & 2) ? W : -W;
+                const double t = ((cx - ax) * ex + (cy - ay) * ey) / len2;
+                if (t <= 1e-6 || t >= 1.0 - 1e-6) continue;
+                double mx = -ey / len, my = ex / len;
+                const double qx = ax + t * ex, qy = ay + t * ey;
+                if (mx * qx + my * qy < 0.0) { mx = -mx; my = -my; }
+                const double d = (qx - cx) * mx + (qy - cy) * my;
+                if (d < best) { best = d; bnx = mx; bny = my; bpx = cx; bpy = cy; corner = true; }
+            }
+        }
+        for (int i = 0; i < 2; i++) {
+            const double qx = i ? bx : ax, qy = i ? by : ay;
+            const double px = std::clamp(qx, -L, L), py = std::clamp(qy, -W, W);
+            const double d = std::hypot(qx - px, qy - py);
+            if (d >= best) continue;
+            double mx, my;
+            if (d > 1e-9) { mx = (qx - px) / d; my = (qy - py) / d; }
+            else if (L - std::fabs(px) < W - std::fabs(py)) { mx = px > 0 ? 1 : -1; my = 0; }
+            else { mx = 0; my = py > 0 ? 1 : -1; }
+            best = d; bnx = mx; bny = my; bpx = px; bpy = py; corner = false;
+        }
+        if (best < 1e29) emit(std::max(0.0, best), bnx, bny, bpx, bpy, corner);
+    };
+
+    for (const auto& sg : f.segments()) {
+        if (sg.kind != 0 && !obstacles) continue;
+        segment(sg);
+    }
+    if (!obstacles) return n;
+    for (const auto& sg : f.dynamic()) segment(sg);
+    // Round: no flat to square up to, so never a square-up contact.
+    for (const auto& ci : f.circles()) {
+        double lx, ly;
+        toBody(ci.x, ci.y, lx, ly);
+        const double px = std::clamp(lx, -L, L), py = std::clamp(ly, -W, W);
+        const double d = std::hypot(lx - px, ly - py);
+        if (d < 1e-9) continue;   // swallowed: overlapping, not a contact
+        emit(std::max(0.0, d - ci.r), (lx - px) / d, (ly - py) / d, px, py, false);
+    }
+    return n;
+}
+
 }  // namespace
 
 World& world() {
@@ -99,6 +199,8 @@ void World::teleport(const chad::Pose& pose) {
     mTruth.x = pose.x;
     mTruth.y = pose.y;
     mTruth.theta = pose.theta;
+    mBounceVx = mBounceVy = 0.0;
+    mInContact = false;
     // Encoders and IMU intentionally continue from where they were: a kidnap
     // must be invisible to dead reckoning, which is what MCL has to notice.
     updateDistanceSensors();
@@ -112,6 +214,8 @@ void World::resetTo(const chad::Pose& pose) {
     mTruth.theta = pose.theta;
 
     mLeftCmdIn = mRightCmdIn = 0.0f;
+    mBounceVx = mBounceVy = 0.0;
+    mInContact = false;
     mLiftDeg = mLiftVel = mPubLiftDeg = 0.0;
     mMotorDegLeft = mMotorDegRight = 0.0;
     mDistAccum = mImuAccum = mEncAccum = 0.0;
@@ -325,27 +429,21 @@ void World::updateDrive(double dtSec) {
 
     // Integrate about the arc midpoint -- matches how odometry reconstructs it,
     // so any disagreement is from sensor error rather than integration style.
+    // A rebound from a hard hit rides on top of the drive's step.
     const double midTheta = mTruth.theta + dTheta * 0.5;
-    const double nx = mTruth.x + dDist * std::cos(midTheta);
-    const double ny = mTruth.y + dDist * std::sin(midTheta);
+    const double bdx = mBounceVx * dtSec, bdy = mBounceVy * dtSec;
+    const double dx = dDist * std::cos(midTheta) + bdx;
+    const double dy = dDist * std::sin(midTheta) + bdy;
+    const double nx = mTruth.x + dx;
+    const double ny = mTruth.y + dy;
 
     // Walls and posts are solid, and the body is tested as the rectangle it is:
     // standing a circle in for it cannot be right at both angles -- a radius
     // that stops the robot square-on lets a corner through at 45 deg, and one
     // that stops the corner holds it a corner's-worth off every wall it faces.
-    //
-    // Which means rotation is no longer free. A circle's footprint does not
-    // change when it turns, so the old rule -- block translation, always allow
-    // rotation -- could not put the body anywhere it was not already. A
-    // rectangle's does: parked square-on against a wall, a 10 degree turn
-    // buries a corner 1.17 in into it, and then translation is blocked in EVERY
-    // direction, including away. That is the permanent wedge the old comment
-    // was guarding against, arrived at from the other side.
-    //
-    // So the two are accepted separately, most-preferred first, and whichever
-    // combination is free wins. The body can then never overlap anything, and
-    // there is always a way out: if turning is blocked the robot can still
-    // reverse, and if reversing is blocked it can still turn.
+    // Rotation is therefore not free either: parked square-on against a wall,
+    // a 10 degree turn buries a corner 1.17 in into it. Every pose applied below
+    // is collision-tested, so the body never overlaps anything.
     const float endTheta = static_cast<float>(mTruth.theta + dTheta);
     const float halfLen = 0.5f * mParams.robotLengthIn;
     const float halfWid = 0.5f * mParams.robotWidthIn;
@@ -360,37 +458,208 @@ void World::updateDrive(double dtSec) {
     // allowed or the robot is stuck where it was dropped.
     const bool stuckAlready = !free(mTruth.x, mTruth.y, static_cast<float>(mTruth.theta));
 
-    bool moved = false, turned = false;
+    const float theta0 = mTruth.theta;
+    double sx = 0.0, sy = 0.0, rot = 0.0;
+    bool clear = false;
     if (stuckAlready || free(nx, ny, endTheta)) {
-        moved = turned = true;
-    } else if (free(nx, ny, static_cast<float>(mTruth.theta))) {
-        moved = true;                   // translate, hold the heading
-    } else if (free(mTruth.x, mTruth.y, endTheta)) {
-        turned = true;                  // turn in place
+        sx = dx;
+        sy = dy;
+        rot = dTheta;
+        clear = true;
+    } else if (free(nx, ny, theta0)) {
+        sx = dx;                        // translate, the surface refuses the turn
+        sy = dy;
+    } else {
+        resolveContact(dx, dy, dTheta, dtSec, sx, sy, rot);
     }
+    mInContact = !clear;
 
-    if (moved) {
-        mTruth.x = static_cast<float>(nx);
-        mTruth.y = static_cast<float>(ny);
+    mTruth.x = static_cast<float>(mTruth.x + sx);
+    mTruth.y = static_cast<float>(mTruth.y + sy);
+    mTruth.theta = chad::wrapRad(static_cast<float>(mTruth.theta + rot));
+    mTruth.colliding = stuckAlready || !clear;
+
+    // The rebound dies as the drive pushes the body back up to wheel speed.
+    if (mBounceVx != 0.0 || mBounceVy != 0.0) {
+        const double keep = mParams.responseTauMs > 1e-3f
+            ? std::exp(-dtSec * 1000.0 / mParams.responseTauMs) : 0.0;
+        mBounceVx *= keep;
+        mBounceVy *= keep;
+        if (std::hypot(mBounceVx, mBounceVy) < 1e-3) mBounceVx = mBounceVy = 0.0;
     }
-    const double appliedTheta = turned ? dTheta : 0.0;
-    mTruth.theta = chad::wrapRad(static_cast<float>(mTruth.theta + appliedTheta));
-    mTruth.colliding = stuckAlready || !(moved && turned);
 
     // The encoders see the travel the wheels claim -- blocked or not, they spin
     // and slip. The IMU does not: a gyro reports the rotation the body actually
-    // made, so a turn the walls refused is a turn it never saw.
+    // made, so a turn the walls refused is a turn it never saw, and a turn a
+    // wall forced is one it did.
     accumulateEncoders(mLeftCmdIn * dtSec, mRightCmdIn * dtSec);
-    accumulateImu(appliedTheta, dtSec);
+    accumulateImu(rot, dtSec);
 
     // Dead wheels are unpowered and roll on the floor, so they see real travel
-    // rather than what the drive wheels claim: no encoderSlip term, and nothing
-    // at all while a wall is holding the robot still. A pod off the tracking
-    // centre also rolls with the rotation; publishEncoders() adds that per pod.
-    if (moved) mPodVertIn += dDist;
-    mPodThetaRad += appliedTheta;
+    // rather than what the drive wheels claim: no encoderSlip term, nothing
+    // while a wall holds the robot still, and the body-frame components of a
+    // slide, pivot or rebound -- the lateral part on the horizontal pod. A pod
+    // off the tracking centre also rolls with the rotation; publishEncoders()
+    // adds that per pod.
+    if (clear && bdx == 0.0 && bdy == 0.0) {
+        mPodVertIn += dDist;            // the step is along the mid heading
+    } else {
+        const double h = theta0 + rot * 0.5;
+        const double ch = std::cos(h), sh = std::sin(h);
+        mPodVertIn  +=  sx * ch + sy * sh;
+        mPodHorizIn += -sx * sh + sy * ch;
+    }
+    mPodThetaRad += rot;
 
     applyRearAligner(dtSec);
+}
+
+// ============================================================================
+// Contact response
+// ============================================================================
+//
+// A blocked step is split against the surface it drives deepest into: the part
+// into it is lost, the part along it slides less Coulomb drag (wallFriction
+// times the push, so a face squared to the wall stops), a corner on a flat
+// pivots the body flush at squareUpRate per inch of push, and a hit faster
+// than kBounceMinInS starts a rebound. Candidates go most-preferred first and
+// every one is collision-tested; the last is the current pose, so one always
+// succeeds. A turn the surface refuses walks the body off it instead.
+void World::resolveContact(double dx, double dy, double dTheta, double dtSec,
+                           double& sx, double& sy, double& rot) {
+    sx = sy = rot = 0.0;
+    const float halfLen = 0.5f * mParams.robotLengthIn;
+    const float halfWid = 0.5f * mParams.robotWidthIn;
+    auto free = [&](double x, double y, double th) {
+        const float t = static_cast<float>(th);
+        return !field().collidesBody(static_cast<float>(x), static_cast<float>(y),
+                                     std::cos(t), std::sin(t), halfLen, halfWid,
+                                     mParams.collideObstacles);
+    };
+    /// Largest fraction in [0, 1] of (vx, vy) that keeps the pose free.
+    auto fit = [&](double x, double y, double th, double vx, double vy) {
+        if (vx * vx + vy * vy < 1e-14) return 0.0;
+        if (free(x + vx, y + vy, th)) return 1.0;
+        double lo = 0.0, hi = 1.0;
+        for (int i = 0; i < kBisect; i++) {
+            const double m = 0.5 * (lo + hi);
+            (free(x + vx * m, y + vy * m, th) ? lo : hi) = m;
+        }
+        return lo;
+    };
+
+    const double x0 = mTruth.x, y0 = mTruth.y, th0 = mTruth.theta;
+    const double halfDiag = std::hypot(halfLen, halfWid);
+    const double reach = std::hypot(dx, dy) + halfDiag * std::fabs(dTheta) + 0.05;
+    Contact cs[kMaxContacts];
+    const int n = findContacts(field(), x0, y0, th0, halfLen, halfWid,
+                               mParams.collideObstacles, reach, cs);
+    if (n == 0) return;
+
+    int pi = 0;
+    for (int i = 1; i < n; i++) {
+        if (dx * cs[i].nx + dy * cs[i].ny - cs[i].gap >
+            dx * cs[pi].nx + dy * cs[pi].ny - cs[pi].gap) pi = i;
+    }
+    const Contact& k = cs[pi];
+    const double dn = dx * k.nx + dy * k.ny;
+    const double into = std::max(0.0, dn);
+
+    // Rebound: only on a fresh hit, never on a sustained push. The body's
+    // velocity into the surface becomes -restitution * (excess over the
+    // threshold); any rebound already headed into this surface is dropped.
+    const double bIn = mBounceVx * k.nx + mBounceVy * k.ny;
+    if (bIn > 0.0) {
+        mBounceVx -= bIn * k.nx;
+        mBounceVy -= bIn * k.ny;
+    }
+    const double vIn = into / dtSec;
+    if (!mInContact && mParams.wallRestitution > 0.0f && vIn > kBounceMinInS) {
+        const double kick = vIn + mParams.wallRestitution * (vIn - kBounceMinInS);
+        mBounceVx -= kick * k.nx;
+        mBounceVy -= kick * k.ny;
+    }
+
+    // Along-surface part less Coulomb drag; an away part is kept whole.
+    const double tx = dx - dn * k.nx, ty = dy - dn * k.ny;
+    const double tLen = std::hypot(tx, ty);
+    const double slideFrac = std::clamp(static_cast<double>(mParams.wallSlideFrac), 0.0, 1.0);
+    const double mu = std::max(0.0, static_cast<double>(mParams.wallFriction));
+    const double keep = tLen > 1e-12
+        ? std::max(0.0, tLen - mu * into) / tLen * slideFrac : 0.0;
+    const double mx = tx * keep + (dn < 0.0 ? dn * k.nx : 0.0);
+    const double my = ty * keep + (dn < 0.0 ? dn * k.ny : 0.0);
+
+    // Square-up: the reaction at a corner turns the body about that corner
+    // toward the adjacent face its torque favours, until that face is flush.
+    double sq = 0.0;
+    if (k.cornerOnFlat && into > 0.0 && mParams.squareUpRate > 0.0f) {
+        const double c = std::cos(th0), s = std::sin(th0);
+        const double nbx = k.nx * c + k.ny * s, nby = -k.nx * s + k.ny * c;
+        const double phi = std::atan2(nby, nbx);
+        const double eX = chad::wrapRad(static_cast<float>(phi - (k.bx > 0.0 ? 0.0 : chad::PI)));
+        const double eY = chad::wrapRad(static_cast<float>(phi - (k.by > 0.0 ? 0.5 : -0.5) * chad::PI));
+        const double torque = -(k.bx * nby - k.by * nbx);   // of -n at the corner
+        const double e = torque >= 0.0 ? std::max(eX, eY) : std::min(eX, eY);
+        if (std::fabs(e) > kFlushTolRad) {
+            const double step = std::min({std::fabs(e),
+                mParams.squareUpRate * chad::DEG_TO_RAD * into,
+                kSquareUpMaxRadS * dtSec});
+            sq = std::copysign(step, e);
+        }
+    }
+
+    // Outward for a turn that buries a corner: away from everything touching.
+    double ox = 0.0, oy = 0.0;
+    for (int i = 0; i < n; i++) {
+        if (cs[i].gap > 0.05) continue;
+        ox -= cs[i].nx;
+        oy -= cs[i].ny;
+    }
+    const double oLen = std::hypot(ox, oy);
+
+    const double cand[4][2] = {{sq, dTheta}, {sq, 0.0}, {0.0, dTheta}, {0.0, 0.0}};
+    for (int ci = 0; ci < 4; ci++) {
+        const double q = cand[ci][0], r = cand[ci][1];
+        bool dup = false;
+        for (int j = 0; j < ci; j++) dup |= (cand[j][0] == q && cand[j][1] == r);
+        if (dup) continue;
+
+        double x = x0, y = y0;
+        if (q != 0.0) {
+            const double rx = x0 - k.px, ry = y0 - k.py;
+            const double cq = std::cos(q), sq2 = std::sin(q);
+            x = k.px + rx * cq - ry * sq2;
+            y = k.py + rx * sq2 + ry * cq;
+        }
+        const double th = th0 + q + r;
+        if (!free(x, y, th)) {
+            if (r == 0.0 || oLen < 1e-9) continue;
+            const double out = halfDiag * std::fabs(r) + 1e-3;
+            const double ux = ox / oLen * out, uy = oy / oLen * out;
+            if (!free(x + ux, y + uy, th)) continue;
+            double lo = 0.0, hi = 1.0;
+            for (int i = 0; i < kBisect; i++) {
+                const double m = 0.5 * (lo + hi);
+                (free(x + ux * m, y + uy * m, th) ? hi : lo) = m;
+            }
+            x += ux * hi;
+            y += uy * hi;
+        }
+        const double s = fit(x, y, th, mx, my);
+        x += mx * s;
+        y += my * s;
+        // Approach to a skin short of contact: closer, float rounding in the
+        // collision test blocks the next tick's slide and pivot.
+        const double a = std::max(0.0, fit(x, y, th, into * k.nx, into * k.ny) * into - kSkinIn);
+        x += k.nx * a;
+        y += k.ny * a;
+
+        sx = x - x0;
+        sy = y - y0;
+        rot = q + r;
+        return;
+    }
 }
 
 // ============================================================================

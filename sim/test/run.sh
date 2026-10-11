@@ -68,6 +68,14 @@ node sim/test/rcl_guard.mjs || fail=1
 # the innovation gate, must not drag the pose; the sensor drops out and returns.
 echo "--- RCL reading trust ---"
 node sim/test/rcl_trust.mjs || fail=1
+# All-omni drive: an angled push on a wall or post slides along it, and the
+# tracking pods see the slide. Frictionless: contact params at 0.
+echo "--- wall glide ---"
+node sim/test/glide.mjs || fail=1
+# Default contact: a corner hit squares up, the slide scrubs and stops once
+# flat, a hard hit knocks back and settles.
+echo "--- wall contact ---"
+node sim/test/contact.mjs || fail=1
 echo "--- localization under disturbance ---"
 node sim/test/disturbance.mjs || fail=1
 # Mode changes: a motion the autonomous task left running must not keep the

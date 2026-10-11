@@ -1278,6 +1278,10 @@ void sim_set_param(const char* name, float value) {
     else if (k == "alignerMouthIn")    p.alignerMouthIn = value;
     else if (k == "alignerDepthIn")    p.alignerDepthIn = value;
     else if (k == "collideObstacles") p.collideObstacles = (value != 0.0f);
+    else if (k == "wallSlideFrac")     p.wallSlideFrac = value;
+    else if (k == "wallFriction")      p.wallFriction = value;
+    else if (k == "squareUpRate")      p.squareUpRate = value;
+    else if (k == "wallRestitution")   p.wallRestitution = value;
     else if (k == "imuPeriodMs")       p.imuPeriodMs = value;
     else if (k == "encoderPeriodMs")   p.encoderPeriodMs = value;
     else if (k == "encoderResolutionDeg") p.encoderResolutionDeg = value;
@@ -1466,6 +1470,10 @@ float sim_get_param(const char* name) {
     else if (k == "distMaxIncidenceDeg") return p.distMaxIncidenceDeg;
     else if (k == "distConeSigmaFrac") return p.distConeSigmaFrac;
     else if (k == "collideObstacles")  return p.collideObstacles ? 1.0f : 0.0f;
+    else if (k == "wallSlideFrac")     return p.wallSlideFrac;
+    else if (k == "wallFriction")      return p.wallFriction;
+    else if (k == "squareUpRate")      return p.squareUpRate;
+    else if (k == "wallRestitution")   return p.wallRestitution;
     else if (k == "imuPeriodMs")       return p.imuPeriodMs;
     else if (k == "encoderPeriodMs")   return p.encoderPeriodMs;
     else if (k == "encoderResolutionDeg") return p.encoderResolutionDeg;

@@ -152,12 +152,16 @@ check('autons registered',
 api.runAuton(0);
 run(400);
 check('route task is running', api.routeRunning() === 1);
-const moved = st();
-run(3000);
-const after = st();
-check('route commanded motion',
-      Math.hypot(after.true.x - moved.true.x, after.true.y - moved.true.y) > 1.0,
-      `moved ${Math.hypot(after.true.x - moved.true.x, after.true.y - moved.true.y).toFixed(2)} in`);
+// Path length, not net displacement: the routine is seeded far from this start
+// and slides along the south wall and back, ending near where it was at 0.4 s.
+let routePath = 0;
+for (let t = 0, prev = st().true; t < 3000; t += 10) {
+  api.step(10);
+  const now = st().true;
+  routePath += Math.hypot(now.x - prev.x, now.y - prev.y);
+  prev = now;
+}
+check('route commanded motion', routePath > 1.0, `moved ${routePath.toFixed(2)} in`);
 api.stopAuton();
 
 console.log('\n== hardware realism ==');
@@ -986,11 +990,15 @@ check('turning into a wall cannot bury the body in it',
       `h ${spun.true.h.toFixed(1)} deg, gap `
       + `${(HALF_WALL - (Math.abs(spun.true.x) + extent(spun.true.h, L, W))).toFixed(3)} in`);
 
-api.setDrive(-9, -9);         // and it must still be able to leave
+// And it must still be able to leave. The spin is not refused any more -- a
+// corner pushing on the wall walks the body off it, as on the robot -- so it
+// leaves along whatever heading the spin left it at, not necessarily reversing.
+const away = Math.sin(spun.true.h * Math.PI / 180) < 0 ? 9 : -9;
+api.setDrive(away, away);
 run(1500);
 api.setDrive(0, 0);
 run(200);
-check('and the robot can still reverse away from it',
+check('and the robot can still drive away from it',
       st().true.x < parkedX - 5,
       `${parkedX.toFixed(2)} -> ${st().true.x.toFixed(2)}`);
 

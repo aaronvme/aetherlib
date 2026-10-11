@@ -624,9 +624,20 @@ does not. Not committed either: the VEX render is not ours to ship.
   trusting any tuning result that came out of it.
 - **Contact response.** Collision itself is exact -- the body is an oriented
   rectangle tested against every segment and post actually loaded, rotation
-  included -- but a robot that touches something simply stops. It does not
-  slide along the surface, and it is not pushed off it. A route that grazes a
-  wall therefore reads as a hard stop rather than the scrape it would be.
+  included. A blocked step is split against the surface it drives deepest
+  into (wall normal, or radial for a post): the part into it is lost, the part
+  along it slides less Coulomb drag `wallFriction` x the push (default 0.4),
+  times `wallSlideFrac` (1 = omni, 0 = stop dead). A corner on a flat surface
+  pivots about that corner toward the face its reaction torque favours, at
+  `squareUpRate` deg per inch pushed in (default 8), until flush -- so a steep
+  hit squares the front up and then stops (the push is all normal), a shallow
+  one lays the side along the wall and drives on. A hit faster than 10 in/s
+  rebounds at `wallRestitution` x the excess (default 0.8), decaying with
+  `responseTauMs`: ~0.6 in at full speed, ~0 at a crawl. A turn a surface
+  refuses walks the body off it. The drive encoders count commanded travel;
+  the pods and IMU see the real slide, pivot and rebound. All three at 0 is
+  the frictionless glide. Not modelled: posts squaring the body up (round),
+  torque from a post on a face, and rebound spin.
 - Lift, intake and other subsystem simulation — the shims exist and the code
   runs, but nothing physical is modelled. Subsystem calls in a routed auton are
   skipped and listed rather than run.

@@ -104,6 +104,25 @@ struct RobotParams {
     /// the field editor. Perimeter segments always stop it.
     bool collideObstacles{true};
 
+    /// Share of a blocked step's along-surface component the body keeps when it
+    /// slides on a wall or post. 1 = all-omni drive, nothing resists the slide;
+    /// 0 = it stops dead on contact.
+    float wallSlideFrac{1.0f};
+
+    /// Coulomb drag on a slide: the along-surface step loses wallFriction times
+    /// the step into the surface. 0 = frictionless glide. Once the face is
+    /// flat the drive pushes straight in and the slide stops by itself.
+    float wallFriction{0.4f};
+
+    /// Yaw a corner contact on a flat surface turns the body by, toward flush,
+    /// in deg/s per in/s pushed into the surface (= deg per inch). The corner
+    /// is the pivot; the turn is real, so the IMU and pods see it. 0 = none.
+    float squareUpRate{8.0f};
+
+    /// Rebound speed per in/s of impact above kBounceMinInS (world.cpp). The
+    /// rebound decays with responseTauMs as the drive pushes back in. 0 = none.
+    float wallRestitution{0.8f};
+
     // Robot footprint, used for collision and drawing.
     /// Let the localization beams stop on pins and cups. Off, because a 1.6 in
     /// pin and a half-transparent cup do not fill enough of a V5 distance
@@ -191,9 +210,20 @@ private:
     void updateClawSensor();
     void updateLift(double dtSec);
     void applyRearAligner(double dtSec);
+    /// Blocked step (dx, dy, dTheta): the contact response. Returns the applied
+    /// translation and rotation; the result never overlaps anything.
+    void resolveContact(double dx, double dy, double dTheta, double dtSec,
+                        double& sx, double& sy, double& rot);
 
     RobotParams mParams;
     TrueState   mTruth;
+
+    // Rebound after a hard hit, world in/s, added to the drive's step and
+    // decayed with responseTauMs. mInContact: last step was blocked, so a
+    // sustained push is not re-read as a fresh impact.
+    double mBounceVx{0.0};
+    double mBounceVy{0.0};
+    bool   mInContact{false};
 
     float mLeftCmdIn{0.0f};    // lagged wheel speeds, inches/sec
     float mRightCmdIn{0.0f};
