@@ -2257,7 +2257,8 @@ const char* sim_state_json() {
             "%s{\"i\":%d,\"mclValid\":%s,\"mclIn\":%.2f,"
             "\"rclValid\":%s,\"rclIn\":%.2f,\"rclConf\":%d,\"mclDead\":%.2f,"
             "\"rx\":%.2f,\"ry\":%.2f,\"rdx\":%.3f,\"rdy\":%.3f,"
-            "\"cls\":%d,\"fresh\":%s,\"pair\":%s,\"out\":%s,\"innov\":%.2f}",
+            "\"cls\":%d,\"fresh\":%s,\"pair\":%s,\"out\":%s,\"innov\":%.2f,"
+            "\"trust\":%.3f}",
             first ? "" : ",", i,
             mclValid[i] ? "true" : "false", mclRead[i],
             rs.valid ? "true" : "false", rs.readingInch, rs.confidence,
@@ -2267,7 +2268,7 @@ const char* sim_state_json() {
             rs.fresh ? "true" : "false",
             rs.pairVerified ? "true" : "false",
             rs.outlier ? "true" : "false",
-            rs.innovationIn);
+            rs.innovationIn, rs.trust);
         first = false;
     }
     std::snprintf(buf + n, sizeof(buf) - n, "]}");

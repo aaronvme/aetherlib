@@ -60,6 +60,10 @@ node sim/test/rcl.mjs || fail=1
 # Automatic corrections are rate limited: a recovery glides, it never jumps.
 echo "--- RCL pose-jump guard ---"
 node sim/test/rcl_guard.mjs || fail=1
+# Per-sensor trust: a game element a few inches in front of the wall, inside
+# the innovation gate, must not drag the pose; the sensor drops out and returns.
+echo "--- RCL reading trust ---"
+node sim/test/rcl_trust.mjs || fail=1
 echo "--- localization under disturbance ---"
 node sim/test/disturbance.mjs || fail=1
 # Mode changes: a motion the autonomous task left running must not keep the

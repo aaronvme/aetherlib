@@ -675,6 +675,16 @@ one axis only.
 | `useAccumulation` | `false` | |
 | `maxCorrectionRate` | `30.0` | Pose-jump guard, in/s. Every automatic sync (normal and recovery) passes a token bucket (`chad/util/correction_limiter.hpp`): over any T seconds the pose moves at most `maxCorrectionBurst + maxCorrectionRate × T`. Normal syncs (≤ `maxSyncRate`) never reach it; recovery, otherwise up to `maxSyncDist` per reading (~150 in/s), glides instead of jumping. `hardSync`, `hardReset`/`setPose` and `updateBotPoseFromBestSensor()` bypass it; `hardReset` refills it. ≤ 0 disables. |
 | `maxCorrectionBurst` | `2.0` | Pose-jump guard: inches that may be applied at once from a full bucket. ≤ 0 disables. |
+| `trustTolIn` | `2.0` | Per-sensor reading trust (`chad/util/reading_trust.hpp`, `RclSensor::trust` in [0, 1]). Each fresh sample is judged against the predicted wall: consistent if \|innovation\| ≤ `trustTolIn + trustTolFrac × range`; short beyond that (something in the beam: a game element, a robot); long beyond `maxWallInnovation` (a beam miss). Long inside the gate is neutral (a plausible pose correction). Pair-verified readings are consistent. Frozen while displaced. |
+| `trustTolFrac` | `0.05` | Range-proportional part of the consistent band; 5 % is the V5's rated accuracy past 200 mm. |
+| `trustGraceMs` | `40.0` | Disagreement (ms of real sample spacing, a gap charged ≤ 60 ms) absorbed before trust falls, so one stray sample costs nothing. |
+| `trustRampMs` | `90.0` | Accrual over which trust then falls from 1 to 0. A sensor reading 5 in short at 20 in is excluded on its third sample (~90 ms). |
+| `trustShortSeverityIn` | `8.0` | Short accrual is × (1 + excess / this), at most × 4, so a gross short (a robot 40 in in front) drops the sensor on its first sample, before it can count as displacement evidence. ≤ 0: flat rate. |
+| `trustLongWeight` | `0.25` | Long-beyond-the-gate accrual relative to short: four times slower. |
+| `trustHoldMs` | `150.0` | Unbroken consistent readings required before trust is paid back (hysteresis); any short or long sample restarts it. |
+| `trustRecoverMs` | `300.0` | Time to pay back a full accrual once the hold is met; from 0 a sensor votes again ~250 ms after the obstruction clears, full trust ~360 ms. |
+| `trustFloor` | `0.5` | Below this a sensor does not vote in any tier, recovery included (pair-verified readings excepted), except that a `TooFar` reading votes in recovery: a long reading cannot be an obstruction. Its disagreement still counts as displacement evidence for its first `displaceCycles` distrusted samples (a pose running away from a stalled body looks the same at onset), then stops unless it reads long: a robot parked in front of a sensor can cause at most one recovery, with nothing from that sensor to move toward (~140 ms in `sim/test/rcl_trust.mjs`). ≤ 0 never excludes. `hardReset`/`setPose` and (re)configuring a slot restore full trust. |
+| `rangeWeighting` | `true` | Within a tier, average the surviving votes weighted by `trust / σ(range)²`, σ = max(15 mm, 5 % of range); off: weighted by trust only. One vote per axis (the usual case) is unchanged. |
 
 ### MclTracking
 

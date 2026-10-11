@@ -30,6 +30,27 @@ bool expired(std::uint32_t expiresAtMs, std::uint32_t nowMs) {
 CorrectionLimiter::Config limiterConfig(const RclTracking::Config& c) {
     return {c.maxCorrectionRate, c.maxCorrectionBurst};
 }
+
+ReadingTrust::Config trustConfig(const RclTracking::Config& c) {
+    ReadingTrust::Config t;
+    t.tolIn = c.trustTolIn;
+    t.tolFrac = c.trustTolFrac;
+    t.longTolIn = c.maxWallInnovation;
+    t.graceMs = c.trustGraceMs;
+    t.rampMs = c.trustRampMs;
+    t.shortSeverityIn = c.trustShortSeverityIn;
+    t.longWeight = c.trustLongWeight;
+    t.holdMs = c.trustHoldMs;
+    t.recoverMs = c.trustRecoverMs;
+    t.floor = c.trustFloor;
+    return t;
+}
+
+void resetTrust(RclTracking::RclSensor& s) {
+    s.trustState.reset();
+    s.trust = 1.0f;
+    s.distrustSamples = 0;
+}
 }  // namespace
 
 float RclTracking::intersectLineSegment(float rx, float ry,
@@ -128,6 +149,7 @@ void RclTracking::setSensor(int index, pros::Distance* sensor, const Pose& mount
     mSensors[index].rawMm = -1;
     mSensors[index].heldMs = 0.0f;
     mSensors[index].faulted = false;
+    resetTrust(mSensors[index]);
     mFaultedMask &= ~(1u << index);
     mSampleGen++;
 }
@@ -142,6 +164,7 @@ void RclTracking::configureSensors(const std::array<pros::Distance*, MAX_DISTANC
         mSensors[i].fresh = false;
         mSensors[i].faulted = false;
         mSensors[i].cls = ReadingClass::Invalid;
+        resetTrust(mSensors[i]);
         mDisableUntilMs[i] = 0;
         if (sensors[i] != nullptr) {
             mSensors[i].sensor       = sensors[i];
@@ -562,6 +585,29 @@ void RclTracking::classifyAll() {
     }
 }
 
+void RclTracking::updateTrustLocked(std::uint32_t nowMs) {
+    const ReadingTrust::Config tc = trustConfig(mConfig);
+    for (int i = 0; i < MAX_DISTANCE_SENSORS; i++) {
+        auto& s = mSensors[i];
+        if (s.sensor == nullptr || !s.enabled || !s.fresh || s.faulted) continue;
+        // While displaced the prediction is known wrong, so disagreeing with it
+        // says nothing about the sensor.
+        if (!mDisplaced) {
+            ReadingTrust::Verdict v = ReadingTrust::Verdict::None;
+            // A spanning pair needs no prediction to be right.
+            if (s.pairVerified) {
+                v = ReadingTrust::Verdict::Consistent;
+            } else if (s.cls == ReadingClass::WallHit || s.cls == ReadingClass::Blocked ||
+                       s.cls == ReadingClass::TooFar) {
+                v = ReadingTrust::judge(s.innovationIn, s.readingInch, tc);
+            }
+            s.trust = s.trustState.observe(v, s.innovationIn, s.readingInch, nowMs, tc);
+            s.distrustSamples = s.trust < mConfig.trustFloor ? s.distrustSamples + 1 : 0;
+        }
+        s.valid = isValidReading(i);
+    }
+}
+
 int RclTracking::voteTier(int index) const {
     if (index < 0 || index >= MAX_DISTANCE_SENSORS) return -1;
     const auto& s = mSensors[index];
@@ -575,6 +621,11 @@ int RclTracking::voteTier(int index) const {
     // it outranks the innovation gate that would otherwise throw it away for
     // disagreeing with the pose that is itself the thing in the wrong.
     if (s.pairVerified) return 2;
+    // Repeatedly short of the wall: something is standing in the beam. A long
+    // reading cannot be an obstruction, so while displaced one still votes
+    // (tier 0 below) whatever trust it lost to the pose being wrong.
+    if (s.trust < mConfig.trustFloor &&
+        !(mDisplaced && s.cls == ReadingClass::TooFar)) return -1;
     if (s.cls == ReadingClass::WallHit) return 1;
 
     // Readings the innovation gate rejected. While the pose is known to be
@@ -679,21 +730,24 @@ RclTracking::AxisEstimate RclTracking::solveAxes(bool* keptOut) const {
     }
 
     float xVal[MAX_DISTANCE_SENSORS], yVal[MAX_DISTANCE_SENSORS];
+    float xW[MAX_DISTANCE_SENSORS], yW[MAX_DISTANCE_SENSORS];
     int xIdx[MAX_DISTANCE_SENSORS], yIdx[MAX_DISTANCE_SENSORS];
     int xTier[MAX_DISTANCE_SENSORS], yTier[MAX_DISTANCE_SENSORS];
     int nx = 0, ny = 0;
     int xBest = -1, yBest = -1;
 
     for (int i = 0; i < MAX_DISTANCE_SENSORS; i++) {
-        if (mSensors[i].sensor == nullptr) continue;
+        const auto& s = mSensors[i];
+        if (s.sensor == nullptr) continue;
         const int tier = voteTier(i);
         if (tier < 0) continue;
         auto [type, coord] = getBotCoordFromSensor(i);
+        const float w = readingWeight(s.trust, s.readingInch, mConfig.rangeWeighting);
         if (type == CoordType::X) {
-            xVal[nx] = coord; xIdx[nx] = i; xTier[nx] = tier; nx++;
+            xVal[nx] = coord; xW[nx] = w; xIdx[nx] = i; xTier[nx] = tier; nx++;
             if (tier > xBest) xBest = tier;
         } else if (type == CoordType::Y) {
-            yVal[ny] = coord; yIdx[ny] = i; yTier[ny] = tier; ny++;
+            yVal[ny] = coord; yW[ny] = w; yIdx[ny] = i; yTier[ny] = tier; ny++;
             if (tier > yBest) yBest = tier;
         }
     }
@@ -712,18 +766,23 @@ RclTracking::AxisEstimate RclTracking::solveAxes(bool* keptOut) const {
     // like a slightly-off pose rather than a rejected sample. Two readings that
     // disagree leave the axis with nothing, which is the honest answer -- one
     // of them is wrong and this cannot tell which.
-    auto reduce = [&](float* val, int* idx, int* tier, int n, int best,
+    //
+    // The survivors are averaged by weight (trust, and the sensor's rated
+    // accuracy at its range), so a near beam outweighs a far one and a sensor
+    // on its way out counts for less before it is dropped.
+    auto reduce = [&](float* val, float* wt, int* idx, int* tier, int n, int best,
                       float& outVal, int& outCount, float& outSpread) {
         outCount = 0;
         outSpread = 0.0f;
         if (n <= 0 || best < 0) return;
 
         float keep[MAX_DISTANCE_SENSORS];
+        float keepW[MAX_DISTANCE_SENSORS];
         int keepIdx[MAX_DISTANCE_SENSORS];
         int nk = 0;
         for (int k = 0; k < n; k++) {
             if (tier[k] != best) continue;
-            keep[nk] = val[k]; keepIdx[nk] = idx[k]; nk++;
+            keep[nk] = val[k]; keepW[nk] = wt[k]; keepIdx[nk] = idx[k]; nk++;
         }
         if (nk <= 0) return;
 
@@ -734,20 +793,19 @@ RclTracking::AxisEstimate RclTracking::solveAxes(bool* keptOut) const {
             int w = 0;
             for (int k = 0; k < nk; k++) {
                 if (std::fabs(keep[k] - med) > mConfig.axisAgreeIn) continue;
-                keep[w] = keep[k]; keepIdx[w] = keepIdx[k]; w++;
+                keep[w] = keep[k]; keepW[w] = keepW[k]; keepIdx[w] = keepIdx[k]; w++;
             }
             nk = w;
         }
         if (nk <= 0) return;
 
-        float sum = 0.0f, lo = keep[0], hi = keep[0];
+        float lo = keep[0], hi = keep[0];
         for (int k = 0; k < nk; k++) {
-            sum += keep[k];
             lo = std::fmin(lo, keep[k]);
             hi = std::fmax(hi, keep[k]);
             if (keptOut != nullptr) keptOut[keepIdx[k]] = true;
         }
-        outVal = sum / static_cast<float>(nk);
+        outVal = weightedMean(keep, keepW, nk);
         outCount = nk;
         outSpread = hi - lo;
     };
@@ -756,8 +814,8 @@ RclTracking::AxisEstimate RclTracking::solveAxes(bool* keptOut) const {
     const Pose fallback = mOdom.getPose();
     est.x = fallback.x;
     est.y = fallback.y;
-    reduce(xVal, xIdx, xTier, nx, xBest, est.x, est.xCount, est.xSpread);
-    reduce(yVal, yIdx, yTier, ny, yBest, est.y, est.yCount, est.ySpread);
+    reduce(xVal, xW, xIdx, xTier, nx, xBest, est.x, est.xCount, est.xSpread);
+    reduce(yVal, yW, yIdx, yTier, ny, yBest, est.y, est.yCount, est.ySpread);
     est.xPaired = (xBest == 2 && est.xCount > 0);
     est.yPaired = (yBest == 2 && est.yCount > 0);
 
@@ -875,6 +933,7 @@ void RclTracking::update() {
     }
 
     updateSensorPoses(samplePose);
+    updateTrustLocked(now);
 
     // Displacement evidence. Only cycles that saw new samples are counted, so
     // the recovery timers are measured in readings rather than in loop ticks.
@@ -882,6 +941,17 @@ void RclTracking::update() {
     for (int i = 0; i < MAX_DISTANCE_SENSORS; i++) {
         const auto& s = mSensors[i];
         if (s.sensor == nullptr || !s.enabled) continue;
+        // A sensor distrusted for longer than it takes to declare a
+        // displacement has something parked in front of it; its disagreement is
+        // about that, not the pose. The onset still counts for displaceCycles
+        // of its samples: one gross miss is also what a pose running away from
+        // a stalled body looks like. Trust keeps the reading itself out of
+        // every vote, recovery included, so the most a parked robot can cause
+        // is one recovery that has nothing from that sensor to move toward.
+        // Only a short reading can be an obstruction: a sensor distrusted for
+        // reading long is the pose disagreeing with a wall, and still testifies.
+        if (s.distrustSamples > mConfig.displaceCycles &&
+            s.cls != ReadingClass::TooFar) continue;
         // Scale with how badly the reading misses. A beam 9 in out on an 8 in
         // gate is noise at the edge of a threshold; one 125 in out is the pose
         // being somewhere else entirely, and waiting for a second sensor to
@@ -1163,6 +1233,8 @@ void RclTracking::hardReset(const Pose& pose) {
         mSensors[i].outlier = false;
         mSensors[i].cls = ReadingClass::Invalid;
         mSensors[i].innovationIn = 0.0f;
+        // Distrust was disagreement with the pose just replaced.
+        resetTrust(mSensors[i]);
     }
 }
 

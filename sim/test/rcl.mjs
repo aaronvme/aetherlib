@@ -171,13 +171,15 @@ console.log('\n== the gate, with a robot working the far half ==');
 // gate passes it to the ordinary innovation test like any other short reading.
 // So the invariant worth asserting is the narrow one -- nothing that landed
 // over there ever votes -- and then whether the pose survived regardless.
-const gateRun = (gateOn) => {
+const gateRun = (gateOn, withOpp = true) => {
   begin(30, -50, 90);
-  const opp = api.actorAdd(58, -50, 180, 1);
-  api.actorPathAdd(opp, 58, -57);
-  api.actorPathAdd(opp, 58, -41);
-  api.actorFlags(opp, 1, 1, 0, 1);      // on, patrolling, open path, facing
-  api.actorSpeed(opp, 30);
+  if (withOpp) {
+    const opp = api.actorAdd(58, -50, 180, 1);
+    api.actorPathAdd(opp, 58, -57);
+    api.actorPathAdd(opp, 58, -41);
+    api.actorFlags(opp, 1, 1, 0, 1);    // on, patrolling, open path, facing
+    api.actorSpeed(opp, 30);
+  }
   api.setFar(gateOn ? 1 : 0, 0);
   // Settle before counting. Arming is not instant: update() returns early when
   // no sensor has a new sample, so for up to one device period the per-sensor
@@ -186,7 +188,7 @@ const gateRun = (gateOn) => {
   // as leaks, and the steady state is what the question is about.
   run(300);
 
-  let worst = 0, voted = 0, cycles = 0, leaked = 0, farVoted = 0;
+  let worst = 0, voted = 0, cycles = 0, leaked = 0, farVoted = 0, oppVoted = 0;
   for (let i = 0; i < 1200; i++) {
     api.step(5);
     const s = st();
@@ -205,22 +207,40 @@ const gateRun = (gateOn) => {
     const over = ex + ey > 0;                 // beyond the NW-SE diagonal
     if (over && f.rclValid) leaked++;
     if (over) farVoted++;
+    // Short of the east wall: the return came off the opponent.
+    if (f.rclValid && ex < 69.0) oppVoted++;
   }
   api.actorClear();
   api.setFar(0, 0);
-  return { worst, frac: voted / cycles, leaked, farFrac: farVoted / cycles };
+  return { worst, frac: voted / cycles, leaked, farFrac: farVoted / cycles, oppVoted };
 };
 
+// The opponent first. Reading trust drops a beam that keeps reading short of
+// its wall, so with the gate off the opponent's own returns already never
+// vote, and the wall glimpses between its passes do not earn the beam back
+// (hold + rebuild outlasts them). The gate must not make that worse.
 const gateOff = gateRun(false);
 const gateOn = gateRun(true);
-check('with the gate off, returns from over the line are voted',
-      gateOff.leaked > 0,
-      `${gateOff.leaked} cycles voted a far-side return`);
-check('with it on, not one of them is', gateOn.leaked === 0,
+check('with the gate off, no return off the opponent is voted (reading trust)',
+      gateOff.oppVoted === 0,
+      `${gateOff.oppVoted} opponent returns voted, beam voted ${(gateOff.frac * 100).toFixed(0)}%`);
+check('with it on, not one return from over the line is', gateOn.leaked === 0,
       `${gateOn.leaked} leaked of ${(gateOn.farFrac * 100).toFixed(0)}% cycles landing over there`);
-check('which is most of that beam gone',
-      gateOn.frac < gateOff.frac * 0.2,
-      `voted ${(gateOff.frac * 100).toFixed(0)}% off -> ${(gateOn.frac * 100).toFixed(1)}% on`);
+check('and the gate never adds votes', gateOn.frac <= gateOff.frac,
+      `voted ${(gateOff.frac * 100).toFixed(1)}% off -> ${(gateOn.frac * 100).toFixed(1)}% on`);
+
+// What the gate adds over trust: a far half that looks clean right now. The
+// east wall is across the line from here, so with nobody over there the beam
+// is trusted and votes, and only the gate keeps a robot that drives in later
+// from being ranged before trust has seen it disagree.
+{
+  const clearOff = gateRun(false, false);
+  const clearOn = gateRun(true, false);
+  check('on an empty far half the gate is what drops the returns from over there',
+        clearOff.leaked > 0 && clearOn.leaked === 0 && clearOn.frac < clearOff.frac * 0.2,
+        `voted ${(clearOff.frac * 100).toFixed(0)}% off -> ${(clearOn.frac * 100).toFixed(1)}% on, ` +
+        `${clearOff.leaked} far-side votes off, ${clearOn.leaked} on`);
+}
 // What the gate is NOT: the thing keeping the pose. A robot ranged on its near
 // face returns a point on our own half whatever the gate says, and it is the
 // innovation test that throws that away.

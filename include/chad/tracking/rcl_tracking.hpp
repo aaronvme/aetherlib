@@ -11,6 +11,7 @@
 
 #include "chad/tracking/odom_tracking.hpp"
 #include "chad/util/correction_limiter.hpp"
+#include "chad/util/reading_trust.hpp"
 #include "chad/util/util.hpp"
 
 namespace chad {
@@ -67,6 +68,12 @@ public:
         bool  faulted{false};
         /// Mount offset rotated into the field at sample time: world - robot.
         float mountWorldX{0.0f}, mountWorldY{0.0f};
+        /// Agreement with the predicted wall over recent samples, [0, 1]; see
+        /// Config::trustFloor. Reset by hardReset() and by (re)configuring the slot.
+        float trust{1.0f};
+        /// Consecutive own samples with trust below Config::trustFloor.
+        int distrustSamples{0};
+        ReadingTrust trustState;
     };
 
     /// lifetimeMs 0 = permanent. Expiry is a pros::millis() deadline set
@@ -169,6 +176,33 @@ public:
         /// disables the guard.
         float maxCorrectionRate = 30.0f;    // in/s
         float maxCorrectionBurst = 2.0f;    // in
+
+        // --- per-sensor reading trust (chad/util/reading_trust.hpp) --------
+        /// Each fresh sample is judged against the predicted wall: consistent
+        /// inside trustTolIn + trustTolFrac * range, short beyond it (an object
+        /// in the beam), long beyond maxWallInnovation (a beam miss); long
+        /// inside the gate is neutral. Short accrues at full rate times
+        /// 1 + excess / trustShortSeverityIn (at most 4), long at
+        /// trustLongWeight. Trust stays 1 for trustGraceMs of accrual, then
+        /// falls to 0 over trustRampMs; it is paid back only after trustHoldMs
+        /// of unbroken consistent samples, a full accrual per trustRecoverMs.
+        /// A pair-verified reading is consistent. Frozen while displaced: the
+        /// prediction is the thing under suspicion.
+        float trustTolIn = 2.0f;
+        float trustTolFrac = 0.05f;
+        float trustGraceMs = 40.0f;
+        float trustRampMs = 90.0f;
+        float trustShortSeverityIn = 8.0f;
+        float trustLongWeight = 0.25f;
+        float trustHoldMs = 150.0f;
+        float trustRecoverMs = 300.0f;
+        /// A sensor under this neither votes (unless pair-verified) nor, once
+        /// distrusted past displaceCycles, counts as displacement evidence
+        /// unless it reads long (TooFar). <= 0 never excludes.
+        float trustFloor = 0.5f;
+        /// Within a tier, average votes weighted by trust / sigma(range)^2,
+        /// sigma the V5 rating (15 mm under 200 mm, 5 % beyond). Off: by trust.
+        bool rangeWeighting = true;
 
         // --- far-side gate ------------------------------------------------
         /// Ignore returns from beyond a half-plane -- the auton line. During
@@ -345,6 +379,10 @@ private:
 
     /// Classify every populated slot and record the result on the sensor.
     void classifyAll();
+
+    /// Fold this cycle's fresh, classified samples into each sensor's trust
+    /// and refresh `valid` to match. update() only: one sample, one judgement.
+    void updateTrustLocked(std::uint32_t nowMs);
 
     /// How much a reading is worth this cycle: 2 = confirmed by its opposite
     /// number, 1 = a clean wall hit, 0 = rejected by the innovation gate but
