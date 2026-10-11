@@ -988,7 +988,12 @@ void RclTracking::update() {
     // error are the other axis, or a beam reset that scores against the map.
     if (evidence >= 2) {
         mDisplaceCycles++;
-        if (mDisplaceCycles >= mConfig.displaceCycles) mDisplaced = true;
+        if (!mDisplaced && mDisplaceCycles >= mConfig.displaceCycles) {
+            mDisplaced = true;
+            // Clean cycles counted before the onset would otherwise clear the
+            // displacement in this same call.
+            mCleanCycles = 0;
+        }
     } else {
         mDisplaceCycles = 0;
     }
@@ -1066,7 +1071,9 @@ void RclTracking::update() {
         if (est.yCount < mConfig.recoveryMinVotes && !est.yPaired) mYMeasured = false;
     }
 
-    if (mConfig.autoSync && (mXMeasured || mYMeasured)) {
+    const bool ownsPose =
+        mConfig.autoSync || (mDisplaced && mConfig.syncWhileDisplaced);
+    if (ownsPose && (mXMeasured || mYMeasured)) {
         syncUpdateLocked();
     } else {
         mLastSyncStep = 0.0f;

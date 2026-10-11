@@ -672,6 +672,7 @@ one axis only.
 | `angleTolerance` | `10.0` | Ray must be within this of a wall axis |
 | `confidenceThreshold` | `30` | Min V5 sensor confidence (0–63). `config.cpp` ships `20`. |
 | `autoSync` | `true` | |
+| `syncWhileDisplaced` | `true` | With `autoSync` off (the EKF owns the pose), a declared displacement still syncs odom, through the pose-jump guard, until it clears; an attached `EkfTracking` follows odom meanwhile and resumes with σ ≥ 2 in. Without it nothing acts on the verdict and a shove the EKF gates out is never undone. |
 | `useAccumulation` | `false` | |
 | `maxCorrectionRate` | `30.0` | Pose-jump guard, in/s. Every automatic sync (normal and recovery) passes a token bucket (`chad/util/correction_limiter.hpp`): over any T seconds the pose moves at most `maxCorrectionBurst + maxCorrectionRate × T`. Normal syncs (≤ `maxSyncRate`) never reach it; recovery, otherwise up to `maxSyncDist` per reading (~150 in/s), glides instead of jumping. `hardSync`, `hardReset`/`setPose` and `updateBotPoseFromBestSensor()` bypass it; `hardReset` refills it. ≤ 0 disables. |
 | `maxCorrectionBurst` | `2.0` | Pose-jump guard: inches that may be applied at once from a full bucket. ≤ 0 disables. |
@@ -786,6 +787,7 @@ Uncertainty uncertainty() const;   // sigmaX, sigmaY, sigmaTheta
 void setPose(const Pose&);
 void setPose(const Pose&, float posSigma, float thetaSigma);
 void attachMcl(MclTracking*);
+void attachRcl(const RclTracking*);   // Chassis attaches both
 int  beamsUsed() const;
 int  mclRejectStreak() const;
 int  relocateCount() const;

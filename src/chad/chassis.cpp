@@ -30,6 +30,7 @@ Chassis::Chassis(Drivetrain& drivetrain, const OdomSensors& sensors,
     mMcl.setSensorMounts(config.sensorMounts);
     mEkf.setSensorMounts(config.sensorMounts);
     mEkf.attachMcl(&mMcl);
+    mEkf.attachRcl(&mRcl);
 
     mRcl.configureSensors(config.distanceSensors, config.sensorMounts);
 

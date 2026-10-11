@@ -119,6 +119,11 @@ public:
         float obstacleConeFrac = 0.22f;
         float obstacleRangeTol = 6.0f;
         bool autoSync = true;
+        /// With autoSync off (the EKF owns the pose), a declared displacement
+        /// still moves odom, through the pose-jump guard, until it clears; an
+        /// attached EKF follows odom meanwhile. Nothing else acts on the
+        /// verdict, so without this a shove the EKF gates out is never undone.
+        bool syncWhileDisplaced = true;
         bool useAccumulation = false;
 
         // --- sampling validity -------------------------------------------

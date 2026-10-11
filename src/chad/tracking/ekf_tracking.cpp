@@ -6,11 +6,16 @@
 #include <mutex>
 
 #include "chad/drivetrain.hpp"
+#include "chad/tracking/rcl_tracking.hpp"
 #include "pros/error.h"
 
 namespace chad {
 namespace {
 constexpr float kWall = Field::FIELD_HALF_WALL;
+// Position sigma floor while RCL owns the pose. RCL clears a displacement once
+// odom is within its maxSyncDist (5 in) of its own fix; this keeps the range
+// gate open to that residual when the EKF takes back over.
+constexpr float kRclHandbackSigmaIn = 2.0f;
 
 void mat3Mul(const float* A, const float* B, float* out) {
     for (int r = 0; r < 3; r++) {
@@ -497,17 +502,37 @@ void EkfTracking::updateMcl() {
 Pose EkfTracking::update() {
     const OdomDelta delta = mOdom.consumeDelta(OdomTracking::CHANNEL_EKF);
 
+    // RCL recovering a displacement moves odom itself, rate limited. Its
+    // syncs never reach the delta channel, so follow odom instead of predicting
+    // and stay off it; pulling back would undo the recovery.
+    const bool rclOwns = mRcl != nullptr && mRcl->isTracking() &&
+                         mRcl->isDisplaced() && mRcl->config().syncWhileDisplaced;
+
     Pose fused;
     {
         std::lock_guard<pros::Mutex> lock(mMutex);
         predict(delta);
-        if (mConfig.useImuHeading) updateImuHeading();
-        if (mConfig.useRangeUpdates) updateRanges();
-        if (mConfig.useMclUpdates) updateMcl();
+        if (rclOwns) {
+            const Pose odom = mOdom.getPose();
+            mState[0] = odom.x;
+            mState[1] = odom.y;
+            const float floorVar = kRclHandbackSigmaIn * kRclHandbackSigmaIn;
+            mP[0] = std::max(mP[0], floorVar);
+            mP[4] = std::max(mP[4], floorVar);
+            mP[1] = mP[3] = 0.0f;
+            mP[2] = mP[6] = 0.0f;
+            mP[5] = mP[7] = 0.0f;
+            mMclRejectStreak = 0;
+            if (mConfig.useImuHeading) updateImuHeading();
+        } else {
+            if (mConfig.useImuHeading) updateImuHeading();
+            if (mConfig.useRangeUpdates) updateRanges();
+            if (mConfig.useMclUpdates) updateMcl();
+        }
         fused = {mState[0], mState[1], mState[2]};
     }
 
-    if (mConfig.autoSync) {
+    if (mConfig.autoSync && !rclOwns) {
         const Pose odomPose = mOdom.getPose();
         if (mSnapNextSync) {
             mOdom.syncPose(fused);

@@ -12,6 +12,8 @@
 #include "chad/util/util.hpp"
 
 namespace chad {
+class RclTracking;
+
 class EkfTracking {
 public:
     static constexpr int SENSOR_COUNT = MAX_DISTANCE_SENSORS;
@@ -89,6 +91,11 @@ public:
 
     void attachMcl(MclTracking* mcl) { mMcl = mcl; }
 
+    /// While the attached RCL is recovering a displacement (and its
+    /// syncWhileDisplaced is on) it moves odom itself; the EKF follows odom
+    /// and stops syncing, then resumes with a widened covariance.
+    void attachRcl(const RclTracking* rcl) { mRcl = rcl; }
+
     void setSensorMounts(const std::array<Pose, SENSOR_COUNT>& mounts);
     void setDistanceSensors(const std::array<pros::Distance*, SENSOR_COUNT>& sensors);
 
@@ -147,6 +154,7 @@ private:
     Config mConfig;
     OdomTracking& mOdom;
     MclTracking* mMcl{nullptr};
+    const RclTracking* mRcl{nullptr};
     std::array<pros::Distance*, SENSOR_COUNT> mDistanceSensors;
     const std::vector<MclTracking::CircleObstacle>* mCircleObstacles{nullptr};
 
