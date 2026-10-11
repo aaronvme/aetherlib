@@ -28,6 +28,8 @@ struct TurntoHeadingParams {
     float maxSpeed{127.0f};
     float minSpeed{0.0f};
     float targetTolerance{-1.0f};
+    // degrees of heading error left at which the turn hands off; 0 = off
+    float earlyExitRange{0.0f};
 };
 
 struct TurnToPointParams {
@@ -37,6 +39,8 @@ struct TurnToPointParams {
     float maxSpeed{127.0f};
     float minSpeed{0.0f};
     float targetTolerance{-1.0f};
+    // degrees of heading error left at which the turn hands off; 0 = off
+    float earlyExitRange{0.0f};
     float offset{0.0f};
 };
 

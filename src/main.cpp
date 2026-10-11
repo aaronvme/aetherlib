@@ -19,11 +19,9 @@ void initialize() {
     startTempWarning(master, {&leftMotors, &rightMotors});
 
     
-    selector.registerAuton("Red 3 Pin", autonRed3Pin);
+
+    selector.registerAuton("One Field Two Wall", awp);
     selector.registerAuton("None", [] {});
-    selector.registerAuton("Blue 3 Pin", autonBlue3Pin);
-    selector.registerAuton("Skills", autonSkills);
-    selector.registerAuton("UNc", autonTemp);
     selector.init();
 }
 
@@ -57,8 +55,9 @@ void opcontrol() {
     stopLeftovers();
     chassis.setMirror(FieldMirror::None);
     clearAutonDisableLine();
+
+    chassis.setPose({-63.5, -7.5, vexToStdRad(0)});
     chassis.startTracking();
-    // chassis.setPose({-55, 0, vexToStdRad(270)});
     clawSetAutoGrab(false);
     chassis.setBrakeMode(pros::E_MOTOR_BRAKE_BRAKE);
     // autonProbeGeometry();      // opposing-pair sums vs map

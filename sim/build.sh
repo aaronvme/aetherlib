@@ -11,6 +11,28 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 EMSDK="${EMSDK:-$HOME/emsdk}"
+
+# A Python that actually runs. Each candidate is run, not just looked up: on
+# Windows python3 and python usually resolve first to the Microsoft Store
+# placeholder, which exists, prints "Python was not found" and fails. emsdk's
+# bundled one comes first; type -ap lists every match on PATH after it, so a
+# real install further down still counts.
+PY=""
+for cand in "$EMSDK"/python/*/python.exe "$EMSDK"/python/*/bin/python3 \
+            $(type -ap python3 python py 2>/dev/null); do
+    [ -e "$cand" ] || command -v "$cand" >/dev/null 2>&1 || continue
+    if "$cand" -c "import sys; sys.exit(0 if sys.version_info >= (3, 6) else 1)" \
+            >/dev/null 2>&1; then
+        PY="$cand"
+        break
+    fi
+done
+# emsdk_env.sh and em++ both run Python, and their own lookup looks for the
+# bundled one at a Linux path and then falls back to that same placeholder.
+if [ -n "$PY" ] && [ -z "${EMSDK_PYTHON:-}" ]; then
+    export EMSDK_PYTHON="$PY"
+fi
+
 if ! command -v em++ >/dev/null 2>&1; then
     if [ -f "$EMSDK/emsdk_env.sh" ]; then
         # shellcheck disable=SC1091
@@ -74,12 +96,12 @@ mkdir -p sim/web
 
 # The front end draws a compiled auton's route by parsing the source it was
 # built from, so emit that next to the wasm and they cannot drift.
-if command -v python3 >/dev/null 2>&1; then
-    python3 sim/auton_sources.py
-elif command -v python >/dev/null 2>&1; then
-    python sim/auton_sources.py
+if [ -n "$PY" ]; then
+    "$PY" sim/auton_sources.py
 else
-    echo "warning: no python, compiled autons will have no planned path" >&2
+    echo "warning: no working python, compiled autons will have no planned path" >&2
+    echo "  (on Windows: Settings > Apps > Advanced app settings > App execution" >&2
+    echo "   aliases, turn off python.exe and python3.exe, or install Python)" >&2
 fi
 
 echo "building ${#SOURCES[@]} sources -> $OUT ($MODE)"

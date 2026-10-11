@@ -413,8 +413,8 @@ void Chassis::executeCurrentMotion() {
         float latLimit = 127.0f;
         float angLimit = 127.0f;
         // Speed floors and the early-exit band, filled in per motion type.
-        // remainingErr is negative for motions that have no distance to the
-        // target to measure (turns).
+        // remainingErr is inches, or degrees for turns; left negative,
+        // the early exit never fires.
         float latFloor = 0.0f;
         float angFloor = 0.0f;
         float remainingErr = -1.0f;
@@ -483,6 +483,7 @@ void Chassis::executeCurrentMotion() {
         case MotionType::Heading: {
             angLimit = req.turnHeadingParams.maxSpeed;
             angFloor = req.turnHeadingParams.minSpeed;
+            earlyExit = req.turnHeadingParams.earlyExitRange;
             float rawErrRad = angleDiffRad(pose.theta, req.targetHeadingRad);
 
             float headingErrRad = resolveTurnError(rawErrRad, req.turnHeadingParams.direction);
@@ -491,12 +492,14 @@ void Chassis::executeCurrentMotion() {
             if (std::fabs(rawErrRad) < tolRad) headingErrRad = rawErrRad;
             angularOut = mAngularPID.update(headingErrRad);
             lateralOut = 0;
+            remainingErr = radToDeg(std::fabs(headingErrRad));
             settled = std::fabs(rawErrRad) < tolRad;
             break;
         }
         case MotionType::TurnPoint: {
             angLimit = req.turnPointParams.maxSpeed;
             angFloor = req.turnPointParams.minSpeed;
+            earlyExit = req.turnPointParams.earlyExitRange;
             const float faceOffset = req.turnPointParams.offset +
                 (req.turnPointParams.forwards ? 0.0f : 180.0f);
             float rawErrRad = headingToPointOffset(pose, req.targetX, req.targetY,
@@ -506,6 +509,9 @@ void Chassis::executeCurrentMotion() {
             if (std::fabs(rawErrRad) < tolRad) headingErrRad = rawErrRad;
             angularOut = mAngularPID.update(headingErrRad);
             lateralOut = 0;
+            // Degrees, and the way the turn is forced to go: a CW turn that
+            // starts just past the target still has most of a circle left.
+            remainingErr = radToDeg(std::fabs(headingErrRad));
             settled = std::fabs(rawErrRad) < tolRad;
             break;
         }

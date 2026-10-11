@@ -40,6 +40,11 @@ void autonRed3Pin();
 void autonRed3PinFar();
 void autonTemp();
 
-void autonBlue3Pin();
-void autonBlue3PinFar();
+void awp();
+void awpFar();
+
+
+
+
+
 }

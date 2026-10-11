@@ -419,7 +419,7 @@ console.log('\n== the gate keeps the half each routine starts in ==');
 // a routine kills its fiber without unwinding it, so runMirrored() never puts
 // the mirror back and every later setPose would be reflected.
 {
-  const order = ['Red 3 Pin', 'UNc', 'Red 3 Pin Far', 'Blue 3 Pin', 'Blue 3 Pin Far'];
+  const order = ['Red 3 Pin', 'UNc', 'Red 3 Pin Far'];
   const index = {};
   for (let i = 0; i < api.autonCount(); i++) index[api.autonName(i)] = i;
   const starts = [[0, 0], [40, 40], [-40, -40]];

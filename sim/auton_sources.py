@@ -18,8 +18,21 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 AUTONS = os.path.join(ROOT, "src", "gamespecific", "autons")
 DEFAULT_OUT = os.path.join(ROOT, "sim", "web", "auton_sources.js")
 
-# `void autonName() {`, at any indentation.
-SIGNATURE = re.compile(r"^[ \t]*void[ \t]+(auton\w*)[ \t]*\([ \t]*(?:void)?[ \t]*\)[ \t]*\{",
+BRIDGE = os.path.join(ROOT, "sim", "bridge", "bridge.cpp")
+
+
+def bridge_symbols():
+    """The symbols the bridge's dropdown names. A routine called something
+    other than auton* -- oneFieldTwoWall -- is still one the front end asks
+    for, so the prefix alone would leave it with nothing to draw."""
+    with open(BRIDGE, "r", encoding="utf-8", errors="replace") as fh:
+        text = fh.read()
+    return sorted(set(re.findall(r"CHAD_AUTON\s*\(\s*\"[^\"]*\"\s*,\s*(\w+)\s*\)", text)))
+
+
+# `void autonName() {`, or any routine the bridge lists, at any indentation.
+SIGNATURE = re.compile(r"^[ \t]*void[ \t]+(auton\w*|%s)[ \t]*\([ \t]*(?:void)?[ \t]*\)[ \t]*\{"
+                       % "|".join(map(re.escape, bridge_symbols()) or ["auton\\w*"]),
                        re.MULTILINE)
 
 # `void autonBlue3Pin() { reflect(autonRed3Pin); }` -- the whole body. A mirror

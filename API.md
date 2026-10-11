@@ -220,12 +220,14 @@ struct TurntoHeadingParams {
     TurnDirection direction{TurnDirection::SHORTEST};
     float maxSpeed{127}, minSpeed{0};
     float targetTolerance{-1.0};     // VEX degrees, negative = ChassisConfig
+    float earlyExitRange{0.0};       // VEX degrees of error left; 0 = off
 };
 
 struct TurnToPointParams {           // + offset
     TurnDirection direction{TurnDirection::SHORTEST};
     float maxSpeed{127}, minSpeed{0};
     float targetTolerance{-1.0};
+    float earlyExitRange{0.0};       // VEX degrees of error left; 0 = off
     float offset{0.0};               // angular offset, VEX degrees
 };
 

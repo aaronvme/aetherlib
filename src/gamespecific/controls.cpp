@@ -6,16 +6,18 @@
 #include <atomic>
 #include <cmath>
 #include <cstdarg>
+#include <cstdint>
 #include <cstdio>
 
+#include "pros/error.h"
 #include "pros/misc.hpp"
 #include "pros/rtos.hpp"
 
 namespace chad {
 namespace {
-constexpr double kLiftManualUp   = 100.0;
-constexpr double kLiftManualDown = 80.0;    // gravity is already helping
-constexpr double kLiftMacroSpeed = 100.0;
+constexpr double kLiftManualUp   = 127.0;
+constexpr double kLiftManualDown = 127.0;    // gravity is already helping
+constexpr double kLiftMacroSpeed = 127.0;
 constexpr double kLiftMacroTimeoutMs = 2500.0;
 }
 
@@ -64,14 +66,21 @@ void startPoseTelemetry() {
             }
             pros::delay(250);
 
-            const double grabIn = clawDistance();
-            const char* mode = clawAutoGrab() ? "ON " : "off";
-            if (std::isfinite(grabIn)) {
-                master.print(2, 0, "%-15.15s",
-                             lineBuf("grab %s d%.1f", mode, grabIn));
-            } else {
-                master.print(2, 0, "%-15.15s", lineBuf("grab %s d--", mode));
+            // Whole inches from the RCL sensors, front/left/back/right. "--"
+            // is an unplugged sensor (PROS_ERR) or no return (past 2000 mm).
+            char dist[4][4];
+            pros::Distance* sensors[4] = {&front_dist, &left_dist, &back_dist, &right_dist};
+            for (int i = 0; i < 4; i++) {
+                const std::int32_t mm = sensors[i]->get();
+                if (mm == PROS_ERR || mm < 0 || mm > 2000) {
+                    std::snprintf(dist[i], sizeof(dist[i]), "--");
+                } else {
+                    std::snprintf(dist[i], sizeof(dist[i]), "%d",
+                                  static_cast<int>(std::lround(mm * MM_TO_INCH)));
+                }
             }
+            master.print(2, 0, "%-15.15s", lineBuf("F%s L%s B%s R%s",
+                                                    dist[0], dist[1], dist[2], dist[3]));
             pros::delay(250);
         }
     }, "PoseTelemetry");

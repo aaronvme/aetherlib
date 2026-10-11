@@ -151,7 +151,7 @@ struct AutonEntry { const char* name; const char* symbol; void (*fn)(); };
 
 void autonNone() {}
 
-// The first five mirror src/main.cpp exactly, so an index here is the same
+// The first two mirror src/main.cpp exactly, so an index here is the same
 // routine the brain's selector has at that index. Anything after them is sim
 // only, appended rather than interleaved so that stays true.
 //
@@ -159,14 +159,13 @@ void autonNone() {}
 // sim has not compiled since, and nothing said so because the one gate that
 // builds it was not being run.
 const AutonEntry kAutons[] = {
-    CHAD_AUTON("Red 3 Pin",     autonRed3Pin),
+    CHAD_AUTON("One Field Two Wall", oneFieldTwoWall),
     { "None", "autonNone", autonNone },
-    CHAD_AUTON("Blue 3 Pin",    autonBlue3Pin),
+
+    CHAD_AUTON("Red 3 Pin",     autonRed3Pin),
     CHAD_AUTON("Skills",        autonSkills),
     CHAD_AUTON("UNc",           autonTemp),
-
     CHAD_AUTON("Red 3 Pin Far", autonRed3PinFar),
-    CHAD_AUTON("Blue 3 Pin Far", autonBlue3PinFar),
     CHAD_AUTON("Example",       autonExample),
 };
 constexpr int kAutonCount = static_cast<int>(sizeof(kAutons) / sizeof(kAutons[0]));
