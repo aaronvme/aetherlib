@@ -21,7 +21,8 @@ void initialize() {
 
     
 
-    selector.registerAuton("One Field Two Wall", awp);
+    selector.registerAuton("AWP", awp);
+    selector.registerAuton("AWP Farside", awpFar);
     selector.registerAuton("None", [] {});
     selector.init();
 }
@@ -36,6 +37,7 @@ static void stopLeftovers() {
 }
 
 void disabled() {
+    liftMotor.set_brake_mode(pros::E_MOTOR_BRAKE_COAST);
     stopLeftovers();
 }
 
@@ -58,7 +60,7 @@ void opcontrol() {
     stopLeftovers();
     chassis.setMirror(FieldMirror::None);
     clearAutonDisableLine();
-
+    liftMotor.set_brake_mode(pros::E_MOTOR_BRAKE_HOLD);
     chassis.setPose({-63.5, -7.5, vexToStdRad(0)});
     chassis.startTracking();
     clawSetAutoGrab(false);
