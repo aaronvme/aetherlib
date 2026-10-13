@@ -2,6 +2,7 @@
 #include "gamespecific/config.hpp"
 #include "gamespecific/lift.hpp"
 #include "gamespecific/claw.hpp"
+#include "gamespecific/sidetoggle.hpp"
 
 #include <atomic>
 #include <cmath>
@@ -133,11 +134,20 @@ void driverControl() {
         else if (gripHeld) clawOpen();
         gripHeld = gripNow;
 
-        if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_R2)) {
+        // Hold R2 to spin both side toggles forward; release holds them.
+        sideToggleManual(Side::Both,
+                         master.get_digital(pros::E_CONTROLLER_DIGITAL_R2)
+                             ? kSideToggleManualPower : 0.0);
+        // Up spins both forward to the next half-turn index; R2 takes over from it.
+        if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_UP)) {
+            sideToggleHome(Side::Both, false, 0, kSideToggleDriverHomePower);
+        }
+
+        if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_X)) {
             autoGrabToggled = !autoGrabToggled;
             master.rumble(autoGrabToggled ? ".." : ".");
         }
-        // Holding A turns auto-grab on; letting go returns to R2's setting.
+        // Holding A turns auto-grab on; letting go returns to X's setting.
         clawSetAutoGrab(autoGrabToggled ||
                         master.get_digital(pros::E_CONTROLLER_DIGITAL_A));
 

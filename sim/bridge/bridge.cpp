@@ -28,6 +28,7 @@
 #include "gamespecific/config.hpp"
 #include "gamespecific/controls.hpp"
 #include "gamespecific/lift.hpp"
+#include "gamespecific/sidetoggle.hpp"
 
 namespace {
 
@@ -160,9 +161,10 @@ void autonNone() {}
 // sim has not compiled since, and nothing said so because the one gate that
 // builds it was not being run.
 const AutonEntry kAutons[] = {
-    CHAD_AUTON("One Field Two Wall", oneFieldTwoWall),
+    CHAD_AUTON("One Field Two Wall", awp),
     { "None", "autonNone", autonNone },
 
+    CHAD_AUTON("AWP Far",       awpFar),
     CHAD_AUTON("Red 3 Pin",     autonRed3Pin),
     CHAD_AUTON("Skills",        autonSkills),
     CHAD_AUTON("UNc",           autonTemp),
@@ -395,6 +397,7 @@ void sim_init() {
 
     // Odometry only for now; MCL/RCL are opt-in from the UI.
     chad::chassis.odom().startBackgroundOdom();
+    startSideToggle();
 
     sim_tuning_apply();
 }
@@ -437,6 +440,9 @@ void sim_reset(float x, float y, float thetaDeg) {
     chad::chassis.mcl().setSeed(gSeed);
 
     sim::world().resetTo(p);
+    // resetTo zeroed every encoder; rebase the side toggles on that.
+    sideToggleCancel();
+    sideToggleTare();
 
     // Re-baseline odometry against the freshly reset hardware BEFORE setting
     // the pose: reset() re-reads the encoders and IMU and drops whatever delta
@@ -620,6 +626,7 @@ void sim_stop_auton() {
         gRouteTask = sim::kInvalidTask;
     }
     chad::chassis.cancelMotion();
+    sideToggleCancel();
     chad::chassis.setMirror(chad::FieldMirror::None);
     gManualActive = true;
     gManualLeft = gManualRight = gManualLift = 0.0f;
@@ -639,6 +646,40 @@ void sim_set_analog(int channel, int value) {
     pros::sim_input::state(0).analog[channel] = value;
 }
 
+/// Hold (1) or release (0) a master-controller button, PROS digital enum value.
+EMSCRIPTEN_KEEPALIVE
+void sim_set_digital(int button, int pressed) {
+    if (button < 0 || button >= 32) return;
+    pros::sim_input::state(0).digital[button] = (pressed != 0);
+}
+
+/// Side toggles, side 0 left / 1 right / 2 both.
+static Side toggleSide(int side) {
+    return side == 0 ? Side::Left : side == 1 ? Side::Right : Side::Both;
+}
+
+/// maxSpeed out of 127, 0 = full.
+EMSCRIPTEN_KEEPALIVE
+void sim_side_toggle_flip(int side, int flips, double maxSpeed) {
+    sideToggleFlip(toggleSide(side), flips, false, 1000, maxSpeed);
+}
+
+/// Autonomous home, full power.
+EMSCRIPTEN_KEEPALIVE
+void sim_side_toggle_home(int side) {
+    sideToggleHome(toggleSide(side));
+}
+
+EMSCRIPTEN_KEEPALIVE
+int sim_side_toggle_busy(int side) {
+    return sideToggleBusy(toggleSide(side)) ? 1 : 0;
+}
+
+EMSCRIPTEN_KEEPALIVE
+double sim_side_toggle_position(int side) {
+    return sideTogglePosition(toggleSide(side));
+}
+
 /// Field control switching to driver: what opcontrol() in src/main.cpp does
 /// on entry (main.cpp is not compiled here), then driverControl() on its own
 /// fiber, as PROS runs it.
@@ -650,6 +691,7 @@ void sim_enter_driver() {
 
     chad::chassis.cancelMotion();
     liftCancel();
+    sideToggleCancel();
     chad::chassis.setMirror(chad::FieldMirror::None);
     chad::clearAutonDisableLine();
     gRouteTask = sim::sched().spawn([]() { chad::driverControl(); }, "driver");
@@ -953,6 +995,7 @@ void execRoute() {
                 if (startPhase) {
                     breakTrails();
                     sim::world().resetTo(p);
+                    sideToggleTare();
                 }
                 chad::chassis.setPose(p);
                 chad::chassis.mcl().setPose(p);

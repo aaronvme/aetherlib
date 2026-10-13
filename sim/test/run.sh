@@ -53,6 +53,9 @@ node sim/test/smoke.mjs || fail=1
 # routine unmodified and checks a pin ends up in a goal.
 echo "--- game pieces ---"
 node sim/test/pieces.mjs || fail=1
+# One half turn per flip, one way only; R2 held in driver spins both.
+echo "--- side toggles ---"
+node sim/test/sidetoggle.mjs || fail=1
 # A beam reset off a field axis, or onto a post-lattice alias, must not move
 # the pose; a square-on one still corrects a real offset.
 echo "--- beam reset ---"

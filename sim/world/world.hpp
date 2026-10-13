@@ -209,6 +209,7 @@ private:
     void updateDistanceSensors();
     void updateClawSensor();
     void updateLift(double dtSec);
+    void updateSideToggles(double dtSec);
     void applyRearAligner(double dtSec);
     /// Blocked step (dx, dy, dTheta): the contact response. Returns the applied
     /// translation and rotation; the result never overlaps anything.
@@ -272,6 +273,9 @@ private:
     double mLiftDeg{0.0};
     double mLiftVel{0.0};
     double mPubLiftDeg{0.0};
+
+    // Side-toggle shaft speeds, deg/s in the commanded direction: left, right.
+    double mSideToggleVel[2]{0.0, 0.0};
 
     // Device refresh accumulators (ms).
     double mDistAccum{0.0};

@@ -88,6 +88,19 @@ pros::MotorGroup rightMotors(plus(kRightBluePorts, kRightGreenPort),
 
 pros::MotorGroup liftMotor({20, 15, -14}, pros::v5::MotorGears::green, pros::v5::MotorUnits::degrees);
 
+namespace {
+// Negate a port to reverse that side. Each must turn its toggle the one way
+// it flips; the code never commands reverse.
+constexpr std::int8_t kSideToggleLeftPort  = -7;
+constexpr std::int8_t kSideToggleRightPort = 6;
+}
+
+// 5.5 W motors have a fixed 200 rpm output, which PROS treats as green.
+pros::Motor sideToggleLeft(kSideToggleLeftPort, pros::v5::MotorGears::green,
+                           pros::v5::MotorUnits::degrees);
+pros::Motor sideToggleRight(kSideToggleRightPort, pros::v5::MotorGears::green,
+                            pros::v5::MotorUnits::degrees);
+
 ScaledIMU imu(13, 360.0, 360.0);
 
 pros::adi::Pneumatics claw('A', false, false);

@@ -17,6 +17,9 @@ extern pros::Motor leverMotor;
 
 extern pros::MotorGroup liftMotor;
 
+extern pros::Motor sideToggleLeft;
+extern pros::Motor sideToggleRight;
+
 extern ScaledIMU imu;
 extern pros::Optical frontOptic;
 

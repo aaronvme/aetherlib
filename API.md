@@ -1947,7 +1947,8 @@ namespace below them doesn't depend on any of it.
 ### config.hpp
 
 Declares the globals defined in `config.cpp`: `master`, `leftMotors`,
-`rightMotors`, `frontMotor`, `leverMotor`, `armMotor`, `imu`, `frontOptic`, the
+`rightMotors`, `frontMotor`, `leverMotor`, `armMotor`, `sideToggleLeft`,
+`sideToggleRight`, `imu`, `frontOptic`, the
 pneumatics (`matchLoadGate`, `lift`, `leftDescoreArm`, `trapDoor`, `intakeLift`),
 `front_dist` / `left_dist` / `back_dist` / `right_dist`, `distSensors`,
 `sensorMounts`, `drivetrain`, `odomSensors`, `chassisConfig`, `chassis`,
@@ -1994,6 +1995,76 @@ Gravity feedforward is available but **disabled** — `kG` is `0.0` in
 `lift.cpp`, alongside `MOTOR_DEG_PER_ARM_DEG` and `HORIZONTAL_MOTOR_DEG`. Set all
 three to enable it; `logLift()` logs the PID and gravity terms separately so
 you can see what `kG` is contributing.
+
+### sidetoggle.hpp
+
+One direct-drive 5.5 W motor per side (`sideToggleLeft` and `sideToggleRight`;
+the ports are `kSideToggleLeftPort` and `kSideToggleRightPort` in
+`config.cpp`, and negating one reverses that side). A half turn of the motor is
+one toggle flip, and each side only spins one way.
+
+```cpp
+enum class Side { Left, Right, Both };       // Both applies a call to both sides
+void startSideToggle();                       // initialize(); safe twice
+void sideToggleFlip(Side, int flips = 1, bool wait = false,
+                    std::uint32_t timeoutMs = 1000,
+                    double maxSpeed = 0.0);        // out of 127, 0 = full speed
+void sideToggleHome(Side, bool wait = false, std::uint32_t timeoutMs = 1500,
+                    double maxSpeed = 0.0);
+bool sideToggleBusy(Side);                    // Both: either side busy
+bool sideToggleStalled(Side);                 // Both: either side stalled
+bool sideToggleWait(Side, std::uint32_t timeoutMs = 1000);  // false on timeout or stall
+void sideToggleManual(Side, double power);    // 0 releases and holds
+void sideToggleCancel();                      // stopLeftovers() calls it
+void sideToggleTare();
+double sideTogglePosition(Side);              // Both: mean of the two
+void sideToggleSetTelemetry(std::function<void(const SideToggleSample&)>);
+```
+
+A 10 ms task owns both sides and runs a `chad::IndexedRotator` each
+(`chad/util/indexed_rotator.hpp`, PROS-free and host-tested). The target is
+`base + steps * 180` with an integer step count, so it never drifts. Queued
+flips add up. The output is clamped to `[0, maxPower]`, so the motor never
+reverses: once it's inside `toleranceDeg` it stops driving and brake HOLD
+holds. A shaft that moves less than `stallMovedDeg` in `stallSec` while short
+of the target is stalled. Output stops, the flip is dropped, and the next flip
+retries it. A jam within `indexSnapDeg` of the target counts as done instead.
+An unplugged motor (non-finite position) outputs 0 and keeps its state.
+
+Home spins forward to the next half-turn index (a multiple of 180 from the
+startup orientation), the shortest way since it only turns one way. It
+replaces any queued flips. Anything up to `indexSnapDeg` past an index (a
+home's own overshoot) counts as there, so pressing it twice does nothing.
+`toleranceDeg` short of one doesn't drive either.
+
+Driver control runs at 50%. Hold R2 to spin both forward at
+`kSideToggleManualPower` (63), and release to hold. Press Up to home both at
+`kSideToggleDriverHomePower` (63). Manual drive drops any flip or home on that
+side. The next flip or home goes forward from where it was left, never back
+over the hand-spun travel. Index 0 is the first good reading after
+`startSideToggle()`, not a motor tare, so a stale encoder can't cause a
+catch-up spin. Autonomous flips and home run at `MAX_POWER` (127).
+
+The gains and tolerances are the constants at the top of
+`src/gamespecific/sidetoggle.cpp` (`kP`, `kI`, `kD`, `MIN_POWER`,
+`MAX_POWER`, `TOLERANCE_DEG`, `INDEX_SNAP_DEG`, `SETTLE_TIME_MS`,
+`STALL_MOVED_DEG`, `STALL_TIME_MS`), next to the two driver powers. The
+library defaults are below.
+
+```cpp
+struct IndexedRotatorConfig {
+    double degPerStep{180.0};
+    PIDGains gains{1.2f, 0.0f, 0.04f};
+    float derivativeFilter{0.5f};
+    float maxPower{127.0f};
+    float minPower{15.0f};
+    double toleranceDeg{2.0};
+    double indexSnapDeg{10.0};
+    float settleSec{0.04f};
+    double stallMovedDeg{3.0};
+    float stallSec{0.25f};
+};
+```
 
 ---
 

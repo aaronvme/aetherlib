@@ -14,6 +14,7 @@ void initialize() {
     registerFieldObstacles();
     startPoseTelemetry();
     startClawWatch();
+    startSideToggle();
     liftMotor.tare_position();
     clawClose();
     startTempWarning(master, {&leftMotors, &rightMotors});
@@ -26,10 +27,12 @@ void initialize() {
 }
 
 // PROS deletes the previous mode's task without unwinding it, so a motion or
-// lift move it started is still running, and its guards never ran.
+// lift move it started is still running, and its guards never ran. The same
+// goes for a side-toggle flip, or R2's manual spin if driver was holding it.
 static void stopLeftovers() {
     chassis.cancelMotion();
     liftCancel();
+    sideToggleCancel();
 }
 
 void disabled() {

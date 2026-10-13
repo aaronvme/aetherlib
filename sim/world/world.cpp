@@ -217,6 +217,7 @@ void World::resetTo(const chad::Pose& pose) {
     mBounceVx = mBounceVy = 0.0;
     mInContact = false;
     mLiftDeg = mLiftVel = mPubLiftDeg = 0.0;
+    mSideToggleVel[0] = mSideToggleVel[1] = 0.0;
     mMotorDegLeft = mMotorDegRight = 0.0;
     mDistAccum = mImuAccum = mEncAccum = 0.0;
     mPodVertIn = mPodHorizIn = mPodThetaRad = 0.0;
@@ -261,6 +262,7 @@ void World::step(double dtMs) {
 
     updateDrive(dt);
     updateLift(dt);
+    updateSideToggles(dt);
 
     // Devices refresh on their own clocks. Between refreshes the bus keeps the
     // previous sample, so library code that polls faster than the hardware sees
@@ -322,6 +324,34 @@ void World::updateLift(double dtSec) {
         m.velocityRpm = (m.reversed ? -mLiftVel : mLiftVel) / 6.0;
     }
     mPubLiftDeg = mLiftDeg;
+}
+
+// ============================================================================
+// Side toggles
+// ============================================================================
+
+// Direct-drive 5.5 W motors, 200 rpm free, unloaded and without stops. With
+// no command, HOLD stops the shaft in a few ms and coast lets it run down.
+void World::updateSideToggles(double dtSec) {
+    constexpr double kFreeDegPerSec = 1200.0;
+    constexpr double kDriveTauMs = 50.0;
+    constexpr double kHoldTauMs = 8.0;
+    constexpr double kCoastTauMs = 100.0;
+    constexpr int kBrakeHold = 2;
+
+    const pros::Motor* motors[2] = {&chad::sideToggleLeft, &chad::sideToggleRight};
+    for (int i = 0; i < 2; ++i) {
+        auto& m = bus().motors[motors[i]->get_port()];
+        const double cmd = m.commandedMv / 12000.0;
+        double tau = kDriveTauMs;
+        if (cmd == 0.0) tau = (m.brakeMode == kBrakeHold) ? kHoldTauMs : kCoastTauMs;
+        double& vel = mSideToggleVel[i];
+        vel += (cmd * kFreeDegPerSec - vel) * (1.0 - std::exp(-dtSec * 1000.0 / tau));
+        // The bus holds the raw sensor; pros::Motor applies the reversal on read.
+        const double dq = vel * dtSec;
+        m.positionDeg += m.reversed ? -dq : dq;
+        m.velocityRpm = (m.reversed ? -vel : vel) / 6.0;
+    }
 }
 
 // ============================================================================
