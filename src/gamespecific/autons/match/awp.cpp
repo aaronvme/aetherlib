@@ -31,12 +31,12 @@ void awp() {
     pros::delay(350);
     chassis.moveToPoint(-56, -9, 500, {.maxSpeed = 70});
     // chassis.swingToHeading(0, SwingSide::Right, 450, {.minSpeed = 100.0f});
-    chassis.turnToPoint(-61.5, -20, 300, {.forwards=false, .minSpeed = 100.0f});
-    chassis.moveToPoint(-61.5, -19, 450, {.forwards=false, .maxSpeed = 60, .earlyExitRange = 1});
+    chassis.turnToPoint(-59, -20, 300, {.forwards=false, .minSpeed = 100.0f});//old x=-61.5
+    chassis.moveToPoint(-59, -19, 450, {.forwards=false, .maxSpeed = 60, .earlyExitRange = 1});//old x=-61.5
     // pros::delay(300);
     chassis.swingToHeading(90, SwingSide::Left, 500, {}, false);
     // chassis.tank(-30, -70);
-    // pros::delay(500);
+    pros::delay(50);
     clawClose();
     chassis.tank(-30,-30);
     chassis.rcl().updateBotPoseFromBestSensor();
@@ -62,7 +62,7 @@ void awp() {
     // chassis.swingToHeading(180, SwingSide::Left, 250, {.minSpeed = 100});
     // chassis.moveDistance(-6, 600, {.maxSpeed = 60.0f});
     // pros::delay(250);
-    chassis.moveToPoint(-61, 16.3, 400, {.forwards=false, .maxSpeed = 65, .earlyExitRange = 2});
+    chassis.moveToPoint(-61, 15.3, 400, {.forwards=false, .maxSpeed = 65, .earlyExitRange = 2});//old y=16.3
     // pros::delay(200);
     // chassis.tank(-20, -20);
     // pros::delay(200);
@@ -94,16 +94,16 @@ void awp() {
     //pin 4
 
 
-    chassis.moveToPoint(-46.5, 0, 900, {.earlyExitRange = 2});
+    // chassis.moveToPoint(-46.5, 0, 900, {.earlyExitRange = 2});
     // chassis.turnToPoint(-26.5, -20.5, 600, {.forwards=false, .maxSpeed = 100, .earlyExitRange = 15});
-    chassis.moveToPoint(-28.3, -19.5, 1200, {.forwards=false, .maxSpeed = 75}, true);
-    pros::delay(1100);
-    clawClose();
-    pros::delay(250);
-    chassis.setBrakeMode(pros::E_MOTOR_BRAKE_COAST);
-    liftMotor.set_brake_mode(pros::E_MOTOR_BRAKE_COAST);
-    liftToPinAbove(2, 20, 1500, 127, true);
-    chassis.moveToPoint(-23.2f, -47.5f, 2000, {.forwards=false, .minSpeed = 90}, true);
+    // chassis.moveToPoint(-28.3, -19.5, 1200, {.forwards=false, .maxSpeed = 45}, true);
+    // pros::delay(1100);
+    // clawClose();
+    // pros::delay(250);
+    // chassis.setBrakeMode(pros::E_MOTOR_BRAKE_COAST);
+    // liftMotor.set_brake_mode(pros::E_MOTOR_BRAKE_COAST);
+    // liftToPinAbove(2, 20, 1500, 127, true);
+    // chassis.moveToPoint(-23.2f, -47.5f, 2000, {.forwards=false, .minSpeed = 90}, true);//old minspd=90
     
 }
 
