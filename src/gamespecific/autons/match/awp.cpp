@@ -34,7 +34,7 @@ void awp() {
     chassis.turnToPoint(-59, -20, 300, {.forwards=false, .minSpeed = 100.0f});//old x=-61.5
     chassis.moveToPoint(-59, -19, 450, {.forwards=false, .maxSpeed = 60, .earlyExitRange = 1});//old x=-61.5
     // pros::delay(300);
-    chassis.swingToHeading(90, SwingSide::Left, 500, {}, false);
+    chassis.swingToHeading(90, SwingSide::Left, 700, {}, false);
     autons::resetFromBeamsNear();
     // chassis.tank(-30, -70);
     pros::delay(50);
@@ -100,8 +100,8 @@ void awp() {
 
     chassis.moveToPoint(-46.5, 0, 900, {.earlyExitRange = 2});
     // chassis.turnToPoint(-26.5, -20.5, 600, {.forwards=false, .maxSpeed = 100, .earlyExitRange = 15});
-    chassis.moveToPoint(-29.3, -19.5,1200, {.forwards=false, .maxSpeed = 60}, true);
-    pros::delay(900);
+    chassis.moveToPoint(-30.3, -20.5,1200, {.forwards=false, .maxSpeed = 60}, true);
+    pros::delay(1000);
     clawClose();
     pros::delay(250);
     chassis.setBrakeMode(pros::E_MOTOR_BRAKE_COAST);
