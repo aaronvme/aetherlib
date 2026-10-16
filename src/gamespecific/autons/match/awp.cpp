@@ -99,8 +99,8 @@ void awp() {
 
 
     chassis.moveToPoint(-46.5, 0, 900, {.earlyExitRange = 2});
-    chassis.turnToPoint(-26.5, -20.5, 600, {.forwards=false, .maxSpeed = 100, .earlyExitRange = 15});
-    chassis.moveToPoint(-29.3, -19200, {.forwards=false, .maxSpeed = 60}, true);
+    // chassis.turnToPoint(-26.5, -20.5, 600, {.forwards=false, .maxSpeed = 100, .earlyExitRange = 15});
+    chassis.moveToPoint(-29.3, -19.5,1200, {.forwards=false, .maxSpeed = 60}, true);
     pros::delay(900);
     clawClose();
     pros::delay(250);
