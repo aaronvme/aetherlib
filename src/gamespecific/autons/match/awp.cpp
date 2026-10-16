@@ -1,7 +1,7 @@
 #include "chad/api.hpp"
 #include "pros/rtos.hpp"
 #include "gamespecific/gamespecific_api.hpp"
-
+#include "gamespecific/autons/tuning/support.hpp"
 
 namespace chad {
 void awp() {
@@ -34,10 +34,12 @@ void awp() {
     chassis.turnToPoint(-59, -20, 300, {.forwards=false, .minSpeed = 100.0f});//old x=-61.5
     chassis.moveToPoint(-59, -19, 450, {.forwards=false, .maxSpeed = 60, .earlyExitRange = 1});//old x=-61.5
     // pros::delay(300);
-    chassis.swingToHeading(90, SwingSide::Left, 500, {}, false);
+    chassis.swingToHeading(90, SwingSide::Left, 700, {}, false);
+    autons::resetFromBeamsNear();
     // chassis.tank(-30, -70);
     pros::delay(50);
     clawClose();
+    autons::resetFromBeamsNear();
     chassis.tank(-30,-30);
     chassis.rcl().updateBotPoseFromBestSensor();
     pros::delay(200);
@@ -49,9 +51,10 @@ void awp() {
     chassis.turnToPoint(-51, -20, 400, {.forwards=false, .maxSpeed = 100, .earlyExitRange = 15});
     chassis.moveToPoint(-46.8, -24, 850, {.forwards=false, .maxSpeed = 55});
     chassis.tank(-40, -40);
+    pros::delay(150);
+    liftToPin(0, 600, 55, true);
     pros::delay(100);
-    liftToPin(0, 600, 60, true);
-    pros::delay(100);
+    autons::resetFromBeamsNear();
     clawOpen();
     chassis.tank(0,0);
     chassis.rcl().updateBotPoseFromBestSensor();
@@ -67,7 +70,8 @@ void awp() {
     // chassis.tank(-20, -20);
     // pros::delay(200);
     chassis.swingToHeading(90, SwingSide::Right, 700, {.maxSpeed = 70.0f}, false);
-     chassis.tank(-60, -60);
+    chassis.tank(-60, -60);
+    autons::resetFromBeamsNear();
     pros::delay(100);
     clawClose();
     pros::delay(200);
@@ -83,7 +87,7 @@ void awp() {
     chassis.moveToPoint(-46.6, 23.6, 750, {.forwards=false, .maxSpeed = 55});
     chassis.tank(-30, -30);
     pros::delay(300);
-    liftToPin(0, 600, 60, true);
+    liftToPin(0, 600, 55, true);
     pros::delay(100);
     clawOpen();
     chassis.tank(0,0);
@@ -94,17 +98,16 @@ void awp() {
     //pin 4
 
 
-    // chassis.moveToPoint(-46.5, 0, 900, {.earlyExitRange = 2});
+    chassis.moveToPoint(-46.5, 0, 900, {.earlyExitRange = 2});
     // chassis.turnToPoint(-26.5, -20.5, 600, {.forwards=false, .maxSpeed = 100, .earlyExitRange = 15});
-    // chassis.moveToPoint(-28.3, -19.5, 1200, {.forwards=false, .maxSpeed = 45}, true);
-    // pros::delay(1100);
-    // clawClose();
-    // pros::delay(250);
-    // chassis.setBrakeMode(pros::E_MOTOR_BRAKE_COAST);
-    // liftMotor.set_brake_mode(pros::E_MOTOR_BRAKE_COAST);
-    // liftToPinAbove(2, 20, 1500, 127, true);
-    // chassis.moveToPoint(-23.2f, -47.5f, 2000, {.forwards=false, .minSpeed = 90}, true);//old minspd=90
-    
+    chassis.moveToPoint(-30.3, -20.5,1200, {.forwards=false, .maxSpeed = 60}, true);
+    pros::delay(1000);
+    clawClose();
+    pros::delay(250);
+    chassis.setBrakeMode(pros::E_MOTOR_BRAKE_COAST);
+    liftMotor.set_brake_mode(pros::E_MOTOR_BRAKE_COAST);
+    liftToPinAbove(2, 20, 1500, 127, true);
+    chassis.moveToPoint(-23.2f, -47.5f, 2000, {.forwards=false, .minSpeed = 60}, true);//old minspd=90
 }
 
 }

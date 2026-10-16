@@ -54,6 +54,8 @@ void autonomous() {
     // autonRed3Pin();
     // autonTemp();
     selector.runSelected();
+    // awpFar();
+
 }
 
 void opcontrol() {
