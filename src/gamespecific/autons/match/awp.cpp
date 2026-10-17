@@ -18,7 +18,7 @@ void awp() {
     pros::delay(500);
 
     //pin1
-    chassis.turnToPoint(-51, -20, 400, {.forwards=false, .maxSpeed = 100, .earlyExitRange = 15});
+    chassis.turnToPoint(-51, -20, 400, {.forwards=false, .maxSpeed = 80, .earlyExitRange = 15});
     chassis.moveToPoint(-50, -19, 500, {.forwards=false, .maxSpeed = 55});
     chassis.tank(-40, -40);
     pros::delay(100);
@@ -29,12 +29,12 @@ void awp() {
 
     //pin2
     pros::delay(350);
-    chassis.moveToPoint(-56, -9, 500, {.maxSpeed = 70});
+    chassis.moveToPoint(-56, -9, 500, {.maxSpeed = 60});
     // chassis.swingToHeading(0, SwingSide::Right, 450, {.minSpeed = 100.0f});
-    chassis.turnToPoint(-59, -20, 300, {.forwards=false, .minSpeed = 100.0f});//old x=-61.5
-    chassis.moveToPoint(-59, -19, 450, {.forwards=false, .maxSpeed = 60, .earlyExitRange = 1});//old x=-61.5
+    chassis.turnToPoint(-59, -15, 300, {.forwards=false, .maxSpeed = 60.0f});//old x=-61.5
+    chassis.moveToPoint(-59, -15, 450, {.forwards=false, .maxSpeed = 60, .earlyExitRange = 1});//old x=-61.5
     // pros::delay(300);
-    chassis.swingToHeading(90, SwingSide::Left, 700, {}, false);
+    chassis.swingToHeading(90, SwingSide::Left, 800, {.maxSpeed = 70}, false);
     autons::resetFromBeamsNear();
     // chassis.tank(-30, -70);
     pros::delay(50);
@@ -60,29 +60,39 @@ void awp() {
     chassis.rcl().updateBotPoseFromBestSensor();
     //pin3
 
-    chassis.moveToPoint(-61, 2, 900, {.maxSpeed = 70});
+    // pros::delay(100);
+    // chassis.moveToPoint(-34, -6, 1000);
+    // chassis.turnToPoint(-34, -8, 900, {.maxSpeed=70});
+    // chassis.moveToPoint(-59, -15, 900, {.forwards=false});
+    
+    
+
+
+
+    chassis.moveToPoint(-61, 2, 900, {.maxSpeed = 60});
     chassis.turnToHeading(175, 500, {.earlyExitRange = 30});
     // chassis.swingToHeading(180, SwingSide::Left, 250, {.minSpeed = 100});
     // chassis.moveDistance(-6, 600, {.maxSpeed = 60.0f});
     // pros::delay(250);
-    chassis.moveToPoint(-61, 15.3, 400, {.forwards=false, .maxSpeed = 65, .earlyExitRange = 2});//old y=16.3
+    chassis.moveToPoint(-61, 15.3, 400, {.forwards=false, .maxSpeed = 60, .earlyExitRange = 2});//old y=16.3
     // pros::delay(200);
     // chassis.tank(-20, -20);
     // pros::delay(200);
-    chassis.swingToHeading(90, SwingSide::Right, 700, {.maxSpeed = 70.0f}, false);
+    chassis.swingToHeading(90, SwingSide::Right, 700, {.maxSpeed = 60.0f}, false);
     chassis.tank(-60, -60);
     autons::resetFromBeamsNear();
     pros::delay(100);
     clawClose();
     pros::delay(200);
     chassis.rcl().updateBotPoseFromBestSensor();
-    
+    chassis.tank(0, 0);
 
     // ///////////////////////////
     chassis.turnToHeading(160, 300, {}, true);
+    
     liftToPinAbove(2, 60, 1500, 127, true);
 
-    chassis.moveToPoint(-58, 6, 900, {.maxSpeed = 70, .earlyExitRange = 2});
+    chassis.moveToPoint(-58, 6, 900, {.maxSpeed = 50, .earlyExitRange = 2});
     // chassis.turnToPoint(-46.6, 23.6, 400, {.forwards=false, .maxSpeed = 100, .earlyExitRange = 15});
     chassis.moveToPoint(-46.6, 23.6, 750, {.forwards=false, .maxSpeed = 55});
     chassis.tank(-30, -30);
@@ -98,16 +108,16 @@ void awp() {
     //pin 4
 
 
-    chassis.moveToPoint(-46.5, 0, 900, {.earlyExitRange = 2});
-    // chassis.turnToPoint(-26.5, -20.5, 600, {.forwards=false, .maxSpeed = 100, .earlyExitRange = 15});
-    chassis.moveToPoint(-30.3, -20.5,1200, {.forwards=false, .maxSpeed = 60}, true);
-    pros::delay(1000);
-    clawClose();
-    pros::delay(250);
-    chassis.setBrakeMode(pros::E_MOTOR_BRAKE_COAST);
-    liftMotor.set_brake_mode(pros::E_MOTOR_BRAKE_COAST);
-    liftToPinAbove(2, 20, 1500, 127, true);
-    chassis.moveToPoint(-23.2f, -47.5f, 2000, {.forwards=false, .minSpeed = 60}, true);//old minspd=90
+    // chassis.moveToPoint(-46.5, 0, 900, {.earlyExitRange = 2});
+    // // chassis.turnToPoint(-26.5, -20.5, 600, {.forwards=false, .maxSpeed = 100, .earlyExitRange = 15});
+    // chassis.moveToPoint(-30.3, -20.5,1200, {.forwards=false, .maxSpeed = 60}, true);
+    // pros::delay(1000);
+    // clawClose();
+    // pros::delay(250);
+    // chassis.setBrakeMode(pros::E_MOTOR_BRAKE_COAST);
+    // liftMotor.set_brake_mode(pros::E_MOTOR_BRAKE_COAST);
+    // liftToPinAbove(2, 20, 1500, 127, true);
+    // chassis.moveToPoint(-23.2f, -47.5f, 2000, {.forwards=false, .minSpeed = 60}, true);//old minspd=90
 }
 
 }

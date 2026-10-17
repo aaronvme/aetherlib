@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstdio>
 
+#include "pros/adi.hpp"
 #include "pros/error.h"
 #include "pros/misc.hpp"
 #include "pros/rtos.hpp"
@@ -94,6 +95,8 @@ void driverControl() {
 
     bool gripHeld = false;
     bool autoGrabToggled = clawAutoGrab();
+
+    pros::adi::Pneumatics claw('A', false);
 
     while (true) {
         if (chassis.isSettled()) {

@@ -8,7 +8,6 @@
 namespace chad {
 void autonRed3Pin() {
 //toggle========================================
-    claw.toggle();
     // chassis.startTracking();
     chassis.setBrakeMode(pros::E_MOTOR_BRAKE_COAST);
     chassis.setPose({-61.5, 0, vexToStdRad(270)});
@@ -45,6 +44,8 @@ void autonRed3Pin() {
     pros::delay(100);
     claw.toggle();
     pros::delay(500);
+    
+
 
     autons::resetFromBeamsNear();
     pros::c::controller_rumble(pros::E_CONTROLLER_MASTER, ".");
