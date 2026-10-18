@@ -680,6 +680,53 @@ double sim_side_toggle_position(int side) {
     return sideTogglePosition(toggleSide(side));
 }
 
+/// Drive side 0 left / 1 right.
+static const pros::MotorGroup* driveSide(int side) {
+    return side == 0 ? chad::drivetrain.leftMotors : chad::drivetrain.rightMotors;
+}
+
+/// Mean motor-shaft encoder position of one drive side, degrees, as read
+/// through the motor API.
+EMSCRIPTEN_KEEPALIVE
+double sim_drive_side_deg(int side) {
+    const pros::MotorGroup* g = driveSide(side);
+    if (g == nullptr || g->size() == 0) return 0.0;
+    double sum = 0.0;
+    for (int i = 0; i < g->size(); i++) sum += g->get_position(static_cast<std::uint8_t>(i));
+    return sum / g->size();
+}
+
+/// Brake mode shared by every motor on one drive side (0 coast, 1 brake,
+/// 2 hold), or -1 when they disagree.
+EMSCRIPTEN_KEEPALIVE
+int sim_drive_brake_mode(int side) {
+    const pros::MotorGroup* g = driveSide(side);
+    if (g == nullptr || g->size() == 0) return -1;
+    const auto first = g->get_brake_mode(0);
+    for (int i = 1; i < g->size(); i++) {
+        if (g->get_brake_mode(static_cast<std::uint8_t>(i)) != first) return -1;
+    }
+    return static_cast<int>(first);
+}
+
+/// Brake mode shared by every lift motor, or -1 when they disagree.
+EMSCRIPTEN_KEEPALIVE
+int sim_lift_brake_mode() {
+    const pros::MotorGroup& g = chad::liftMotor;
+    if (g.size() == 0) return -1;
+    const auto first = g.get_brake_mode(0);
+    for (int i = 1; i < g.size(); i++) {
+        if (g.get_brake_mode(static_cast<std::uint8_t>(i)) != first) return -1;
+    }
+    return static_cast<int>(first);
+}
+
+/// Chassis::setBrakeMode, as a routine calls it.
+EMSCRIPTEN_KEEPALIVE
+void sim_set_drive_brake_mode(int mode) {
+    chad::chassis.setBrakeMode(static_cast<pros::motor_brake_mode_e_t>(mode));
+}
+
 /// Field control switching to driver: what opcontrol() in src/main.cpp does
 /// on entry (main.cpp is not compiled here), then driverControl() on its own
 /// fiber, as PROS runs it.
@@ -712,6 +759,41 @@ void sim_stall_motion_task(int ms) {
         gMotionStallMs = 0;
         pros::delay(ms);
     });
+}
+
+/// Motion-loop telemetry for sim/test/near_target.mjs: 8 floats per tick
+/// {ms, type, x, y, thetaDeg, lateralOut, angularOut, settled}. Replaces any
+/// other telemetry hook (sim_stall_motion_task's included).
+static std::vector<float> gProbeBuf;
+EMSCRIPTEN_KEEPALIVE
+void sim_probe_enable() {
+    gMotionStallHooked = false;
+    chad::chassis.setTelemetry([](const chad::ChassisSample& s) {
+        if (gProbeBuf.size() > 600000) return;
+        gProbeBuf.push_back(static_cast<float>(sim::preciseMillis()));
+        gProbeBuf.push_back(static_cast<float>(s.type));
+        gProbeBuf.push_back(s.x);
+        gProbeBuf.push_back(s.y);
+        gProbeBuf.push_back(s.thetaDeg);
+        gProbeBuf.push_back(s.lateralOut);
+        gProbeBuf.push_back(s.angularOut);
+        gProbeBuf.push_back(s.settled ? 1.0f : 0.0f);
+    });
+}
+
+/// The buffered samples as a JSON array, and clear the buffer.
+EMSCRIPTEN_KEEPALIVE
+const char* sim_probe_drain() {
+    static std::string out;
+    out = "[";
+    char b[48];
+    for (std::size_t i = 0; i < gProbeBuf.size(); i++) {
+        std::snprintf(b, sizeof(b), "%s%.4g", i ? "," : "", gProbeBuf[i]);
+        out += b;
+    }
+    out += "]";
+    gProbeBuf.clear();
+    return out.c_str();
 }
 
 EMSCRIPTEN_KEEPALIVE
@@ -1301,6 +1383,8 @@ void sim_set_param(const char* name, float value) {
     else if (k == "leftScale")         p.leftScale = value;
     else if (k == "rightScale")        p.rightScale = value;
     else if (k == "encoderSlip")       p.encoderSlip = value;
+    else if (k == "driveDeadband")     p.driveDeadband = value;
+    else if (k == "pivotOffsetIn")     p.pivotOffsetIn = value;
     else if (k == "imuUnderReport")    p.imuUnderReport = value;
     else if (k == "imuDriftDegPerSec") p.imuDriftDegPerSec = value;
     else if (k == "imuNoiseDeg")       p.imuNoiseDeg = value;
@@ -1325,6 +1409,7 @@ void sim_set_param(const char* name, float value) {
     else if (k == "wallFriction")      p.wallFriction = value;
     else if (k == "squareUpRate")      p.squareUpRate = value;
     else if (k == "wallRestitution")   p.wallRestitution = value;
+    else if (k == "coastDragFrac")     p.coastDragFrac = value;
     else if (k == "imuPeriodMs")       p.imuPeriodMs = value;
     else if (k == "encoderPeriodMs")   p.encoderPeriodMs = value;
     else if (k == "encoderResolutionDeg") p.encoderResolutionDeg = value;
@@ -1501,6 +1586,8 @@ float sim_get_param(const char* name) {
     else if (k == "ekfSyncProp")       return chad::chassis.ekf().config().syncProp;
     else if (k == "ekfThetaSyncProp")  return chad::chassis.ekf().config().thetaSyncProp;
     else if (k == "encoderSlip")       return p.encoderSlip;
+    else if (k == "driveDeadband")     return p.driveDeadband;
+    else if (k == "pivotOffsetIn")     return p.pivotOffsetIn;
     else if (k == "imuUnderReport")    return p.imuUnderReport;
     else if (k == "imuDriftDegPerSec") return p.imuDriftDegPerSec;
     else if (k == "imuNoiseDeg")       return p.imuNoiseDeg;
@@ -1517,6 +1604,7 @@ float sim_get_param(const char* name) {
     else if (k == "wallFriction")      return p.wallFriction;
     else if (k == "squareUpRate")      return p.squareUpRate;
     else if (k == "wallRestitution")   return p.wallRestitution;
+    else if (k == "coastDragFrac")     return p.coastDragFrac;
     else if (k == "imuPeriodMs")       return p.imuPeriodMs;
     else if (k == "encoderPeriodMs")   return p.encoderPeriodMs;
     else if (k == "encoderResolutionDeg") return p.encoderResolutionDeg;

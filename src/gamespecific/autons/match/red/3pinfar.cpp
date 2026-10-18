@@ -39,7 +39,7 @@ void autonRed3PinFar(){
     chassis.turnToHeading(80, 500, {});
     chassis.moveToPoint(-13, -61.5, 800, {.forwards=false, .maxSpeed = 70.0f, .minSpeed = 30.0f});
     pros::delay(250);
-    chassis.swingToHeading(0, SwingSide::Right, 1200, {.minSpeed = 100.0f});
+    chassis.swingToHeading(0, SwingSide::Left, 1200, {.minSpeed = 100.0f});
     claw.toggle();
     pros::delay(250);
     chassis.turnToPoint(0, -55, 500, {}, true);

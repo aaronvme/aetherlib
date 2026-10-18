@@ -10,7 +10,7 @@ using namespace chad;
 
 void initialize() {
     chassis.calibrate();
-    liftMotor.set_brake_mode(pros::E_MOTOR_BRAKE_HOLD);
+    liftMotor.set_brake_mode_all(pros::E_MOTOR_BRAKE_HOLD);
     registerFieldObstacles();
     startPoseTelemetry();
     startClawWatch();
@@ -37,7 +37,7 @@ static void stopLeftovers() {
 }
 
 void disabled() {
-    liftMotor.set_brake_mode(pros::E_MOTOR_BRAKE_COAST);
+    liftMotor.set_brake_mode_all(pros::E_MOTOR_BRAKE_COAST);
     stopLeftovers();
 }
 
@@ -60,7 +60,7 @@ void opcontrol() {
     stopLeftovers();
     chassis.setMirror(FieldMirror::None);
     clearAutonDisableLine();
-    liftMotor.set_brake_mode(pros::E_MOTOR_BRAKE_HOLD);
+    liftMotor.set_brake_mode_all(pros::E_MOTOR_BRAKE_HOLD);
     chassis.setPose({-63.5, -7.5, vexToStdRad(0)});
     chassis.startTracking();
     clawSetAutoGrab(false);

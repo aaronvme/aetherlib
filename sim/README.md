@@ -135,7 +135,7 @@ void autonBlueLeft() {
     chassis.turnToPoint(0.0f, 0.0f, 1500);
     chassis.moveArc(24.0f, 24.0f, 20.0f, 3000);
     chassis.moveBoomerang(48.0f, 24.0f, 180.0f, 3500, {.lead = 0.6f});
-    chassis.swingToHeading(270.0f, SwingSide::Left, 1500);
+    chassis.swingToHeading(270.0f, SwingSide::Right, 1500);
     pros::delay(300);
 
     std::vector<Pose> path = {
@@ -484,6 +484,13 @@ quantisation) and nothing interesting happens. The sliders are the point.
 | `cone FOV` | 0 makes it a pencil ray; 25 is realistic |
 | `max incidence` | grazing angle past which the return is lost |
 | device rate sliders | how stale the estimator's inputs are |
+
+Two more are `sim_set_param` keys only, default 0 (off), used by
+`sim/test/near_target.mjs`: `driveDeadband` (motor command units a side needs
+before it moves -- static friction) and `pivotOffsetIn` (the body turns about a
+point this far ahead of the tracking centre, so a turn in place also moves the
+tracked pose). The default plant has neither, which is why it never circles a
+`moveToPoint` target the way a real drive can.
 
 ## Controls
 

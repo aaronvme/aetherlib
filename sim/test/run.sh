@@ -88,6 +88,16 @@ node sim/test/competition.mjs || fail=1
 # A chained move that passes beside its target must still hand off promptly.
 echo "--- chained motions ---"
 node sim/test/chaining.mjs || fail=1
+# A swing drives the side it names and holds the other, in any brake mode.
+echo "--- swing ---"
+node sim/test/swing.mjs || fail=1
+# Brake modes reach every motor in a group, not just index 0.
+echo "--- brake modes ---"
+node sim/test/brake.mjs || fail=1
+# moveToPoint's last inches on drives that pivot off the tracking centre and
+# have static friction: no circling, no timeouts, no chatter.
+echo "--- near target ---"
+node sim/test/near_target.mjs || fail=1
 echo "--- routing accuracy ---"
 node sim/test/accuracy.mjs --gate || fail=1
 

@@ -101,7 +101,7 @@ void awpFar() {
     clawClose();
     pros::delay(250);
     chassis.setBrakeMode(pros::E_MOTOR_BRAKE_COAST);
-    liftMotor.set_brake_mode(pros::E_MOTOR_BRAKE_COAST);
+    liftMotor.set_brake_mode_all(pros::E_MOTOR_BRAKE_COAST);
     liftToPinAbove(2, 20, 1500, 127, true);
     chassis.moveToPoint(-47.5f, -23.2f, 2000, {.forwards=false, .minSpeed = 90}, true);
 

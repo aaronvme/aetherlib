@@ -132,10 +132,22 @@ public:
 
     // --- configuration ------------------------------------------------------
 
-    std::int32_t set_brake_mode(MotorBrake mode) const { return setBrake(static_cast<int>(mode)); }
-    std::int32_t set_brake_mode(motor_brake_mode_e_t mode) const { return setBrake(static_cast<int>(mode)); }
     std::int32_t set_brake_mode_all(MotorBrake mode) const { return setBrake(static_cast<int>(mode)); }
     std::int32_t set_brake_mode_all(motor_brake_mode_e_t mode) const { return setBrake(static_cast<int>(mode)); }
+    // One motor, index 0 by default, as in PROS 4.2.2: setting a whole group
+    // takes set_brake_mode_all.
+    std::int32_t set_brake_mode(MotorBrake mode, const std::uint8_t index = 0) const {
+        if (index >= mPorts.size()) return PROS_ERR;
+        sim::bus().motors[mPorts[index]].brakeMode = static_cast<int>(mode);
+        return 1;
+    }
+    std::int32_t set_brake_mode(motor_brake_mode_e_t mode, const std::uint8_t index = 0) const {
+        return set_brake_mode(static_cast<MotorBrake>(mode), index);
+    }
+    MotorBrake get_brake_mode(const std::uint8_t index = 0) const {
+        if (index >= mPorts.size()) return MotorBrake::invalid;
+        return static_cast<MotorBrake>(sim::bus().motors[mPorts[index]].brakeMode);
+    }
 
     std::int32_t set_encoder_units_all(MotorUnits) const { return 1; }
     std::int32_t set_encoder_units_all(motor_encoder_units_e_t) const { return 1; }

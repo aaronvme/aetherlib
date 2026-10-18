@@ -26,6 +26,19 @@ public:
 
     void setBrakeMode(pros::motor_brake_mode_e mode);
 
+    // One side's motors in HOLD, and the brake modes they had before.
+    struct SideHold {
+        static constexpr int kMaxMotors = 8;
+        pros::MotorGroup* group{nullptr};
+        int count{0};
+        pros::MotorBrake modes[kMaxMotors]{};
+    };
+
+    // Every motor on one side to HOLD, stopped where it stands.
+    SideHold holdSide(bool left);
+    // Restores the modes holdSide() found, on motors still in HOLD.
+    void releaseSide(SideHold& hold);
+
     float averageVelocityInPerSec() const;
 
     float leftVelocityInPerSec() const;

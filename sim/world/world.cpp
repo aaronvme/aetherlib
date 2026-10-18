@@ -427,11 +427,34 @@ void World::updateDrive(double dtSec) {
     auto sideTargetIn = [&](const pros::MotorGroup* group, float scale) -> float {
         if (group == nullptr || group->ports().empty()) return 0.0f;
         const auto& m = bus().motors[group->ports()[0]];
-        return static_cast<float>(m.commandedMv / 12000.0) * vMax * scale;
+        float f = static_cast<float>(m.commandedMv / 12000.0);
+        const float db = mParams.driveDeadband / 127.0f;
+        if (db > 0.0f) {
+            const float a = std::fabs(f);
+            f = a <= db ? 0.0f : std::copysign((a - db) / (1.0f - db), f);
+        }
+        return f * vMax * scale;
     };
 
-    const float targetL = sideTargetIn(chad::drivetrain.leftMotors,  mParams.leftScale);
-    const float targetR = sideTargetIn(chad::drivetrain.rightMotors, mParams.rightScale);
+    float targetL = sideTargetIn(chad::drivetrain.leftMotors,  mParams.leftScale);
+    float targetR = sideTargetIn(chad::drivetrain.rightMotors, mParams.rightScale);
+
+    // A side at 0 V with every motor in coast exerts no torque, so the driven
+    // side drags it along rather than pivoting about it.
+    auto coasting = [](const pros::MotorGroup* group) {
+        if (group == nullptr || group->ports().empty()) return false;
+        for (std::uint8_t port : group->ports()) {
+            const auto& m = bus().motors[port];
+            if (m.commandedMv != 0.0 || m.brakeMode != 0) return false;
+        }
+        return true;
+    };
+    if (mParams.coastDragFrac > 0.0f) {
+        const bool coastL = coasting(chad::drivetrain.leftMotors);
+        const bool coastR = coasting(chad::drivetrain.rightMotors);
+        if (coastL && !coastR) targetL = mParams.coastDragFrac * targetR;
+        if (coastR && !coastL) targetR = mParams.coastDragFrac * targetL;
+    }
 
     // First-order lag toward the commanded speed. Not a physics model -- just
     // enough dynamics that PID and exit conditions face something to settle.
@@ -462,8 +485,12 @@ void World::updateDrive(double dtSec) {
     // A rebound from a hard hit rides on top of the drive's step.
     const double midTheta = mTruth.theta + dTheta * 0.5;
     const double bdx = mBounceVx * dtSec, bdy = mBounceVy * dtSec;
-    const double dx = dDist * std::cos(midTheta) + bdx;
-    const double dy = dDist * std::sin(midTheta) + bdy;
+    // Turning about a point pivotOffsetIn ahead moves the tracking centre.
+    const double po = mParams.pivotOffsetIn;
+    const double pvx = po * (std::cos(mTruth.theta) - std::cos(mTruth.theta + dTheta));
+    const double pvy = po * (std::sin(mTruth.theta) - std::sin(mTruth.theta + dTheta));
+    const double dx = dDist * std::cos(midTheta) + bdx + pvx;
+    const double dy = dDist * std::sin(midTheta) + bdy + pvy;
     const double nx = mTruth.x + dx;
     const double ny = mTruth.y + dy;
 
@@ -531,7 +558,7 @@ void World::updateDrive(double dtSec) {
     // slide, pivot or rebound -- the lateral part on the horizontal pod. A pod
     // off the tracking centre also rolls with the rotation; publishEncoders()
     // adds that per pod.
-    if (clear && bdx == 0.0 && bdy == 0.0) {
+    if (clear && bdx == 0.0 && bdy == 0.0 && po == 0.0) {
         mPodVertIn += dDist;            // the step is along the mid heading
     } else {
         const double h = theta0 + rot * 0.5;

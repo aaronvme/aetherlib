@@ -94,6 +94,10 @@ void swingToHeading(float thetaDeg, SwingSide side, float timeout = 0,
                     const SwingParams& = {}, bool async = false);
 ```
 
+`swingToHeading` drives only the `side` it names. The other side is set to
+`E_MOTOR_BRAKE_HOLD` and stopped for the swing, whatever `setBrakeMode` says,
+and gets its previous brake mode back however the swing ends.
+
 All motions run on one shared motion task, so motors and PIDs are only ever
 touched by a single thread. A blocking call waits for *its own* motion to
 finish, not merely for the queue to drain.
@@ -190,6 +194,10 @@ default.
 | `defaultMoveDistance` etc. | — | Per-motion-type parameter defaults |
 | `distanceSensors` | `{}` | For MCL/RCL |
 | `sensorMounts` | `{}` | Robot-frame mount poses, index-matched to the above |
+| `targetToleranceIn` | `1.0` | Settle radius, inches, for lateral motions whose own `targetTolerance` is negative. `config.cpp` ships `0.2`. |
+| `targetToleranceDeg` | `2.0` | Same, VEX degrees, for turns and swings. `config.cpp` ships `0.5`. |
+| `bearingHoldDist` | `1.5` | `moveToPoint`: inside this radius the robot faces the target, then holds that bearing (see [moveToPoint near the target](#movetopoint-near-the-target)). `config.cpp` ships `3.5`. |
+| `boomerangBearingHoldDist` | `1.0` | Boomerang's hold radius on its carrot. Separate from `bearingHoldDist`, so raising that does not move boomerang; at 6 in the simulator's boomerang times out. |
 | `settleTimeMs` | `0` | Settle condition must hold this long before exiting. `0` exits on the first in-tolerance sample, which can fire while still carrying velocity through the target. `config.cpp` ships `110`. |
 | `useMclTracking` / `useRclTracking` | `false` | |
 | `mclConfig` / `rclConfig` | — | See [Tracking](#tracking) |
@@ -214,6 +222,7 @@ struct MoveToPointParams {           // + lead
     float maxSpeed{127}, minSpeed{0};
     float targetTolerance{-1.0}, earlyExitRange{0.0};
     float lead{0.0};                 // declared, not read by the controller
+    float bearingHoldDist{-1.0};     // inches, negative = ChassisConfig
 };
 
 struct TurntoHeadingParams {
@@ -331,9 +340,37 @@ controls, degenerate input and a closed loop. The browser preview's
 `buildPath()` matches it deliberately, down to the minimum of two samples per
 segment, so the sim draws the curve it drives.
 
+### moveToPoint near the target
+
+Inside `bearingHoldDist` the bearing to the target swings faster than the robot
+can turn, so `moveToPoint` stops chasing it:
+
+- **Face, then hold.** Entering the radius more than 25 deg off the target, the
+  robot stops driving and turns in place; within 25 deg it holds that bearing
+  and drives along it. Turning can swing it back outside the radius (a robot
+  that pivots ahead of its tracking centre does); it then drives in on the live
+  bearing and holds on re-entry. A chained move (`minSpeed` > 0) keeps its
+  speed and holds on entry without turning first.
+- **Along-track settle.** A held bearing cannot remove sideways error, so once
+  held and within 15 deg of it, the motion settles when the along-track error
+  is inside `targetTolerance`, even if the distance is not.
+- **Stall exit.** Held, within 1.5 in along-track, and both drive sides under
+  1 in/s (motor velocity, not pose, which RCL/EKF corrections jolt) after
+  having moved: the output is under the drive's static friction and waiting
+  out the timeout gains nothing, so it counts as settled.
+
+Before this, a 1 in hold with no facing step orbited the target on a drive
+that pivots off its tracking centre, and a 0.2 in tolerance timed out on any
+drive with static friction. `sim/test/near_target.mjs` is the regression: of
+its 768 approaches, 494 timed out and 111 circled before, none after. 3.5 in is
+the smallest hold that passes it (3 in circles 7 times, 2.5 in 17); 4 also
+passes, 5 times one out.
+`targetToleranceIn` stays 0.2: with the two exits above it no longer times
+out, and it is shared with `moveDistance`, arc, boomerang and RAMSETE.
+
 ```cpp
 enum class TurnDirection { CCW, CW, SHORTEST };
-enum class SwingSide { Left, Right };   // Left = left side stationary
+enum class SwingSide { Left, Right };   // the side that drives; the other is held
 ```
 
 ### Geometry helpers
@@ -2087,16 +2124,21 @@ not 70 ms, so measure it -- but the shape of the limit is real, and a final
 pose alone cannot see it. Watch the robot, or record the peak distance past
 the target.
 
-`bearingHoldDist` stays small. `atan2` to a target at shrinking range is mostly
-noise, which a tuned angular loop chases at 591 deg/s. Holding the last good
-bearing fixes that, but too large a radius holds a stale one: 3 failures in 15
-at 1.5 in, 12 in 15 at 6 in.
+`bearingHoldDist` is not "smaller is safer". `atan2` to a target at shrinking
+range is mostly noise, which a tuned angular loop chases at 591 deg/s; holding
+the last good bearing fixes that. A hold latched while still turning used to
+hold a stale bearing (3 failures in 15 at 1.5 in, 12 in 15 at 6 in), which is
+why it was kept small -- but small enough to avoid that is small enough to
+circle. `moveToPoint` now faces the target before it holds, so 3.5 in is safe;
+see [moveToPoint near the target](#movetopoint-near-the-target).
 
-It is the boomerang's radius too. Near the target the carrot has collapsed
-onto it, so the carrot bearing is noise; its weight in the blended heading is
-only 2%, but 2% of a random angle is a degree and a half of final heading
-error that no tolerance can tighten away. Holding the bearing inside
-`bearingHoldDist` took the same motion from 1.65 deg to 0.31 deg. Dropping the
+Boomerang has its own radius, `boomerangBearingHoldDist` (1.0). Near the target
+the carrot has collapsed onto it, so the carrot bearing is noise; its weight in
+the blended heading is only 2%, but 2% of a random angle is a degree and a half
+of final heading error that no tolerance can tighten away. Holding the bearing
+inside 1.0 in took the same motion from 1.65 deg to 0.31 deg. It does not
+follow `bearingHoldDist` up: 3.5 in is harmless on the simulator, but at 6 in
+the accuracy battery's boomerang times out 1.7 in and 2.3 deg off. Dropping the
 carrot term entirely instead does NOT work: it is the only lateral authority a
 boomerang has once it is locked to the final heading, and position then
 plateaus 0.30 in out.

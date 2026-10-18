@@ -10,6 +10,22 @@
 #include "pros/motors.hpp"
 
 namespace chad {
+namespace {
+// moveToPoint, inside the bearing-hold radius. Swept on sim/test/near_target.mjs.
+// The bearing latches once facing within 25 deg; until then the robot turns in
+// place. 20 re-turns too far on a body that pivots off its tracking centre,
+// 35 leaves more cross-track and chatter.
+constexpr float kPointLatchCos = 0.906f;        // cos 25 deg
+// Along-track settling needs the heading within 15 deg of the held bearing.
+constexpr float kPointAlignedCos = 0.966f;      // cos 15 deg
+// Stall exit: both sides under 1 in/s, inside 1.5 in along-track, after the
+// drive has once exceeded 2 in/s. kP 9.5 drops under a typical drive's static
+// friction near 1 in out; 0.75 in times out on that plant.
+constexpr float kPointStallRadiusIn = 1.5f;
+constexpr float kPointStoppedInPerSec = 1.0f;
+constexpr float kPointMovingInPerSec = 2.0f;
+}
+
 Chassis::Chassis(Drivetrain& drivetrain, const OdomSensors& sensors,
                  const ChassisConfig& config)
     : mDrivetrain(drivetrain),
@@ -384,10 +400,18 @@ void Chassis::executeCurrentMotion() {
     bool bearingHeld = false;
     float heldBearing = 0.0f;
 
+    // moveToPoint: turning in place to face the target before holding its
+    // bearing; whether the drive has moved yet, so a robot that has not
+    // started is never "stalled".
+    bool pointAligning = false;
+    bool pointMoved = false;
+
     bool approachSet = false;
     float approachX = 0.0f, approachY = 0.0f;
 
     float prevLateralOut = 0.0f;
+
+    Drivetrain::SideHold swingHold;
 
     uint32_t prevTick = pros::millis();
     uint32_t wakeTick = prevTick;
@@ -450,21 +474,59 @@ void Chassis::executeCurrentMotion() {
                 distErr * std::cos(angleDiffRad(pose.theta, liveBearing));
             lateralOut = mLateralPID.update(along);
 
+            // Inside the hold radius the live bearing swings faster than the
+            // robot can turn, so it is held. Not before the robot faces it: a
+            // bearing held while turning leaves the cross-track of the turn,
+            // and driving while turning there orbits a body that pivots off
+            // its tracking centre. Facing it can swing the robot back out of
+            // the radius; it then drives in on the live bearing. A chained
+            // move (minSpeed) keeps its speed and holds on entry instead.
             float steerBearing = liveBearing;
-            if (bearingHeld) {
-                steerBearing = heldBearing;
-            } else if (distErr < req.movePointParams.bearingHoldDist) {
-                heldBearing = liveBearing;
-                bearingHeld = true;
-                steerBearing = heldBearing;
+            if (!bearingHeld &&
+                (distErr < req.movePointParams.bearingHoldDist || pointAligning)) {
+                const float faceLive = req.movePointParams.forwards
+                                           ? liveBearing : wrapRad(liveBearing + PI);
+                pointAligning = latFloor <= 0.0f &&
+                    std::cos(angleDiffRad(pose.theta, faceLive)) <= kPointLatchCos;
+                if (!pointAligning && distErr < req.movePointParams.bearingHoldDist) {
+                    heldBearing = liveBearing;
+                    bearingHeld = true;
+                }
+            }
+            if (bearingHeld) steerBearing = heldBearing;
+            if (pointAligning) {
+                lateralOut = 0.0f;
+                latFloor = 0.0f;
             }
 
             if (!req.movePointParams.forwards) {
                 steerBearing = wrapRad(steerBearing + PI);
             }
-            angularOut = mAngularPID.update(angleDiffRad(pose.theta, steerBearing));
+            const float headingErr = angleDiffRad(pose.theta, steerBearing);
+            angularOut = mAngularPID.update(headingErr);
             remainingErr = distErr;
-            settled = distErr < req.movePointParams.targetTolerance;
+
+            // A held bearing cannot remove cross-track error: once held and
+            // aligned with it, the along-track error decides.
+            const float tol = req.movePointParams.targetTolerance;
+            const float absAlong = std::fabs(along);
+            settled = distErr < tol ||
+                      (bearingHeld && absAlong < tol &&
+                       std::cos(headingErr) > kPointAlignedCos);
+
+            // Stopped short of tolerance: the output is under the drive's
+            // static friction and waiting out the timeout gains nothing.
+            // Wheel speed, not pose deltas, which RCL/EKF corrections jolt.
+            if (!mDryRun && (!pointMoved || bearingHeld)) {
+                const float wheel =
+                    std::max(std::fabs(mDrivetrain.leftVelocityInPerSec()),
+                             std::fabs(mDrivetrain.rightVelocityInPerSec()));
+                if (wheel > kPointMovingInPerSec) pointMoved = true;
+                if (bearingHeld && pointMoved && wheel < kPointStoppedInPerSec &&
+                    absAlong < kPointStallRadiusIn) {
+                    settled = true;
+                }
+            }
 
             // A chained move that passes beside its target never enters the
             // early-exit radius; it exits on crossing the line through the
@@ -583,7 +645,7 @@ void Chassis::executeCurrentMotion() {
 
             if (bearingHeld) {
                 carrotBearingRad = heldBearing;
-            } else if (distToCarrot < mConfig.bearingHoldDist) {
+            } else if (distToCarrot < mConfig.boomerangBearingHoldDist) {
                 heldBearing = carrotBearingRad;
                 bearingHeld = true;
             }
@@ -733,12 +795,14 @@ void Chassis::executeCurrentMotion() {
             }
             lateralOut = 0;
 
+            // The named side drives with its point-turn share; the other is
+            // held below.
             if (req.swingSide == SwingSide::Left) {
-                customLeft = 0;
-                customRight = clamp(angularOut, -127.0f, 127.0f);
-            } else {
                 customLeft = clamp(-angularOut, -127.0f, 127.0f);
                 customRight = 0;
+            } else {
+                customLeft = 0;
+                customRight = clamp(angularOut, -127.0f, 127.0f);
             }
             useCustomOutput = true;
 
@@ -784,7 +848,16 @@ void Chassis::executeCurrentMotion() {
         if (!mDryRun) {
             // The cancel may have landed during this tick's computation.
             if (mMotionSlot.cancelled(seq)) break;
-            mDrivetrain.setVoltage(left, right);
+            if (req.type == MotionType::Swing) {
+                // 0 V alone lets a coasting side be dragged. The held side
+                // gets HOLD once and no further commands.
+                const bool leftDrives = req.swingSide == SwingSide::Left;
+                if (swingHold.group == nullptr) swingHold = mDrivetrain.holdSide(!leftDrives);
+                if (leftDrives) mDrivetrain.setLeftVoltage(left);
+                else            mDrivetrain.setRightVoltage(right);
+            } else {
+                mDrivetrain.setVoltage(left, right);
+            }
         } else {
             float leftFrac  = left / 127.0f;
             float rightFrac = right / 127.0f;
@@ -863,6 +936,8 @@ void Chassis::executeCurrentMotion() {
         }
     }
 
+    // Every exit path, a cancel included: only brake modes, no voltage.
+    mDrivetrain.releaseSide(swingHold);
     endMotion(seq);
 }
 

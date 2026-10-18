@@ -12,7 +12,7 @@
 //   drive(distance: 12);         drive(distance: -8);
 //   boomerang(x: 10, y: 20, h: 90);
 //   arc(x: 10, y: 20, radius: 24);
-//   swing(heading: 90, side: right);
+//   swing(heading: 90, side: right);   side: the side that drives
 //   delay(ms: 300);              waitSettled();
 //   tank(left: -50, right: -50);   open loop, holds until the next one
 //   maxSpeed(80);

@@ -160,7 +160,8 @@ ChassisConfig chassisConfig = {
 
     .targetToleranceIn = 0.2f,
     .targetToleranceDeg = 0.5f,
-    .bearingHoldDist = 1.0f,
+    .bearingHoldDist = 3.5f,
+    .boomerangBearingHoldDist = 1.0f,
     .distanceSensors = distSensors,
     .sensorMounts = sensorMounts,
     .settleTimeMs = 110,

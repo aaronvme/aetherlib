@@ -130,10 +130,11 @@ export const BATTERY = [
   // stopping on it -- and a blocked swing is not the swing being measured.
   // At (-36, 0) the nearest post is 25.9 in away, which leaves 8.9 in of
   // clearance at the closest approach. Heading error is 0.17 deg either way.
-  { name: 'swing left',     start: [-36, 0, 90], noDrift: true,
-    cmd: [OP.SWING, 180, 0, 0, 2500], want: { heading: 180 } },
+  // The side named is the side that drives: both swing backward here.
   { name: 'swing right',    start: [-36, 0, 90], noDrift: true,
-    cmd: [OP.SWING, 0, 1, 0, 2500],   want: { heading: 0 } },
+    cmd: [OP.SWING, 180, 1, 0, 2500], want: { heading: 180 } },
+  { name: 'swing left',     start: [-36, 0, 90], noDrift: true,
+    cmd: [OP.SWING, 0, 0, 0, 2500],   want: { heading: 0 } },
   // 26 in is the radius of the only circle through both poses that is
   // tangent to the start heading: 24 in across and 16 in up solves
   // 24^2 + (16-R)^2 = R^2. A radius that does not fit the geometry makes the

@@ -75,7 +75,7 @@ void autonExample() {
                          .maxAccel = 40.0f},
                         false);
 
-    chassis.swingToHeading(270.0f, SwingSide::Left, 1500,
+    chassis.swingToHeading(270.0f, SwingSide::Right, 1500,
                            {.direction = TurnDirection::SHORTEST,
                             .maxSpeed = 90.0f,
                             .minSpeed = 10.0f,

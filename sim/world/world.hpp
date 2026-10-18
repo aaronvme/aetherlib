@@ -47,6 +47,15 @@ struct RobotParams {
     // Fraction of real travel the encoders fail to see (wheel slip).
     float encoderSlip{0.0f};
 
+    // Static-friction deadband, motor command units (0-127): a side commanded
+    // below it does not move, and above it the rest of the range is rescaled.
+    // 0 = none.
+    float driveDeadband{0.0f};
+    // The body turns about a point this far ahead (+) of the tracking centre,
+    // as with an off-centre mass or traction wheels, so a turn in place also
+    // translates the tracked pose. 0 = turns about the tracking centre.
+    float pivotOffsetIn{0.0f};
+
     // --- IMU ---------------------------------------------------------------
     // underReport reproduces the V5's habit of reading short. init() overwrites
     // this with the inverse of chad::imu's own scale factor so the two cancel;
@@ -122,6 +131,11 @@ struct RobotParams {
     /// Rebound speed per in/s of impact above kBounceMinInS (world.cpp). The
     /// rebound decays with responseTauMs as the drive pushes back in. 0 = none.
     float wallRestitution{0.8f};
+
+    /// A drive side at 0 V in coast is unpowered: it rolls at this fraction of
+    /// the other side's commanded speed instead of stopping. Brake and hold
+    /// stop it. 0 = every 0 V side stops, as before.
+    float coastDragFrac{0.0f};
 
     // Robot footprint, used for collision and drawing.
     /// Let the localization beams stop on pins and cups. Off, because a 1.6 in

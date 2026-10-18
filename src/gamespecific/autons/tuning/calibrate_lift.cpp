@@ -123,7 +123,7 @@ void autonCalibrateLift() {
         return;
     }
 
-    liftMotor.set_brake_mode(pros::E_MOTOR_BRAKE_COAST);
+    liftMotor.set_brake_mode_all(pros::E_MOTOR_BRAKE_COAST);
 
     waitForA(out, "move arm to its LOW stop");
     const double loRaw = liftPosition();

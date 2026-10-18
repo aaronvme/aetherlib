@@ -9,6 +9,8 @@ enum class TurnDirection {
     SHORTEST
 };
 
+// The side that drives in swingToHeading. The other side is held in HOLD for
+// the swing and gets its brake mode back afterwards.
 enum class SwingSide {
     Left,
     Right

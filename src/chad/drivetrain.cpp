@@ -40,8 +40,36 @@ void Drivetrain::setVoltage(float left, float right) {
 }
 
 void Drivetrain::setBrakeMode(pros::motor_brake_mode_e mode) {
-    if (leftMotors != nullptr) leftMotors->set_brake_mode(mode);
-    if (rightMotors != nullptr) rightMotors->set_brake_mode(mode);
+    // set_brake_mode(mode) on a group sets only motor 0.
+    if (leftMotors != nullptr) leftMotors->set_brake_mode_all(mode);
+    if (rightMotors != nullptr) rightMotors->set_brake_mode_all(mode);
+}
+
+Drivetrain::SideHold Drivetrain::holdSide(bool left) {
+    SideHold hold;
+    hold.group = left ? leftMotors : rightMotors;
+    if (hold.group == nullptr) return hold;
+    const int n = hold.group->size();
+    hold.count = (n < SideHold::kMaxMotors) ? n : SideHold::kMaxMotors;
+    for (int i = 0; i < hold.count; i++) {
+        const auto idx = static_cast<std::uint8_t>(i);
+        hold.modes[i] = hold.group->get_brake_mode(idx);
+        hold.group->set_brake_mode(pros::MotorBrake::hold, idx);
+    }
+    hold.group->brake();
+    return hold;
+}
+
+void Drivetrain::releaseSide(SideHold& hold) {
+    if (hold.group == nullptr) return;
+    for (int i = 0; i < hold.count; i++) {
+        const auto idx = static_cast<std::uint8_t>(i);
+        // A mode set since holdSide() is the caller's; leave it.
+        if (hold.modes[i] == pros::MotorBrake::invalid ||
+            hold.group->get_brake_mode(idx) != pros::MotorBrake::hold) continue;
+        hold.group->set_brake_mode(hold.modes[i], idx);
+    }
+    hold = SideHold{};
 }
 
 namespace {

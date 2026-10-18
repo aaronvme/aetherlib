@@ -72,7 +72,7 @@ void autonTuneLiftPresets() {
         return;
     }
 
-    liftMotor.set_brake_mode(pros::E_MOTOR_BRAKE_HOLD);
+    liftMotor.set_brake_mode_all(pros::E_MOTOR_BRAKE_HOLD);
 
     double deg[kPresets];
     for (int i = 0; i < kPresets; ++i) {

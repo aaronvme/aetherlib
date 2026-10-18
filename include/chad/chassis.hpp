@@ -49,6 +49,8 @@ struct ChassisConfig {
     float targetToleranceIn{1.0f};
     float targetToleranceDeg{2.0f};
     float bearingHoldDist{1.5f};
+    // Boomerang's hold radius on the carrot, separate from moveToPoint's.
+    float boomerangBearingHoldDist{1.0f};
 
     std::array<pros::Distance*, MAX_DISTANCE_SENSORS> distanceSensors{};
 
