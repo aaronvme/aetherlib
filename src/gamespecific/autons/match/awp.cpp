@@ -108,16 +108,16 @@ void awp() {
     //pin 4
 
 
-    // chassis.moveToPoint(-46.5, 0, 900, {.earlyExitRange = 2});
-    // // chassis.turnToPoint(-26.5, -20.5, 600, {.forwards=false, .maxSpeed = 100, .earlyExitRange = 15});
-    // chassis.moveToPoint(-30.3, -20.5,1200, {.forwards=false, .maxSpeed = 60}, true);
-    // pros::delay(1000);
-    // clawClose();
-    // pros::delay(250);
-    // chassis.setBrakeMode(pros::E_MOTOR_BRAKE_COAST);
-    // liftMotor.set_brake_mode(pros::E_MOTOR_BRAKE_COAST);
-    // liftToPinAbove(2, 20, 1500, 127, true);
-    // chassis.moveToPoint(-23.2f, -47.5f, 2000, {.forwards=false, .minSpeed = 60}, true);//old minspd=90
+    chassis.moveToPoint(-46.5, 0, 900, {.earlyExitRange = 2});
+    // chassis.turnToPoint(-26.5, -20.5, 600, {.forwards=false, .maxSpeed = 100, .earlyExitRange = 15});
+    chassis.moveToPoint(-30.3, -20.5,1200, {.forwards=false, .maxSpeed = 60}, true);
+    pros::delay(1100);
+    clawClose();
+    pros::delay(250);
+    chassis.setBrakeMode(pros::E_MOTOR_BRAKE_COAST);
+    liftMotor.set_brake_mode(pros::E_MOTOR_BRAKE_COAST);
+    liftToPinAbove(2, 20, 1500, 127, true);
+    chassis.moveToPoint(-23.2f, -47.5f, 2000, {.forwards=false, .minSpeed = 60}, true);//old minspd=90
 }
 
 }
